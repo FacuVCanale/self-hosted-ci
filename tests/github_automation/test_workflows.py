@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import os
+import subprocess
 import re
+import tempfile
 import unittest
 
 
@@ -140,7 +144,7 @@ class HostedReusableGateWorkflowTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.text = (ACTIVE_WORKFLOWS / "ci-gate.yml").read_text(encoding="utf-8")
 
-    def test_base_and_merge_shas_are_server_canonical_and_not_caller_inputs(self) -> None:
+    def test_base_and_local_merge_policy_are_server_canonical_and_not_caller_inputs(self) -> None:
         inputs = self.text.split("jobs:", 1)[0]
         self.assertNotIn("tested_merge_sha:", inputs)
         self.assertNotIn("base_sha:", inputs)
@@ -149,7 +153,9 @@ class HostedReusableGateWorkflowTests(unittest.TestCase):
         self.assertNotIn("--arg tested_merge_sha", acquire_payload)
         self.assertNotIn("--arg base_sha", acquire_payload)
         self.assertIn("printf 'base_sha=%s", acquire_payload)
-        self.assertIn("printf 'tested_merge_sha=%s", acquire_payload)
+        self.assertIn("printf 'head_sha=%s", acquire_payload)
+        self.assertIn("printf 'merge_policy_version=%s", acquire_payload)
+        self.assertIn("printf 'runner_image=%s", acquire_payload)
 
     def test_acquire_retries_only_retryable_canonical_unavailability(self) -> None:
         acquire = self.text.split("Prepare Check and acquire hosted gate generation atomically", 1)[1]
@@ -163,11 +169,115 @@ class HostedReusableGateWorkflowTests(unittest.TestCase):
         self.assertIn('"$retry_after" -gt 180', acquire)
         self.assertEqual(1, acquire.count("payload=\"$(jq"))
 
-    def test_quality_and_finalize_use_only_acquire_merge_output(self) -> None:
-        output = "${{ needs.acquire.outputs.tested_merge_sha }}"
-        self.assertIn(f"ref: {output}", self.text)
-        self.assertEqual(3, self.text.count(output))
+    def test_quality_builds_exact_local_ort_merge_without_oidc_or_file_protocol(self) -> None:
+        quality = self.text.split("  quality:", 1)[1].split("  finalize:", 1)[0]
+        self.assertIn("ref: ${{ needs.acquire.outputs.base_sha }}", quality)
+        self.assertIn('refs/pull/${PR_NUMBER}/head:refs/ci-gate/head', quality)
+        self.assertIn('git merge -s ort --no-ff --no-commit "$HEAD_SHA"', quality)
+        self.assertIn('git_version="$(git --version)"', quality)
+        self.assertNotIn("git version 2.51.0", quality)
+        self.assertIn('test "$EXPECTED_RUNNER_IMAGE" = ubuntu-24.04', quality)
+        self.assertIn('git commit-tree "$tested_tree_sha" -p "$BASE_SHA" -p "$HEAD_SHA"', quality)
+        self.assertIn('merge_base_sha="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"', quality)
+        self.assertIn('test "$(git rev-parse HEAD^1)" = "$BASE_SHA"', quality)
+        self.assertIn('test "$(git rev-parse HEAD^2)" = "$HEAD_SHA"', quality)
+        self.assertIn('test "$(git rev-parse HEAD^{tree})" = "$tested_tree_sha"', quality)
+        self.assertIn("GIT_CONFIG_NOSYSTEM=1", quality)
+        self.assertIn("GIT_ATTR_NOSYSTEM=1", quality)
+        self.assertIn("core.attributesFile /dev/null", quality)
+        self.assertIn("protocol.file.allow never", quality)
+        self.assertNotIn("protocol.file.allow always", quality)
+        self.assertNotIn("id-token: write", quality)
+        self.assertNotIn("secrets.", quality)
+
+    def test_host_attributes_are_disabled_by_the_executable_merge_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            hostile_attributes = repo / "host-attributes"
+            hostile_attributes.write_text("*.txt merge=ours\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "--local", "core.attributesFile", str(hostile_attributes)],
+                cwd=repo,
+                check=True,
+            )
+            before = subprocess.run(
+                ["git", "check-attr", "merge", "--", "sample.txt"],
+                cwd=repo,
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.strip()
+            self.assertEqual("sample.txt: merge: ours", before)
+
+            env = {
+                **os.environ,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_ATTR_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+            }
+            subprocess.run(
+                ["git", "config", "--local", "core.attributesFile", "/dev/null"],
+                cwd=repo,
+                check=True,
+                env=env,
+            )
+            after = subprocess.run(
+                ["git", "check-attr", "merge", "--", "sample.txt"],
+                cwd=repo,
+                check=True,
+                text=True,
+                capture_output=True,
+                env=env,
+            ).stdout.strip()
+            self.assertEqual("sample.txt: merge: unspecified", after)
+
+    def test_git_version_is_observed_dynamically_and_matches_evidence_contract(self) -> None:
+        observed = subprocess.run(
+            ["git", "--version"], check=True, text=True, capture_output=True,
+        ).stdout.strip()
+        self.assertRegex(
+            observed,
+            r"^git version [0-9]+\.[0-9]+\.[0-9]+(?:\.[A-Za-z0-9.-]+)?(?: \(Apple Git-[0-9]+\))?$",
+        )
+        self.assertIn("git_version: ${{ steps.toolchain.outputs.git_version }}", self.text)
+        self.assertIn("GIT_VERSION: ${{ needs.quality.outputs.git_version }}", self.text)
+
+    def test_conflict_or_unrelated_history_fails_quality_without_running_command(self) -> None:
+        quality = self.text.split("  quality:", 1)[1].split("  finalize:", 1)[0]
+        self.assertIn("continue-on-error: true", quality)
+        self.assertIn("if: steps.merge.outcome == 'success'", quality)
+        self.assertIn('if [[ "$CHECKOUT" == success && "$MERGE" == success && "$EXECUTE" == success ]]', quality)
+        self.assertIn('test "$conclusion" = success', quality)
+
+    def test_finalize_binds_local_merge_evidence(self) -> None:
+        finalize = self.text.split("  finalize:", 1)[1]
+        for field in (
+            "merge_policy_version", "merge_base_sha", "tested_tree_sha",
+            "local_commit_sha", "command_digest", "git_version", "runner_image",
+        ):
+            self.assertIn(field, finalize)
+        self.assertIn("ci-gate-local-ort-evidence-v1", finalize)
         self.assertNotIn("inputs.tested_merge_sha", self.text)
+
+    def test_local_merge_uses_a_fresh_durable_object_namespace(self) -> None:
+        config = json.loads((ROOT / "gate-service" / "wrangler.jsonc").read_text(encoding="utf-8"))
+        binding = config["durable_objects"]["bindings"]
+        self.assertEqual([{"name": "RUNNER_POOLS_V2", "class_name": "LocalMergeRunnerPoolGate"}], binding)
+        self.assertNotIn("migrations", config)
+        self.assertEqual(
+            {"type": "durable-object", "storage": "sqlite"},
+            config["exports"]["RunnerPoolGate"],
+        )
+        self.assertEqual(
+            {"type": "durable-object", "storage": "sqlite"},
+            config["exports"]["LocalMergeRunnerPoolGate"],
+        )
+        self.assertNotIn("RunnerPoolGate", {item["class_name"] for item in binding})
+        worker_entrypoint = (ROOT / "gate-service" / "src" / "index.ts").read_text(encoding="utf-8")
+        self.assertIn('export { RunnerPoolGate } from "./legacy-runner-pool-gate"', worker_entrypoint)
+        self.assertNotIn("LocalMergeRunnerPoolGate as RunnerPoolGate", worker_entrypoint)
 
 
 if __name__ == "__main__":

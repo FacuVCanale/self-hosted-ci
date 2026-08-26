@@ -45,6 +45,20 @@ class SchemaConfigTests(unittest.TestCase):
         self.assertEqual("unverified", report["external_authority"])
         self.assertEqual("not_provided", report["evidence_bundle"])
 
+    def test_validator_rejects_incompatible_local_merge_semantics(self) -> None:
+        path = ROOT / "scripts/validate-github-automation.py"
+        spec = importlib.util.spec_from_file_location("validate_github_automation_semantics", path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        for incompatible in module.INCOMPATIBLE_LOCAL_MERGE_CLAIMS:
+            with self.subTest(incompatible=incompatible):
+                errors = module._normative_semantic_errors({"normative.md": incompatible})
+                self.assertEqual(
+                    [f"normative-local-merge-contradiction:normative.md:{incompatible}"],
+                    errors,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

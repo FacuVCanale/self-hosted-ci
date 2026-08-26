@@ -7,6 +7,9 @@ export default defineConfig({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
         compatibilityDate: "2026-08-22",
+        durableObjects: {
+          LEGACY_RUNNER_POOLS: "RunnerPoolGate",
+        },
         bindings: {
           ACTIVATION_MODE: "active",
           GITHUB_APP_ID: "111",

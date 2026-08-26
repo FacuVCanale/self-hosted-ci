@@ -2,9 +2,13 @@
 
 Status: **APPROVAL-READY**, normative for `prd-self-hosted-github-automation.md`.
 
+The active hosted MVP uses the `local-ort-v1` contract throughout this
+document. GitHub merge fields/refs and merge-targeted Checks are not protocol
+inputs or authorities.
+
 ## Proof sequence
 
-1. Prove protocol, SHA tuple, check target/source, default-branch dispatch, and mergeability in a disposable private sandbox.
+1. Prove protocol, canonical head/base tuple, head-targeted Check source, default-branch dispatch, and local ort merge behavior in a disposable public sandbox.
 2. Prove generation ownership, same-SHA serialization, formal claim, failure taxonomy, watchdog, and reconciliation.
 3. Prove dedicated WSL distro isolation and one-job cleanup without production credentials.
 4. Prove personal-repo JIT and organization runner-group authority separately.
@@ -18,13 +22,18 @@ Status: **APPROVAL-READY**, normative for `prd-self-hosted-github-automation.md`
 Every PR attempt proves:
 
 ```text
-check_target_sha == tested_merge_sha
-tested_sha == tested_merge_sha
-logical_key binds head_sha; generation binds base_sha + tested_merge_sha
+check_target_sha == server-canonical head_sha
+logical_key binds head_sha; generation binds base_sha + merge_policy_version(local-ort-v1)
+quality fetches refs/pull/<PR>/head separately and verifies exact head_sha
+quality starts at exact base_sha and requires merge_base(base_sha, head_sha)
+tested_tree_sha == tree(git merge -s ort --no-ff --no-commit head_sha)
+local_commit_sha has exact parents [base_sha, head_sha], tested_tree_sha, fixed identity and fixed time
+successful transition re-resolves the current head/base snapshot before CAS
+head/base drift cannot conclude success; historical failure remains deliverable
 dispatch ref == current trusted default branch
-child git HEAD == tested_sha
+quality git HEAD == recorded local_commit_sha
 child repository/pr/generation/backend == coordinator package
-ci-gate source == dedicated private ci-gate App ID
+ci-gate source == dedicated ci-gate App ID
 dispatch uses GitHub REST 2026-03-10 + HTTP 200 exact workflow_run_id/run_url/html_url receipt
 execution_trust_policy_version == 1
 execution_trust_attestation_authority_version == 1
@@ -47,7 +56,7 @@ Coordinator evidence proves no PR checkout, PR-local action/script, PR artifact 
 | ID | Scenario | Required result/evidence |
 |---|---|---|
 | S01 | Repo absent from registry | No local dispatch/App access; GitHub-hosted unchanged |
-| S02 | Personal trusted repo, runner online | Repo-scoped JIT; one local child; exact tested SHA; gate reflects local |
+| S02 | Personal trusted repo, runner online | Repo-scoped JIT; one local child; exact canonical base/head and recorded local artifact; gate reflects local |
 | S03 | Authorized org repo | Exact restricted org runner group; local child allowed |
 | S04 | Org lacks admin/App/group authority | Preflight fails closed; GitHub path remains |
 | S05 | Runner offline for 10m | Formal claim false; persist winner GitHub; one fallback |
@@ -58,10 +67,10 @@ Coordinator evidence proves no PR checkout, PR-local action/script, PR artifact 
 | S10 | Late local success after fallback | `late_ignored`; gate/winner unchanged |
 | S11 | Late local failure after fallback | `late_ignored`; fallback result unchanged |
 | S12 | New head SHA during attempt | Old is stale; only new tuple/generation can pass |
-| S13 | Base/merge changes with same head | Old merge cannot satisfy gate; new tested merge required |
-| S14 | Wrong/unavailable `tested_sha` input | Reject before quality; never substitute head |
+| S13 | Base changes with same head | Old generation cannot satisfy gate; a new canonical base and local artifact are required |
+| S14 | Wrong/unavailable canonical head or base | Reject before quality; never substitute an event-supplied merge SHA |
 | S15 | Child dispatch uses PR/non-default ref | Reject and block |
-| S16 | Checkout HEAD differs from `tested_sha` | Stop before quality; never success |
+| S16 | Final local HEAD/tree/parents differ from recorded local artifact | Stop before quality; never success |
 | S17 | Duplicate synchronize/event delivery | One logical owned generation; duplicate no-op |
 | S18 | Manual same-SHA rerun while active | Serialized; no concurrent owner; bounded generation |
 | S19 | Coordinator dies after creating gate | Heartbeat TTL; watchdog fences/recovers or blocks within SLA |
@@ -146,7 +155,7 @@ Coordinator evidence proves no PR checkout, PR-local action/script, PR artifact 
 | S98 | Crash pre-select and inside post-select/pre-complete transaction | Pre-commit leaves no winner/result/outbox or atomically committed trio—never partial; retry converges according to winner |
 | S99 | Crash after local transaction commit before outbox delivery/check mutation | Winner/result/outbox persist; reconciler delivers once effectively to exact Check Run; GitHub selection/local duplicate fence/idempotent |
 | S100 | Dedicated-App Check response ambiguous, then same/different evidence retries | GET exact Check Run/evidence marker resolves ambiguity; same evidence idempotent, different evidence conflicts; at most one external logical mutation |
-| S101 | Canonical local tests reach authoritative timely terminal functional failure after valid admission+marker | Failure API validates authentic admission/marker, current owner/lease/generation, exact child run/job, tested merge/command and authoritative `terminal_at<=deadline`; atomically commits local failure/evidence/outbox |
+| S101 | Canonical local tests reach authoritative timely terminal functional failure after valid admission+marker | Failure API validates authentic admission/marker, current owner/lease/generation, exact child run/job, canonical base/head, local artifact/command and authoritative `terminal_at<=deadline`; atomically commits local failure/evidence/outbox |
 | S102 | Current proof expires, is revoked or drifts after valid historical admission but before timely failure | Only failure may commit from the authentic admission; local success still fails current-proof validation. Admission/proof transition is audited and failure can never become success |
 | S103 | Timely admitted local failure races GitHub/timeout winner in failure-first, GitHub-first and simultaneous schedules, with crashes before/inside/after transaction | Failure-first remains final failure; GitHub/timeout-first makes failure evidence-only; exact-job reread prevents timeout from ignoring already-visible timely failure; one immutable winner/terminal/outbox |
 | S104 | Local-failure outbox delivery or dedicated-App response is ambiguous and is retried | Same failure evidence is idempotent; different evidence conflicts; success-shaped retry rejects; exact Check Run read-back converges to at most one logical failure mutation |
@@ -191,14 +200,14 @@ Coordinator evidence proves no PR checkout, PR-local action/script, PR artifact 
 ### Protocol/SHA
 
 - Reject unknown version, missing/short SHA, wrong repo ID, backend, workflow ref, or tuple relation.
-- Assert PR check target and tested SHA both equal synthetic merge.
-- Logical key binds head; generation binds base+tested merge; head/base movement invalidates prior generation.
-- Dispatch ref is trusted default; checkout ref is detached tested SHA.
+- Assert the PR Check target equals the server-canonical head SHA; the tested artifact is the deterministic local commit/tree produced from the canonical base and head.
+- Logical key binds head; generation binds base plus `merge_policy_version`; head/base movement invalidates the prior generation.
+- Dispatch ref is trusted default; quality checks out the exact base, imports the exact PR head, constructs the local commit, and runs with `HEAD` at that local commit.
 - Full exact SHA comparisons; no branch inference.
 - Dedicated App ID is the only accepted `ci-gate` source; native workflow/job, commit status and foreign-App collisions reject.
 - GitHub REST `2026-03-10` is required and the exact HTTP 200 `workflow_run_id`, `run_url`, `html_url` receipt is consumed directly; URLs bind the repository and run ID.
-- Local package requires `execution_trust_mode=exact-sha-attestation`; it carries `local_result_kind`, admission ID/digest, exact child run/job, marker-core digest, tested merge, canonical-command digest and authoritative `terminal_at`. Fallback package requires `backend=github` plus `execution_trust_mode=github-hosted` and null/evidence-only attestation/admission fields. Crossed result kinds, identities, digests or modes reject.
-- Hosted conclusion predicate requires immutable GitHub winner, current lease, logical/generation/current tuple, exact tested merge/check target, canonical command, trustworthy hosted child/deadline and dedicated App; no attestation input.
+- Local package requires `execution_trust_mode=exact-sha-attestation`; it carries `local_result_kind`, admission ID/digest, exact child run/job, marker-core digest, canonical base/head plus local-merge evidence, canonical-command digest and authoritative `terminal_at`. Fallback package requires `backend=github` plus `execution_trust_mode=github-hosted` and null/evidence-only attestation/admission fields. Crossed result kinds, identities, digests or modes reject.
+- Hosted conclusion predicate requires immutable GitHub winner, current lease, logical/generation/current tuple, exact head-targeted Check, canonical base/head and local-merge evidence, canonical command, trustworthy hosted child/deadline and dedicated App; no attestation input.
 
 ### `ci-gate` App authority v1
 
@@ -215,7 +224,7 @@ Coordinator evidence proves no PR checkout, PR-local action/script, PR artifact 
 - Acquire/heartbeat/select/complete reject wrong owner/generation.
 - Winner immutable; same-SHA generations serialize.
 - Attestation failure before winner calls the GitHub-only selector/fence idempotently once only at dispatch, claim, pre-marker admission or local success. There is no generic local completion selector.
-- `create_local_admission_after_pre_marker_verify` rejects every non-success/currently-invalid verifier decision and atomically creates admission+marker only once. Record binds attestation/envelope/nonce, policy/manifest/key, head/gate generation, exact child run/job, tested merge, owner/lease epoch, verifier decision ID/time, execution deadline and marker-core digest. Marker contains admission ID/digest; crash hooks prove neither-or-complete pair and zero PR work; caller metadata cannot forge either.
+- `create_local_admission_after_pre_marker_verify` rejects every non-success/currently-invalid verifier decision and atomically creates admission+marker only once. Record binds attestation/envelope/nonce, policy/manifest/key, canonical base/head and gate generation, exact child run/job, local artifact, owner/lease epoch, verifier decision ID/time, execution deadline and marker-core digest. Marker contains admission ID/digest; crash hooks prove neither-or-complete pair and zero PR work; caller metadata cannot forge either.
 - `complete_local_success_if_authorized` covers wrong owner/lease/generation/evidence, GateStore-clock expiry, local/GitHub competing winner, same-evidence retry and different-evidence conflict. Winner+success terminal+outbox is all-or-nothing.
 - `complete_local_failure_if_current` independently resolves stored admission/marker and authoritative exact-job terminal observation; caller IDs/digests/time are expectation-only. Reject absent/forged/mismatch, wrong execution tuple, `terminal_at>D`, nonfunctional/success-shaped evidence or prior winner. Admission failure is no-winner `CONTROL_FAILURE`; D+1 is evidence-only/fallback. Same evidence is idempotent; committed failure cannot become success.
 - Outbox key is stable over logical key/generation/winner/evidence digest; only committed record may enqueue. Known Check Run read-back resolves ambiguous response and converges repeated delivery to one logical mutation.
@@ -228,7 +237,7 @@ Coordinator evidence proves no PR checkout, PR-local action/script, PR artifact 
 - Retry/dispatch/cancel bounded and idempotent.
 - `bindAttestationNonce` is atomic: first exact binding succeeds, same-tuple retry is idempotent, any different generation/head-generation/envelope/target is replay and causes no external effect.
 - Signed envelope digest/reference must resolve immutably and match canonical bytes; copied protocol metadata without the envelope/signature never authorizes.
-- Admission/marker create is owner-fenced, immutable, control-clocked and atomic. Marker core binds logical key/generation/run/job/tested SHA/wrapper; admission binds full authority/execution tuple and marker-core digest; final marker binds admission ID/digest.
+- Admission/marker create is owner-fenced, immutable, control-clocked and atomic. Marker core binds logical key/generation/run/job/canonical base/head/local artifact/wrapper; admission binds the full authority/execution tuple and marker-core digest; final marker binds admission ID/digest.
 - Marker persist failure is `CONTROL_FAILURE` and blocks process spawn/fallback inference.
 
 ### Claim/taxonomy
@@ -277,9 +286,9 @@ Parameterized tests use `T-1s`, `T`, and `T+1s` for heartbeat, lease, watchdog, 
 
 ## Integration tests
 
-Use disposable private personal sandbox and selected disposable org repo:
+Use a disposable public personal sandbox and, when explicitly selected, a disposable public organization repository:
 
-- Create/update `ci-gate` on exact synthetic merge SHA using only a short-lived installation token from the dedicated private App; inspect/pin App ID.
+- Create/update `ci-gate` on the exact server-canonical head SHA using only a short-lived installation token from the dedicated App; inspect/pin App ID. Build and record the deterministic local ort artifact separately.
 - Mint from authorized coordinator only, narrow token to exact installation/repo/permissions and ≤1h; call Contents, status and administration APIs and require denial while Check Run write succeeds.
 - Verify key/JWT/token absent from child jobs, environments exposed to PR processes, logs, artifacts, caches and runner image.
 - Execute offline-root-signed online-key rotation/revoke and compromise recovery; retiring cannot sign new proofs, revoked key/proofs fail, and no per-attestation revocation API exists in v1.
@@ -287,14 +296,14 @@ Use disposable private personal sandbox and selected disposable org repo:
 - Prove base-trusted `pull_request_target` and absence of checkout.
 - Prove its automatic workflow/job check has a distinct name and cannot satisfy `ci-gate`.
 - Inject hostile title/body/branch/ref/filename strings and prove no executable interpolation.
-- Dispatch trusted default-branch child with `tested_sha`.
+- Dispatch the trusted default-branch child with the server-canonical base/head tuple; construct the local artifact inside the isolated quality job.
 - Pin GitHub REST `2026-03-10`; require HTTP 200 exact `workflow_run_id`, `run_url`, `html_url`; reject 204/no-ID, missing/extra fields, crossed repository/run URLs and ambiguous schemas without listing/guessing runs.
-- Resolve synthetic merge, checkout exact detached SHA, verify HEAD.
+- Construct the deterministic local ort artifact from the exact canonical base/head, then verify the resulting tree, parents and detached `HEAD`.
 - Use wrapper outside PR workspace to successfully pre-marker verify and atomically persist admission+marker, then prove both precede the first intercepted npm/pip/install/build/script process. Deny verifier/admission/marker persistence separately and prove zero PR-dependent child processes.
 - Observe formal claim through Runs/Jobs APIs.
 - Cancel queued/running child; prove late fencing.
 - Run S95–S108 with GateStore/GitHub authoritative clocks, transaction crash hooks and outbox/Check API fault injection. Enumerate success-first, timely-admitted-failure-first, GitHub/timeout-first and simultaneous schedules; admission missing/forged/mismatched; D-1/D/D+1; and pre-commit/post-commit/pre-delivery/ambiguous-response retries.
-- For hosted conclusion, independently corrupt winner, lease, logical/generation/tuple, tested merge/check target, canonical command, hosted run/job identity, deadline and App source; each blocks. Changing only attestation after GitHub winner does not.
+- For hosted conclusion, independently corrupt winner, lease, logical/generation/tuple, canonical base/head, local artifact, head-targeted Check, canonical command, hosted run/job identity, deadline and App source; each blocks. Changing only attestation after GitHub winner does not.
 - Stall normal cancel, exercise bounded force-cancel, crash midway, and resume through reconciler once.
 - Exercise pilot Check-backed GateStore, same-SHA serialization, stale rejection.
 - Kill coordinator at each side-effect boundary; run watchdog/reconciler.
@@ -344,10 +353,10 @@ Validate the machine JSON against schema; independently recompute hard-gate elig
 - Run S02, S05, S08–S13, S17–S35 in sandbox.
 - On the selected pilot repository, require three consecutive local successes and three offline fallbacks.
 - Before any local-success pilot, create a valid authority-v1 signed attestation for that exact repo/PR/head/head-generation in response to the explicit target request and pass all four verifier gates; otherwise expected result is GitHub-hosted. Inventory completeness/approval alone is never sufficient.
-- Compare canonical `make test`, tested SHA, environment contract, artifacts and conclusions across backends.
+- Compare canonical `make test`, canonical base/head, local artifact, environment contract and conclusions across backends.
 - Preserve GitHub-hosted `artifact-manifest`, `supply-chain`, `secret-scan`.
 - Only `ci-gate` is newly required and expected source pinned; attempts cannot satisfy protection.
-- Required source is the dedicated private App; same-name checks/statuses cannot satisfy protection.
+- Required source is the dedicated App; same-name checks/statuses cannot satisfy protection.
 - Confirm push-main `CI`, `verify-release.sh`, and Railway deploy.
 - Run disable twice and enable twice; second call is no-op with audit.
 
@@ -374,7 +383,7 @@ Before either mode, verify reviewer remains inert/BLOCKED without an approved `d
 
 ## Observability/SLA
 
-Record GateStore server decision time, winner transaction, `local_result_kind`, admission ID/digest/validation, verifier decision ID/time, exact child run/job, marker/tested-merge/canonical-command digests, authoritative `terminal_at`, persisted deadline/comparator result, terminal failure source, proof role (`current_authority_for_success|historical_admission_for_failure|audit_only`), outbox ID/key/state/attempt, Check Run ID, ambiguity/read-back and logical mutation digest. Never log secrets.
+Record GateStore server decision time, winner transaction, `local_result_kind`, admission ID/digest/validation, verifier decision ID/time, exact child run/job, marker/canonical-base/head/local-artifact/canonical-command digests, authoritative `terminal_at`, persisted deadline/comparator result, terminal failure source, proof role (`current_authority_for_success|historical_admission_for_failure|audit_only`), outbox ID/key/state/attempt, Check Run ID, ambiguity/read-back and logical mutation digest. Never log secrets.
 
 Alert on two winner records, admission without successful pre-marker decision, missing/forged/mismatched admission, terminal without outbox, outbox without terminal, different-evidence retry, Check marker mismatch, `terminal_at>D` winning, success using historical admission, timely admitted failure incorrectly requiring current proof, success-shaped evidence entering failure API, winning failure replaced, GitHub-first late failure mutating Check, or multiple logical conclusions.
 
@@ -398,7 +407,7 @@ Watchdog SLA: within one scheduled interval plus API tolerance, resume a valid o
 
 ## Evidence bundle
 
-Preserve without secrets: protocol package; GateStore ownership/transitions/heartbeats; admission record/digest and verifier decision; Check ID/name/source/target; child run/job and claim proof; `git rev-parse HEAD`; marker/admission/tested-merge/command binding; authoritative terminal/deadline evidence; result kind/taxonomy/proof role; winner/terminal/outbox transaction; cancel/fallback/late events; cleanup/registration inventory; ruleset mergeability; reviewer reconciliation.
+Preserve without secrets: protocol package; GateStore ownership/transitions/heartbeats; admission record/digest and verifier decision; Check ID/name/source/head target; child run/job and claim proof; `git rev-parse HEAD`; marker/admission/canonical-base/head/local-artifact/command binding; authoritative terminal/deadline evidence; result kind/taxonomy/proof role; winner/terminal/outbox transaction; cancel/fallback/late events; cleanup/registration inventory; ruleset state; reviewer reconciliation.
 
 ## Critical blockers
 
@@ -442,4 +451,4 @@ Preserve without secrets: protocol package; GateStore ownership/transitions/hear
 - Missed/out-of-order reviewer work, early pre-enqueue HTTP ACK, premature queue ACK, or duplicate comments.
 - Reviewer activates without provider/model/budget decision, exceeds limits, lacks secret/skill provenance, or treats outage/quota/invalid output as approval.
 - Push-main `CI`, `verify-release.sh`, or Railway semantics regress.
-- Offline runner blocks mergeability indefinitely.
+- Offline runner leaves a required gate pending indefinitely once a future repository explicitly enables that protection.

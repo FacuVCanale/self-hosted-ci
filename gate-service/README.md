@@ -48,14 +48,14 @@ namespace. This release never dispatches or accepts local execution.
 
 The single `POST /v1/pools/:runner_pool_id/gates` operation accepts only the exact OIDC
 coordinator plus repository, PR and expected head. The caller cannot supply
-`base_sha` or `tested_merge_sha`: the Worker re-reads the current pull request,
-requires its exact base repository and branch ref, resolves that branch's
-current commit through GitHub's public Git-ref API, and resolves the exact
-`refs/pull/<PR>/merge` Git ref without trusting the PR payload's nullable or
-stale `merge_commit_sha`. It accepts the merge only when the public commit object has
-exactly the ordered parents `[canonical base_sha, expected head_sha]`. Acquire
-returns both server-canonical SHAs for durable tuple identity, exact checkout
-and terminal evidence. The
+`base_sha`: the Worker double-reads the current pull request and its exact base
+Git ref, requiring one consistent snapshot with the expected head, exact base
+repository and branch ref, and current base commit. It never consumes
+`mergeable`, `merge_commit_sha`, or `refs/pull/<PR>/merge`. Acquire returns the
+server-canonical `head_sha`, `base_sha`, and
+`merge_policy_version=local-ort-v1` for durable tuple identity, exact checkout,
+and terminal evidence. The dedicated Check targets the head SHA; the quality
+job constructs the tested merge locally. The
 Durable Object derives a preparation
 marker from that tuple plus the exact workflow run/attempt owner. Retries by the
 same owner adopt the same durably bound Check. A legitimate rerun gets a new
@@ -72,13 +72,13 @@ control action are created only after the exact Check is observed and bound to
 that durable intent. Terminal reruns resolve the durable gate first; terminal
 evidence found only by a GitHub listing is never adopted heuristically.
 
-Before a new POST, the Worker re-reads the current public pull request
-from GitHub and requires exact repository, PR and head plus the already
-canonicalized base ref, synthetic merge identity and ordered parents. This public
+Before a new POST, the Worker re-reads the current public pull request and base
+ref from GitHub and requires the exact repository, PR, expected head, branch,
+and canonical base commit. This public
 sandbox read deliberately does not broaden the checks-only
 App; private repositories require a future separate read identity. The Worker
 then lists `ci-gate` Check Runs on the exact
-`tested_merge_sha` and reconciles the marker. It repeats that lookup after an
+`head_sha` and reconciles the marker. It repeats that lookup after an
 ambiguous create. During list-only reconciliation it first binds the exact
 durable marker on the tested SHA, even if the PR has since moved, and then
 concludes that obsolete Check as failure so it cannot remain orphaned. An exact
@@ -90,11 +90,11 @@ same-App, in-progress match is idempotent; duplicate markers, another App,
 another SHA, or malformed GitHub response fail closed. Every reported page is
 scanned before deciding uniqueness.
 
-Canonical resolution is a bounded read-only poll before any creation intent:
-each attempt re-reads the PR, current base ref, exact PR merge ref and merge
-commit. A temporarily missing merge ref or a commit whose parents have not yet
-converged retries with short backoff; an explicit `mergeable: false` blocks
-immediately. GitHub rate limits and their authoritative `Retry-After` or
+Canonical resolution is a bounded read-only operation before any creation
+intent: it reads PR, base ref, PR, and base ref again and accepts only a stable
+snapshot. Concurrent PR-head or base-ref movement retries with short backoff;
+GitHub's synthetic mergeability state is deliberately outside this boundary.
+GitHub rate limits and their authoritative `Retry-After` or
 `X-RateLimit-Reset` abort local polling immediately, cross the Durable Object
 RPC encoded in the error identity, and propagate without truncation as HTTP
 `503` plus a ceiling-seconds `Retry-After`. A recognized `403`/`429` rate limit
@@ -105,6 +105,24 @@ two acquire requests with the same OIDC run owner and unchanged payload, gives
 each curl attempt a 5-second connect and 30-second total timeout, and fails
 observably instead of sleeping when `Retry-After` exceeds its explicit
 180-second job budget.
+
+The reusable quality job has `contents:read` and no OIDC permission. It checks
+out the exact canonical base, fetches only `refs/pull/<PR>/head` into a separate
+local ref, verifies both SHAs, disables system/global Git configuration and
+hooks, forbids the file protocol, requires a merge base, and executes
+`git merge -s ort --no-ff --no-commit`. It records the merge base and tested
+tree, creates a deterministic two-parent commit with fixed identity/time, and
+resets `HEAD` to that local commit before running the trusted command. A merge
+conflict or unrelated history is a quality failure. Successful finalization
+re-resolves the canonical PR/base snapshot before CAS, so head or base drift
+cannot conclude success; historical failure evidence remains deliverable.
+`local-ort-v1` binds the `ubuntu-24.04` runner image label and records the
+actual `git --version` observed by the quality job in terminal evidence and
+audit. The observed version is strictly parsed but is not falsely pinned to a
+version GitHub's mutable hosted image may not provide. Reproducibility is
+therefore limited to the versioned merge procedure plus recorded runner label,
+Git version, tree and commit; a fully reproducible future policy requires a
+digest-pinned toolchain image.
 
 The repository-scoped Durable Object serializes all concurrent acquisition for
 the same pull request and rejects alternate pool aliases. In-flight retries
@@ -120,6 +138,19 @@ accounted for. A hosted gate also persists a
 abandoned `hosted_selected` generation to `hosted_failure`, releases the
 allocation, fails its pending action and emits the same durable Check outbox
 used by ordinary terminal transitions.
+
+`local-ort-v1` uses the new `LocalMergeRunnerPoolGate` class and
+`RUNNER_POOLS_V2` binding. Wrangler's declarative `exports` lifecycle creates
+the new SQLite namespace while preserving the existing `RunnerPoolGate` SQLite
+export live and unbound, so this release cannot delete its remote data. It does
+not use the legacy `migrations` configuration. The ruleset remains disabled until the fresh
+namespace passes the sandbox smoke.
+
+This MVP is intentionally limited to public repositories whose required-check
+evaluation accepts a dedicated-App Check on the PR head. It does not enable a
+universal ruleset, does not support merge queues, and does not claim private
+repository reads: those need a separately reviewed read identity and a
+merge-group-aware contract. The ruleset stays off during sandbox validation.
 
 Local execution stays structurally disabled until an independently reviewed
 exact-SHA verifier v1 and its authority boundary exist.

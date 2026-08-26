@@ -27,7 +27,9 @@ jobs:
       version: ${{ steps.acquire.outputs.version }}
       state: ${{ steps.acquire.outputs.state }}
       base_sha: ${{ steps.acquire.outputs.base_sha }}
-      tested_merge_sha: ${{ steps.acquire.outputs.tested_merge_sha }}
+      head_sha: ${{ steps.acquire.outputs.head_sha }}
+      merge_policy_version: ${{ steps.acquire.outputs.merge_policy_version }}
+      runner_image: ${{ steps.acquire.outputs.runner_image }}
     steps:
       - name: Mint short-lived Gate Service identity
         id: oidc
@@ -84,13 +86,15 @@ jobs:
             sleep "$retry_after"
           done
           response="$(<"$response_file")"
-          jq -e '(.logical_key|type == "string" and length > 0) and (.generation|type == "number" and . > 0) and (.version|type == "number" and . > 0) and (.state == "hosted_selected" or .state == "hosted_success" or .state == "hosted_failure") and (.check_run_id|type == "number" and . > 0) and (.base_sha|type == "string" and test("^[0-9a-f]{40}$")) and (.tested_merge_sha|type == "string" and test("^[0-9a-f]{40}$"))' <<<"$response" >/dev/null
+          jq -e '(.logical_key|type == "string" and length > 0) and (.generation|type == "number" and . > 0) and (.version|type == "number" and . > 0) and (.state == "hosted_selected" or .state == "hosted_success" or .state == "hosted_failure") and (.check_run_id|type == "number" and . > 0) and (.base_sha|type == "string" and test("^[0-9a-f]{40}$")) and (.head_sha|type == "string" and test("^[0-9a-f]{40}$")) and (.merge_policy_version == "local-ort-v1") and (.runner_image == "ubuntu-24.04")' <<<"$response" >/dev/null
           printf 'logical_key=%s\n' "$(jq -r '.logical_key' <<<"$response")" >>"$GITHUB_OUTPUT"
           printf 'generation=%s\n' "$(jq -r '.generation' <<<"$response")" >>"$GITHUB_OUTPUT"
           printf 'version=%s\n' "$(jq -r '.version' <<<"$response")" >>"$GITHUB_OUTPUT"
           printf 'state=%s\n' "$(jq -r '.state' <<<"$response")" >>"$GITHUB_OUTPUT"
           printf 'base_sha=%s\n' "$(jq -r '.base_sha' <<<"$response")" >>"$GITHUB_OUTPUT"
-          printf 'tested_merge_sha=%s\n' "$(jq -r '.tested_merge_sha' <<<"$response")" >>"$GITHUB_OUTPUT"
+          printf 'head_sha=%s\n' "$(jq -r '.head_sha' <<<"$response")" >>"$GITHUB_OUTPUT"
+          printf 'merge_policy_version=%s\n' "$(jq -r '.merge_policy_version' <<<"$response")" >>"$GITHUB_OUTPUT"
+          printf 'runner_image=%s\n' "$(jq -r '.runner_image' <<<"$response")" >>"$GITHUB_OUTPUT"
 
   quality:
     name: hosted quality attempt
@@ -102,24 +106,61 @@ jobs:
       contents: read
     outputs:
       conclusion: ${{ steps.result.outputs.conclusion }}
+      merge_base_sha: ${{ steps.merge.outputs.merge_base_sha }}
+      tested_tree_sha: ${{ steps.merge.outputs.tested_tree_sha }}
+      local_commit_sha: ${{ steps.merge.outputs.local_commit_sha }}
+      git_version: ${{ steps.toolchain.outputs.git_version }}
     steps:
-      - name: Check out exact synthetic merge
+      - name: Observe Git toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          git_version="$(git --version)"
+          [[ "$git_version" =~ ^git\ version\ [0-9]+\.[0-9]+\.[0-9]+([.][A-Za-z0-9.-]+)?(\ \(Apple\ Git-[0-9]+\))?$ ]]
+          printf 'git_version=%s\n' "$git_version" >>"$GITHUB_OUTPUT"
+      - name: Check out exact canonical base
         id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.acquire.outputs.tested_merge_sha }}
-          fetch-depth: 1
+          ref: ${{ needs.acquire.outputs.base_sha }}
+          fetch-depth: 0
           persist-credentials: false
-      - name: Verify exact checked-out revision
-        id: verify
+      - name: Build deterministic local ort merge
+        id: merge
+        continue-on-error: true
         shell: bash
         env:
-          MERGE_SHA: ${{ needs.acquire.outputs.tested_merge_sha }}
+          BASE_SHA: ${{ needs.acquire.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.acquire.outputs.head_sha }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_RUNNER_IMAGE: ${{ needs.acquire.outputs.runner_image }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$MERGE_SHA"
+          export GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+          test "$EXPECTED_RUNNER_IMAGE" = ubuntu-24.04
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git remote get-url origin)" = "https://github.com/${GITHUB_REPOSITORY}"
+          git config --local core.hooksPath /dev/null
+          git config --local core.attributesFile /dev/null
+          git config --local protocol.file.allow never
+          git config --local commit.gpgsign false
+          git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head:refs/ci-gate/head"
+          test "$(git rev-parse refs/ci-gate/head)" = "$HEAD_SHA"
+          merge_base_sha="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          test -n "$merge_base_sha"
+          git checkout --detach "$BASE_SHA"
+          git merge -s ort --no-ff --no-commit "$HEAD_SHA"
+          tested_tree_sha="$(git write-tree)"
+          local_commit_sha="$(printf '%s\n' 'ci-gate deterministic local ort merge' | GIT_AUTHOR_NAME=ci-gate GIT_AUTHOR_EMAIL=ci-gate@invalid GIT_AUTHOR_DATE='1970-01-01T00:00:00Z' GIT_COMMITTER_NAME=ci-gate GIT_COMMITTER_EMAIL=ci-gate@invalid GIT_COMMITTER_DATE='1970-01-01T00:00:00Z' git commit-tree "$tested_tree_sha" -p "$BASE_SHA" -p "$HEAD_SHA")"
+          git reset --hard "$local_commit_sha"
+          test "$(git rev-parse HEAD^{tree})" = "$tested_tree_sha"
+          test "$(git rev-parse HEAD^1)" = "$BASE_SHA"
+          test "$(git rev-parse HEAD^2)" = "$HEAD_SHA"
+          printf 'merge_base_sha=%s\ntested_tree_sha=%s\nlocal_commit_sha=%s\n' "$merge_base_sha" "$tested_tree_sha" "$local_commit_sha" >>"$GITHUB_OUTPUT"
       - name: Execute trusted CI command
         id: execute
+        if: steps.merge.outcome == 'success'
         continue-on-error: true
         shell: bash
         env:
@@ -133,12 +174,12 @@ jobs:
         shell: bash
         env:
           CHECKOUT: ${{ steps.checkout.outcome }}
-          VERIFY: ${{ steps.verify.outcome }}
+          MERGE: ${{ steps.merge.outcome }}
           EXECUTE: ${{ steps.execute.outcome }}
         run: |
           set -euo pipefail
           conclusion=failure
-          if [[ "$CHECKOUT" == success && "$VERIFY" == success && "$EXECUTE" == success ]]; then conclusion=success; fi
+          if [[ "$CHECKOUT" == success && "$MERGE" == success && "$EXECUTE" == success ]]; then conclusion=success; fi
           printf 'conclusion=%s\n' "$conclusion" >>"$GITHUB_OUTPUT"
           test "$conclusion" = success
 
@@ -173,7 +214,14 @@ jobs:
           LOGICAL_KEY: ${{ needs.acquire.outputs.logical_key }}
           GENERATION: ${{ needs.acquire.outputs.generation }}
           VERSION: ${{ needs.acquire.outputs.version }}
-          MERGE_SHA: ${{ needs.acquire.outputs.tested_merge_sha }}
+          BASE_SHA: ${{ needs.acquire.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.acquire.outputs.head_sha }}
+          MERGE_POLICY_VERSION: ${{ needs.acquire.outputs.merge_policy_version }}
+          GIT_VERSION: ${{ needs.quality.outputs.git_version }}
+          RUNNER_IMAGE: ${{ needs.acquire.outputs.runner_image }}
+          MERGE_BASE_SHA: ${{ needs.quality.outputs.merge_base_sha }}
+          TESTED_TREE_SHA: ${{ needs.quality.outputs.tested_tree_sha }}
+          LOCAL_COMMIT_SHA: ${{ needs.quality.outputs.local_commit_sha }}
           TRUSTED_COMMAND: ${{ inputs.trusted_command }}
           QUALITY_RESULT: ${{ needs.quality.result }}
           QUALITY_CONCLUSION: ${{ needs.quality.outputs.conclusion }}
@@ -182,9 +230,13 @@ jobs:
           set -euo pipefail
           conclusion=failure; to_state=hosted_failure
           if [[ "$QUALITY_RESULT" == success && "$QUALITY_CONCLUSION" == success ]]; then conclusion=success; to_state=hosted_success; fi
+          zero_sha="$(printf '%040d' 0)"
+          merge_base_sha="${MERGE_BASE_SHA:-$zero_sha}"
+          tested_tree_sha="${TESTED_TREE_SHA:-$zero_sha}"
+          local_commit_sha="${LOCAL_COMMIT_SHA:-$zero_sha}"
           command_digest="$(printf '%s' "$TRUSTED_COMMAND" | sha256sum | cut -d' ' -f1)"
-          evidence_digest="$(printf '%s\n' ci-gate-hosted-evidence-v1 "$LOGICAL_KEY" "$GENERATION" "$MERGE_SHA" "$command_digest" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$conclusion" | sha256sum | cut -d' ' -f1)"
-          payload="$(jq -cn --arg logical_key "$LOGICAL_KEY" --argjson generation "$GENERATION" --argjson expected_version "$VERSION" --arg to_state "$to_state" --arg evidence_digest "$evidence_digest" '{logical_key:$logical_key,generation:$generation,expected_version:$expected_version,from_state:"hosted_selected",to_state:$to_state,evidence_digest:$evidence_digest}')"
+          evidence_digest="$(printf '%s\n' ci-gate-local-ort-evidence-v1 "$LOGICAL_KEY" "$GENERATION" "$BASE_SHA" "$HEAD_SHA" "$MERGE_POLICY_VERSION" "$GIT_VERSION" "$RUNNER_IMAGE" "$merge_base_sha" "$tested_tree_sha" "$local_commit_sha" "$command_digest" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$conclusion" | sha256sum | cut -d' ' -f1)"
+          payload="$(jq -cn --arg logical_key "$LOGICAL_KEY" --argjson generation "$GENERATION" --argjson expected_version "$VERSION" --arg to_state "$to_state" --arg evidence_digest "$evidence_digest" --arg base_sha "$BASE_SHA" --arg head_sha "$HEAD_SHA" --arg merge_policy_version "$MERGE_POLICY_VERSION" --arg git_version "$GIT_VERSION" --arg runner_image "$RUNNER_IMAGE" --arg merge_base_sha "$merge_base_sha" --arg tested_tree_sha "$tested_tree_sha" --arg local_commit_sha "$local_commit_sha" --arg command_digest "$command_digest" '{logical_key:$logical_key,generation:$generation,expected_version:$expected_version,from_state:"hosted_selected",to_state:$to_state,evidence_digest:$evidence_digest,base_sha:$base_sha,head_sha:$head_sha,merge_policy_version:$merge_policy_version,git_version:$git_version,runner_image:$runner_image,merge_base_sha:$merge_base_sha,tested_tree_sha:$tested_tree_sha,local_commit_sha:$local_commit_sha,command_digest:$command_digest}')"
           curl -fsS -X POST -H "Authorization: Bearer $OIDC_TOKEN" -H 'Content-Type: application/json' --data "$payload" "${URL%/}/v1/pools/${POOL}/gates/transition" >/dev/null
           test "$conclusion" = success
       - name: Reconcile previously terminal gate

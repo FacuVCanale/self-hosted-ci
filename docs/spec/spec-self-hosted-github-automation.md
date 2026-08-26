@@ -1,5 +1,18 @@
 # Self-hosted GitHub automation — execution-ready specification
 
+> **Hosted MVP tuple amendment (`local-ort-v1`).** For the active Gate Service
+> and reusable hosted workflow, this amendment supersedes older references in
+> this document to mutable GitHub-generated merge SHAs, `mutable GitHub merge field`,
+> `GitHub merge ref`, or a Check targeted at a merge SHA. The authoritative
+> tuple is server-resolved `repository_id + pr_number + head_sha + base_sha +
+> merge_policy_version(local-ort-v1)`; the Check targets `head_sha`, and the
+> quality job constructs and records the deterministic local merge.
+>
+> Scope is public repositories with head-evaluated required Checks. Universal
+> rulesets, private-repository reads, and `merge_queue`/merge-group semantics
+> are outside this MVP. Ruleset activation remains off until a public sandbox
+> proves the dedicated App source and head-target evaluation end to end.
+
 ## Goal
 
 Provide an opt-in, reversible self-hosted GitHub CI platform and automatic PR reviewer for personal and organization repositories explicitly selected by the operator.
@@ -157,8 +170,8 @@ request_linkage_hash: <opaque non-transcript hash>
 
 - `ci-gate` is the single routed quality gate added by this platform.
 - A dedicated private GitHub App named/slugged for `ci-gate` is the sole Check Run writer. Its App ID is the fixed expected source in the ruleset. The Action coordinator may orchestrate, but it obtains a short-lived installation token for this App; `GITHUB_TOKEN` and other Apps may not create/update `ci-gate`.
-- For PRs, `ci-gate` targets `check_target_sha=tested_merge_sha`, the synthetic merge of the exact `head_sha+base_sha` pair actually tested.
-- The logical PR key remains `repository_id+pr_number+head_sha+ci-gate`; each generation additionally binds `base_sha+tested_merge_sha`.
+- For the hosted local-merge MVP, `ci-gate` targets the exact server-canonical PR `head_sha`. GitHub's mutable merge SHA is neither an input nor an authority.
+- The logical PR key remains `repository_id+pr_number+head_sha+ci-gate`; each generation additionally binds the server-canonical `base_sha` and `merge_policy_version=local-ort-v1`.
 - `supply-chain` stays an independent deterministic GitHub-hosted check and is not routed through the local fallback controller.
 - Attempt jobs/checks have unique internal names and cannot satisfy `ci-gate`.
 - Ruleset pins the expected App/source of `ci-gate`.
@@ -195,14 +208,17 @@ repository_id: <id>
 repository: owner/repo
 pr_number: <number>
 logical_key: <repo-id:pr:head:ci-gate>
-generation: <monotonic generation binding base+merge>
+generation: <monotonic generation binding base+local merge policy>
 owner_run_id: <id>
 owner_run_attempt: <number>
 head_sha: <PR head>
 base_sha: <PR base>
-tested_merge_sha: <synthetic merge for exact head/base>
-tested_sha: <tested_merge_sha>
-check_target_sha: <tested_merge_sha>
+merge_policy_version: local-ort-v1
+merge_base_sha: <merge base observed by the quality job>
+tested_tree_sha: <tree produced by git merge -s ort --no-commit>
+local_commit_sha: <deterministic two-parent commit created by commit-tree>
+tested_sha: <local_commit_sha>
+check_target_sha: <head_sha>
 default_branch: <trusted branch>
 backend: local | github
 policy_version: <registry commit>
@@ -247,7 +263,7 @@ Protocol invariant: `backend=local` requires `execution_trust_mode=exact-sha-att
 
 - Child re-queries PR tuple, performs only trusted bootstrap independent of PR content, checks out detached `tested_sha`, verifies `git HEAD==tested_sha`, then invokes a trusted start wrapper located outside and unwritable from the PR workspace. The wrapper persists `started_test_at` in the control-plane `GateStore` **before any operation whose behavior or inputs depend on PR content**, including dependency resolution/install (`npm ci`, pip), generated scripts, build, lint, tests, or project tooling. It revalidates before result.
 - Trusted bootstrap is limited to runner identity/protocol validation and installation/verification of fixed, SHA/digest-pinned controller tooling that does not read the checkout or PR metadata. Once the checkout is read, any ordinary nonzero child result is functional unless GitHub independently proves transport loss.
-- Immediately before marker creation, verifier must successfully revalidate the current proof. GateStore then creates `local_admission_record` exactly once and only from that successful decision. The immutable record binds attestation ID/envelope digest, nonce binding, policy/authority/manifest/key versions and digests, head/gate generation, exact child run/job, tested merge, owner/lease epoch, verifier decision ID/time, persisted execution deadline and the marker-core digest it authorizes. Its canonical digest is computed by GateStore; caller metadata alone is not admission.
+- Immediately before marker creation, verifier must successfully revalidate the current proof. GateStore then creates `local_admission_record` exactly once and only from that successful decision. The immutable record binds attestation ID/envelope digest, nonce binding, policy/authority/manifest/key versions and digests, canonical base/head, local artifact, gate generation, exact child run/job, owner/lease epoch, verifier decision ID/time, persisted execution deadline and the marker-core digest it authorizes. Its canonical digest is computed by GateStore; caller metadata alone is not admission.
 - `started_test_marker_digest` is the canonical digest of marker core fields excluding admission ID/digest, avoiding a circular hash. Start marker is timestamped by the authoritative control-plane clock and contains that core plus authentic `local_admission_id` and `local_admission_digest`. Admission binds the marker-core digest; the final marker binds the admission reference. Both persist atomically or the marker is unusable. PR files/processes cannot create, overwrite, backdate or delete either record. If admission/marker persistence cannot be confirmed, classify `CONTROL_FAILURE`, start no PR-dependent process, fail closed and let watchdog/reconciler repair; do not infer infrastructure fallback.
 - A same-head base/merge change creates a new generation; older generation is fenced.
 
@@ -260,7 +276,7 @@ Protocol invariant: `backend=local` requires `execution_trust_mode=exact-sha-att
 - Same logical-key coordinators serialize; only current generation lease owner performs external side effects.
 - After lease loss/fencing, the old owner may not dispatch, cancel, update a check, acknowledge a queue item, or post/update a comment.
 - `complete_local_success_if_authorized(...)` uses GateStore clock, revalidates owner/lease/generation/evidence and valid attestation `now<expires_at`, then atomically commits `winner=local`, terminal success evidence and outbox. No local success Check mutation exists without this record.
-- `complete_local_failure_if_current(...)` does **not** require a still-valid attestation. It resolves the authentic GateStore admission/marker and authoritative exact-job terminal observation; caller IDs, digests and `terminal_at` are expectation-only comparisons. It requires matching owner/lease/generation, exact child run/job, tested merge/command, `terminal_at <= persisted execution_deadline`, terminal `FUNCTIONAL_FAILURE`, and no prior winner; then atomically commits local failure/evidence/outbox. Current proof invalidity is audit-only after valid historical admission. Missing/forged/mismatched admission is `CONTROL_FAILURE`: no winner/outbox/Check. This API cannot accept success or mutate failure into success.
+- `complete_local_failure_if_current(...)` does **not** require a still-valid attestation. It resolves the authentic GateStore admission/marker and authoritative exact-job terminal observation; caller IDs, digests and `terminal_at` are expectation-only comparisons. It requires matching owner/lease/generation, exact child run/job, canonical base/head, local artifact and command, `terminal_at <= persisted execution_deadline`, terminal `FUNCTIONAL_FAILURE`, and no prior winner; then atomically commits local failure/evidence/outbox. Current proof invalidity is audit-only after valid historical admission. Missing/forged/mismatched admission is `CONTROL_FAILURE`: no winner/outbox/Check. This API cannot accept success or mutate failure into success.
 - GitHub winner selection competes on the same linearization point. Exactly one of local completion or `winner=github` can commit; the loser is fenced/evidence-only.
 - The transactional outbox targets the already-created exact `ci_gate_check_run_id` using dedicated-App authority and key `logical_key:generation:winner:evidence_digest`. Delivery updates that known Check Run; ambiguous response triggers GET/marker verification before retry. Same event is idempotent/convergent; different evidence conflicts. Thus at most one external logical gate mutation occurs even if PATCH delivery repeats.
 - Formal local claim requires the exact returned run ID, expected workflow/ref/generation/backend, exactly one expected Jobs API job, timely non-null `started_at`, expected pool labels, and expected fresh ephemeral runner identity.
@@ -269,14 +285,14 @@ Protocol invariant: `backend=local` requires `execution_trust_mode=exact-sha-att
 - Fallback selection persists immutable `winner=github`, then requests normal cancel of local. If local remains active after bounded grace, coordinator requests force-cancel. Reconciler resumes this sequence idempotently after interruption.
 - Late local results after fallback selection are evidence only.
 - After immutable `winner=github`, local is fenced and attestation expiry, signing-key revocation, manifest change or inventory drift is audited only; none may block a valid GitHub-hosted conclusion.
-- GitHub winner conclusion requires: immutable winner and current lease owner; same logical key/generation/current PR tuple; exact `tested_sha=check_target_sha=tested_merge_sha`; canonical command/workflow contract; trustworthy hosted child/run/job identity and terminal timestamp within its persisted execution deadline; and dedicated `ci-gate` App authority. It does not require an attestation.
+- GitHub winner conclusion requires: immutable winner and current lease owner; same logical key/generation/current PR tuple; exact `tested_sha=local_commit_sha` and `check_target_sha=head_sha`; canonical command/workflow contract; trustworthy hosted child/run/job identity and terminal timestamp within its persisted execution deadline; and dedicated `ci-gate` App authority. It does not require an attestation.
 - Hosted completion also persists terminal evidence plus its outbox event atomically; same evidence is idempotent and different evidence conflicts. Both winner paths therefore mutate the dedicated-App Check only through the outbox.
 
 Failure taxonomy:
 
 - `PROTOCOL_FAILURE`: malformed tuple/package, wrong ref/source/API version/schema, ambiguous child, SHA mismatch. Blocking; no inferred fallback success.
 - `INFRA_PRETEST`: dispatch/claim/platform/bootstrap failure before `started_test_at`, established by trusted wrapper/GitHub API. Eligible for one fallback.
-- `FUNCTIONAL_FAILURE`: canonical command returns nonzero after `started_test_at` on the exact admitted child/run/job, tested merge and command, with authentic admission/marker and authoritative `terminal_at <= persisted execution_deadline`. It may commit without a still-valid current attestation if no winner exists. Final failure; no fallback and no later success conversion. A `terminal_at > execution_deadline` failure is late evidence only and triggers/resumes timeout fallback; it cannot win locally.
+- `FUNCTIONAL_FAILURE`: canonical command returns nonzero after `started_test_at` on the exact admitted child/run/job, canonical base/head, recorded local artifact and command, with authentic admission/marker and authoritative `terminal_at <= persisted execution_deadline`. It may commit without a still-valid current attestation if no winner exists. Final failure; no fallback and no later success conversion. A `terminal_at > execution_deadline` failure is late evidence only and triggers/resumes timeout fallback; it cannot win locally.
 - `INFRA_TRANSPORT_LOSS`: GitHub-observed runner disappearance/platform cancel/hard timeout, even after start, without a trustworthy functional result. Eligible for one fallback.
 - `STALE_INPUT`, `CONTROL_FAILURE`, `FALLBACK_FAILURE` remain blocking as defined in PRD.
 - PR code cannot self-classify a failure as infrastructure.
@@ -399,7 +415,7 @@ Reviewer defaults to **dual/no-public-ingress mode**:
 
 - Non-onboarded repo stays unchanged.
 - Execution trust defaults GitHub-hosted. In pilot, local runs only with a valid authority-v1 signature for the exact repo/PR/head/head-generation plus unchanged negative inventory guard; enumeration alone can never qualify and org runner authority never qualifies.
-- Local/fallback test exact same synthetic merge and only expected-source `ci-gate` determines routed quality.
+- Local/fallback test exact same deterministic local ort merge and only expected-source `ci-gate` determines routed quality.
 - No duplicate/conflicting gate under retries, cancellation, stale SHA/base, lost lease or coordinator failure.
 - Offline laptop triggers GitHub fallback and reviewer availability.
 - No personal data/secrets/runtime residue.

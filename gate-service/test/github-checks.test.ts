@@ -24,7 +24,7 @@ const preparation: CheckPreparationEvent = {
   prNumber: 7,
   headSha: "1".repeat(40),
   baseSha: "2".repeat(40),
-  testedMergeSha: "3".repeat(40),
+  mergePolicyVersion: "local-ort-v1",
   actor: {
     repository: "example-owner/example-repository",
     repositoryId: "123456789",
@@ -111,7 +111,6 @@ function pullResponse(overrides: Record<string, unknown> = {}): Response {
       ref: "main",
       repo: { id: 123456789, full_name: "example-owner/example-repository" },
     },
-    merge_commit_sha: preparation.testedMergeSha,
     ...overrides,
   });
 }
@@ -122,30 +121,6 @@ function refResponse(overrides: Record<string, unknown> = {}): Response {
     object: { type: "commit", sha: preparation.baseSha },
     ...overrides,
   });
-}
-
-function mergeRefResponse(overrides: Record<string, unknown> = {}): Response {
-  return json({
-    ref: `refs/pull/${preparation.prNumber}/merge`,
-    object: { type: "commit", sha: preparation.testedMergeSha },
-    ...overrides,
-  });
-}
-
-function commitResponse(overrides: Record<string, unknown> = {}): Response {
-  return json({
-    sha: preparation.testedMergeSha,
-    parents: [{ sha: preparation.baseSha }, { sha: preparation.headSha }],
-    ...overrides,
-  });
-}
-
-function preparationAuthorityResponses(): Array<Response | Error> {
-  return [...authorityResponses(), pullResponse(), refResponse(), mergeRefResponse(), commitResponse()];
-}
-
-function canonicalAttempt(commitOverrides: Record<string, unknown> = {}): Array<Response | Error> {
-  return [pullResponse(), refResponse(), mergeRefResponse(), commitResponse(commitOverrides)];
 }
 
 const noPause = async (): Promise<void> => undefined;
@@ -162,30 +137,12 @@ function sequence(responses: Array<Response | Error>): { fetch: typeof fetch; ca
   return { fetch: mock as typeof fetch, calls };
 }
 
-async function preparationMarker(event = preparation): Promise<string> {
-  const canonical = [
-    "ci-gate-preparation-v1",
-    event.repositoryId,
-    String(event.prNumber),
-    event.headSha,
-    event.baseSha,
-    event.testedMergeSha,
-    event.actor.runId,
-    event.actor.runAttempt,
-  ].join("\n");
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
-  const hex = [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-  return `github-automation-preparation:${hex}`;
-}
-
 function preparedCheck(marker: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: 501,
     name: "ci-gate",
     app: { id: 111 },
-    head_sha: preparation.testedMergeSha,
+    head_sha: preparation.headSha,
     status: "in_progress",
     external_id: marker,
     conclusion: null,
@@ -193,249 +150,42 @@ function preparedCheck(marker: string, overrides: Record<string, unknown> = {}):
   };
 }
 
-describe("idempotent GitHub Check preparation", () => {
-  it("resolves the server-canonical merge only when its ordered parents are exact", async ({ expect }) => {
-    const recomputedMerge = "4".repeat(40);
-    const mock = sequence([
-      pullResponse({
-        base: {
-          sha: "9".repeat(40),
-          ref: "main",
-          repo: { id: 123456789, full_name: "example-owner/example-repository" },
-        },
-        merge_commit_sha: null,
-      }),
-      refResponse(),
-      mergeRefResponse({ object: { type: "commit", sha: recomputedMerge } }),
-      commitResponse({ sha: recomputedMerge }),
-    ]);
+describe("local-ort canonical Check preparation", () => {
+  const stableCanonicalReads = (): Array<Response | Error> => [
+    pullResponse({ merge_commit_sha: null, mergeable: null }),
+    refResponse(),
+    pullResponse({ merge_commit_sha: "9".repeat(40), mergeable: false }),
+    refResponse(),
+  ];
+
+  it("double-reads an exact head/base snapshot without merge-ref authority", async ({ expect }) => {
+    const mock = sequence(stableCanonicalReads());
     await expect(resolveCanonicalPullRequest(authority, {
       repositoryId: preparation.repositoryId,
       prNumber: preparation.prNumber,
       headSha: preparation.headSha,
       actor: preparation.actor,
-    }, mock.fetch)).resolves.toEqual({
+    }, mock.fetch, noPause)).resolves.toEqual({
       baseSha: preparation.baseSha,
-      testedMergeSha: recomputedMerge,
+      headSha: preparation.headSha,
+      mergePolicyVersion: "local-ort-v1",
     });
     expect(mock.calls.map((call) => new URL(call.url).pathname)).toEqual([
       "/repos/example-owner/example-repository/pulls/7",
       "/repos/example-owner/example-repository/git/ref/heads/main",
-      "/repos/example-owner/example-repository/git/ref/pull/7/merge",
-      `/repos/example-owner/example-repository/commits/${recomputedMerge}`,
+      "/repos/example-owner/example-repository/pulls/7",
+      "/repos/example-owner/example-repository/git/ref/heads/main",
     ]);
   });
-  it("derives one idempotent marker per exact run owner", async ({ expect }) => {
-    const first = await derivePreparationMarker(preparation);
-    const rerun = await derivePreparationMarker({
-      ...preparation,
-      actor: { ...preparation.actor, runId: "900", runAttempt: "8", tokenId: "rerun" },
-    });
-    expect(rerun).not.toBe(first);
-    await expect(derivePreparationMarker(preparation)).resolves.toBe(first);
-  });
-  it("creates the exact in-progress Check and returns no App credential", async ({ expect }) => {
-    const marker = await preparationMarker();
+
+  it("retries the whole snapshot when the base ref moves between reads", async ({ expect }) => {
+    const oldBase = "4".repeat(40);
     const mock = sequence([
-      ...preparationAuthorityResponses(),
-      json({ total_count: 0, check_runs: [] }),
-      json(preparedCheck(marker), 201),
-    ]);
-    const result = await prepareGitHubCheck(authority, preparation, mock.fetch, now);
-    expect(result).toEqual({
-      state: "prepared",
-      reconciled: false,
-      tuple_current: true,
-      check_run_id: 501,
-      check_target_sha: preparation.testedMergeSha,
-    });
-    expect(JSON.stringify(result)).not.toContain("installation-token");
-    const create = mock.calls.at(-1)!;
-    expect(create.method).toBe("POST");
-    expect(create.url).toBe("https://api.github.com/repos/example-owner/example-repository/check-runs");
-    await expect(create.json()).resolves.toEqual({
-      name: "ci-gate",
-      head_sha: preparation.testedMergeSha,
-      status: "in_progress",
-      external_id: marker,
-    });
-    const pullRead = mock.calls.find((call) => call.url.endsWith("/pulls/7"))!;
-    expect(pullRead.headers.get("authorization")).toBeNull();
-  });
-
-  it("returns the existing Check for an identical run attempt without creating", async ({ expect }) => {
-    const marker = await preparationMarker();
-    const mock = sequence([
-      ...preparationAuthorityResponses(),
-      json({ total_count: 1, check_runs: [preparedCheck(marker)] }),
-    ]);
-    await expect(prepareGitHubCheck(authority, preparation, mock.fetch, now)).resolves.toMatchObject({
-      state: "prepared",
-      reconciled: true,
-      tuple_current: true,
-      check_run_id: 501,
-    });
-    expect(mock.calls.filter((call) => call.url.endsWith("/check-runs") && call.method === "POST")).toHaveLength(0);
-  });
-
-  it("never adopts terminal evidence heuristically without a durable intent binding", async ({ expect }) => {
-    const marker = await preparationMarker();
-    const mock = sequence([
-      ...authorityResponses(),
-      json({
-        total_count: 1,
-        check_runs: [preparedCheck(marker, {
-          status: "completed",
-          conclusion: "success",
-          external_id: `github-automation-evidence:${"9".repeat(64)}`,
-        })],
-      }),
-    ]);
-    await expect(prepareGitHubCheck(authority, preparation, mock.fetch, now, false)).resolves.toMatchObject({
-      state: "transient",
-    });
-    expect(mock.calls.some((call) => call.method === "POST" && call.url.endsWith("/check-runs"))).toBe(false);
-  });
-
-  it("rejects stale PR tuples before listing or creating a Check", async ({ expect }) => {
-    const responses = authorityResponses();
-    responses.push(pullResponse({ merge_commit_sha: "4".repeat(40) }));
-    responses.push(refResponse());
-    responses.push(mergeRefResponse({ object: { type: "commit", sha: "4".repeat(40) } }));
-    responses.push(commitResponse({
-      sha: "4".repeat(40),
-      parents: [{ sha: preparation.baseSha }, { sha: preparation.headSha }],
-    }));
-    const mock = sequence(responses);
-    await expect(prepareGitHubCheck(authority, preparation, mock.fetch, now)).resolves.toMatchObject({
-      state: "blocked",
-      error: "current pull request tuple mismatch",
-    });
-    expect(mock.calls.some((call) => call.url.includes("/check-runs"))).toBe(false);
-  });
-
-  it("treats persistently wrong, reordered, or extra parents as retryable exhaustion", async ({ expect }) => {
-    for (const parents of [
-      [{ sha: "9".repeat(40) }, { sha: preparation.headSha }],
-      [{ sha: preparation.headSha }, { sha: preparation.baseSha }],
-      [{ sha: preparation.baseSha }, { sha: preparation.headSha }, { sha: "9".repeat(40) }],
-    ]) {
-      const mock = sequence([
-        ...canonicalAttempt({ parents }),
-        ...canonicalAttempt({ parents }),
-        ...canonicalAttempt({ parents }),
-      ]);
-      await expect(resolveCanonicalPullRequest(authority, {
-        repositoryId: preparation.repositoryId,
-        prNumber: preparation.prNumber,
-        headSha: preparation.headSha,
-        actor: preparation.actor,
-      }, mock.fetch, noPause)).rejects.toThrow("canonical tested merge");
-    }
-  });
-
-  it("treats a persistently crossed commit identity as retryable exhaustion", async ({ expect }) => {
-    const crossed = { sha: "9".repeat(40) };
-    const mock = sequence([...canonicalAttempt(crossed), ...canonicalAttempt(crossed), ...canonicalAttempt(crossed)]);
-    await expect(resolveCanonicalPullRequest(authority, {
-      repositoryId: preparation.repositoryId,
-      prNumber: preparation.prNumber,
-      headSha: preparation.headSha,
-      actor: preparation.actor,
-    }, mock.fetch, noPause)).rejects.toThrow("canonical tested merge commit is not ready");
-  });
-
-  it("rejects a PR whose base repository is not the configured immutable repository", async ({ expect }) => {
-    const mock = sequence([pullResponse({
-      base: {
-        sha: preparation.baseSha,
-        ref: "main",
-        repo: { id: 999, full_name: "attacker/repository" },
-      },
-    })]);
-    await expect(resolveCanonicalPullRequest(authority, {
-      repositoryId: preparation.repositoryId,
-      prNumber: preparation.prNumber,
-      headSha: preparation.headSha,
-      actor: preparation.actor,
-    }, mock.fetch)).rejects.toThrow("current pull request tuple mismatch");
-  });
-
-  it("rejects a stale expected head before resolving base or merge commits", async ({ expect }) => {
-    const mock = sequence([pullResponse({ head: { sha: "9".repeat(40) } })]);
-    await expect(resolveCanonicalPullRequest(authority, {
-      repositoryId: preparation.repositoryId,
-      prNumber: preparation.prNumber,
-      headSha: preparation.headSha,
-      actor: preparation.actor,
-    }, mock.fetch)).rejects.toThrow("current pull request tuple mismatch");
-    expect(mock.calls).toHaveLength(1);
-  });
-
-  it("rejects unsafe or mismatched base branch refs", async ({ expect }) => {
-    const unsafe = sequence([pullResponse({
-      base: {
-        sha: preparation.baseSha,
-        ref: "../main",
-        repo: { id: 123456789, full_name: "example-owner/example-repository" },
-      },
-    })]);
-    await expect(resolveCanonicalPullRequest(authority, {
-      repositoryId: preparation.repositoryId,
-      prNumber: preparation.prNumber,
-      headSha: preparation.headSha,
-      actor: preparation.actor,
-    }, unsafe.fetch)).rejects.toThrow("current pull request tuple mismatch");
-
-    const mismatched = sequence([pullResponse(), refResponse({ ref: "refs/heads/attacker" })]);
-    await expect(resolveCanonicalPullRequest(authority, {
-      repositoryId: preparation.repositoryId,
-      prNumber: preparation.prNumber,
-      headSha: preparation.headSha,
-      actor: preparation.actor,
-    }, mismatched.fetch)).rejects.toThrow("canonical base ref is invalid");
-  });
-
-  it("ignores an absent PR merge_commit_sha and resolves the exact merge ref", async ({ expect }) => {
-    const mock = sequence([
-      pullResponse({ merge_commit_sha: undefined }),
+      pullResponse(),
+      refResponse({ object: { type: "commit", sha: oldBase } }),
+      pullResponse(),
       refResponse(),
-      mergeRefResponse(),
-      commitResponse(),
-    ]);
-    await expect(resolveCanonicalPullRequest(authority, {
-      repositoryId: preparation.repositoryId,
-      prNumber: preparation.prNumber,
-      headSha: preparation.headSha,
-      actor: preparation.actor,
-    }, mock.fetch)).resolves.toEqual({
-      baseSha: preparation.baseSha,
-      testedMergeSha: preparation.testedMergeSha,
-    });
-  });
-
-  it("rejects malformed or crossed pull request merge refs", async ({ expect }) => {
-    for (const mergeRef of [
-      mergeRefResponse({ ref: undefined }),
-      mergeRefResponse({ object: undefined }),
-      mergeRefResponse({ ref: "refs/pull/8/merge" }),
-      mergeRefResponse({ object: { type: "tag", sha: preparation.testedMergeSha } }),
-      mergeRefResponse({ object: { type: "commit", sha: "invalid" } }),
-    ]) {
-      const mock = sequence([pullResponse(), refResponse(), mergeRef]);
-      await expect(resolveCanonicalPullRequest(authority, {
-        repositoryId: preparation.repositoryId,
-        prNumber: preparation.prNumber,
-        headSha: preparation.headSha,
-        actor: preparation.actor,
-      }, mock.fetch)).rejects.toThrow("canonical pull request merge ref is invalid");
-    }
-  });
-
-  it("polls from a missing merge ref to one exact Check tuple", async ({ expect }) => {
-    const mock = sequence([
-      pullResponse(), refResponse(), json({ message: "Not Found" }, 404),
-      ...canonicalAttempt(),
+      ...stableCanonicalReads(),
     ]);
     await expect(resolveCanonicalPullRequest(authority, {
       repositoryId: preparation.repositoryId,
@@ -444,73 +194,16 @@ describe("idempotent GitHub Check preparation", () => {
       actor: preparation.actor,
     }, mock.fetch, noPause)).resolves.toEqual({
       baseSha: preparation.baseSha,
-      testedMergeSha: preparation.testedMergeSha,
+      headSha: preparation.headSha,
+      mergePolicyVersion: "local-ort-v1",
     });
+    expect(mock.calls).toHaveLength(8);
   });
 
-  it("polls a stale merge ref commit until its exact parents converge", async ({ expect }) => {
+  it("rejects a stale event head without authenticating or creating a Check", async ({ expect }) => {
     const mock = sequence([
-      ...canonicalAttempt({ parents: [{ sha: "9".repeat(40) }, { sha: preparation.headSha }] }),
-      ...canonicalAttempt(),
+      pullResponse({ head: { sha: "8".repeat(40) } }),
     ]);
-    await expect(resolveCanonicalPullRequest(authority, {
-      repositoryId: preparation.repositoryId,
-      prNumber: preparation.prNumber,
-      headSha: preparation.headSha,
-      actor: preparation.actor,
-    }, mock.fetch, noPause)).resolves.toEqual({
-      baseSha: preparation.baseSha,
-      testedMergeSha: preparation.testedMergeSha,
-    });
-  });
-
-  it("surfaces persistent merge-ref absence as retryable canonical exhaustion", async ({ expect }) => {
-    const missing = () => [pullResponse(), refResponse(), json({ message: "Not Found" }, 404)];
-    const mock = sequence([...missing(), ...missing(), ...missing()]);
-    await expect(resolveCanonicalPullRequest(authority, {
-      repositoryId: preparation.repositoryId,
-      prNumber: preparation.prNumber,
-      headSha: preparation.headSha,
-      actor: preparation.actor,
-    }, mock.fetch, noPause)).rejects.toMatchObject({
-      name: expect.stringMatching(/^CanonicalPullRequestUnavailable:\d{13}$/),
-    });
-  });
-
-  it("propagates authoritative GitHub rate-limit delays without polling amplification", async ({ expect }) => {
-    const currentTime = 1_800_000_000_000;
-    vi.useFakeTimers();
-    vi.setSystemTime(currentTime);
-    try {
-      for (const [status, headers, expectedRetryAt] of [
-        [429, { "retry-after": "17" }, currentTime + 17_000],
-        [429, {}, currentTime + 60_000],
-        [403, { "retry-after": "23", "x-ratelimit-remaining": "0" }, currentTime + 23_000],
-        [403, { "x-ratelimit-remaining": "0" }, currentTime + 60_000],
-        [403, { "retry-after": "invalid" }, currentTime + 60_000],
-        [403, {
-          "x-ratelimit-remaining": "0",
-          "x-ratelimit-reset": String((currentTime + 31_000) / 1_000),
-        }, currentTime + 31_000],
-      ] as const) {
-        const mock = sequence([Response.json({ message: "rate limited" }, { status, headers })]);
-        await expect(resolveCanonicalPullRequest(authority, {
-          repositoryId: preparation.repositoryId,
-          prNumber: preparation.prNumber,
-          headSha: preparation.headSha,
-          actor: preparation.actor,
-        }, mock.fetch, noPause)).rejects.toMatchObject({
-          name: `CanonicalPullRequestUnavailable:${expectedRetryAt}`,
-        });
-        expect(mock.calls).toHaveLength(1);
-      }
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("blocks an explicit merge conflict without polling", async ({ expect }) => {
-    const mock = sequence([pullResponse({ mergeable: false })]);
     await expect(resolveCanonicalPullRequest(authority, {
       repositoryId: preparation.repositoryId,
       prNumber: preparation.prNumber,
@@ -520,93 +213,117 @@ describe("idempotent GitHub Check preparation", () => {
     expect(mock.calls).toHaveLength(1);
   });
 
-  it("binds an exact ambiguous marker before classifying a moved PR obsolete", async ({ expect }) => {
-    const marker = await preparationMarker();
+  it("creates and lists the dedicated Check on the exact PR head SHA", async ({ expect }) => {
+    const marker = await derivePreparationMarker(preparation);
+    const created = {
+      id: 501, name: "ci-gate", app: { id: 111 }, head_sha: preparation.headSha,
+      status: "in_progress", external_id: marker, conclusion: null,
+    };
     const mock = sequence([
       ...authorityResponses(),
-      json({ total_count: 1, check_runs: [preparedCheck(marker)] }),
-      pullResponse({ head: { sha: "8".repeat(40) } }),
+      ...stableCanonicalReads(),
+      json({ total_count: 0, check_runs: [] }),
+      json(created, 201),
     ]);
-    await expect(prepareGitHubCheck(authority, preparation, mock.fetch, now, false)).resolves.toEqual({
-      state: "prepared",
-      reconciled: true,
-      tuple_current: false,
-      check_run_id: 501,
-      check_target_sha: preparation.testedMergeSha,
+    await expect(prepareGitHubCheck(authority, preparation, mock.fetch, now)).resolves.toEqual({
+      state: "prepared", reconciled: false, tuple_current: true,
+      check_run_id: 501, check_target_sha: preparation.headSha,
     });
-    expect(mock.calls.findIndex((call) => call.url.includes("/check-runs")))
-      .toBeLessThan(mock.calls.findIndex((call) => call.url.endsWith("/pulls/7")));
+    const post = mock.calls.at(-1)!;
+    await expect(post.json()).resolves.toMatchObject({ head_sha: preparation.headSha });
+    expect(post.url.endsWith("/check-runs")).toBe(true);
   });
 
-  it("reconciles an ambiguous create by the stable marker on the tested SHA", async ({ expect }) => {
-    const marker = await preparationMarker();
+  it("derives one stable marker per exact tuple owner and changes it on run attempt", async ({ expect }) => {
+    const first = await derivePreparationMarker(preparation);
+    await expect(derivePreparationMarker({ ...preparation })).resolves.toBe(first);
+    await expect(derivePreparationMarker({
+      ...preparation,
+      actor: { ...preparation.actor, runAttempt: "2" },
+    })).resolves.not.toBe(first);
+  });
+
+  it("adopts the unique exact existing Check without POSTing", async ({ expect }) => {
+    const marker = await derivePreparationMarker(preparation);
     const mock = sequence([
-      ...preparationAuthorityResponses(),
+      ...authorityResponses(),
+      ...stableCanonicalReads(),
+      json({ total_count: 1, check_runs: [preparedCheck(marker)] }),
+    ]);
+    await expect(prepareGitHubCheck(authority, preparation, mock.fetch, now)).resolves.toEqual({
+      state: "prepared", reconciled: true, tuple_current: true,
+      check_run_id: 501, check_target_sha: preparation.headSha,
+    });
+    expect(mock.calls.some((call) => call.method === "POST" && call.url.endsWith("/check-runs"))).toBe(false);
+  });
+
+  it("reconciles an ambiguous create by exact marker and never emits a second POST", async ({ expect }) => {
+    const marker = await derivePreparationMarker(preparation);
+    const mock = sequence([
+      ...authorityResponses(),
+      ...stableCanonicalReads(),
       json({ total_count: 0, check_runs: [] }),
-      new Error("connection reset after send"),
+      new Error("connection reset after Check creation"),
       json({ total_count: 1, check_runs: [preparedCheck(marker)] }),
     ]);
     await expect(prepareGitHubCheck(authority, preparation, mock.fetch, now)).resolves.toMatchObject({
-      state: "prepared",
-      reconciled: true,
-      tuple_current: true,
-      check_run_id: 501,
+      state: "prepared", reconciled: true, check_run_id: 501,
     });
     expect(mock.calls.filter((call) => call.method === "POST" && call.url.endsWith("/check-runs"))).toHaveLength(1);
   });
 
-  it("blocks a marker collision from another App", async ({ expect }) => {
-    const marker = await preparationMarker();
-    const mock = sequence([
-      ...preparationAuthorityResponses(),
-      json({ total_count: 1, check_runs: [preparedCheck(marker, { app: { id: 999 } })] }),
-    ]);
-    await expect(prepareGitHubCheck(authority, preparation, mock.fetch, now)).resolves.toMatchObject({
-      state: "blocked",
-    });
-    expect(mock.calls.some((call) => call.method === "POST" && call.url.endsWith("/check-runs"))).toBe(false);
+  it("fails closed on base repository/ref drift before authentication or Check creation", async ({ expect }) => {
+    for (const changed of [
+      { base: { ref: "main", repo: { id: 999, full_name: "attacker/fork" } } },
+      { base: { ref: "../main", repo: { id: 123456789, full_name: "example-owner/example-repository" } } },
+    ]) {
+      const mock = sequence([pullResponse(changed)]);
+      await expect(resolveCanonicalPullRequest(authority, {
+        repositoryId: preparation.repositoryId,
+        prNumber: preparation.prNumber,
+        headSha: preparation.headSha,
+        actor: preparation.actor,
+      }, mock.fetch, noPause)).rejects.toMatchObject({ name: "CanonicalPullRequestBlocked" });
+      expect(mock.calls).toHaveLength(1);
+    }
   });
 
-  it("blocks duplicate marker matches instead of guessing ownership", async ({ expect }) => {
-    const marker = await preparationMarker();
+  it("propagates canonical-read rate limits without polling amplification", async ({ expect }) => {
     const mock = sequence([
-      ...preparationAuthorityResponses(),
-      json({
-        total_count: 2,
-        check_runs: [preparedCheck(marker), preparedCheck(marker, { id: 502 })],
+      new Response(JSON.stringify({ message: "rate limited" }), {
+        status: 429,
+        headers: { "content-type": "application/json", "retry-after": "60" },
       }),
     ]);
-    await expect(prepareGitHubCheck(authority, preparation, mock.fetch, now)).resolves.toMatchObject({
-      state: "blocked",
-      error: "duplicate Check preparation marker",
-    });
+    const before = Date.now();
+    const error = await resolveCanonicalPullRequest(authority, {
+      repositoryId: preparation.repositoryId,
+      prNumber: preparation.prNumber,
+      headSha: preparation.headSha,
+      actor: preparation.actor,
+    }, mock.fetch, noPause).then(() => null, (failure: unknown) => failure);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).name).toMatch(/^CanonicalPullRequestUnavailable:\d{13}$/);
+    expect(Number((error as Error).name.split(":")[1])).toBeGreaterThanOrEqual(before + 60_000);
+    expect(mock.calls).toHaveLength(1);
   });
 
-  it("rejects repository authority drift before authenticating to GitHub", async ({ expect }) => {
-    const mock = sequence([]);
-    await expect(prepareGitHubCheck(
-      authority,
-      { ...preparation, repositoryId: "987654321" },
-      mock.fetch,
-      now,
-    )).resolves.toMatchObject({ state: "blocked" });
-    expect(mock.calls).toHaveLength(0);
-  });
-
-  it("scans every page and detects a duplicate marker on the last page", async ({ expect }) => {
-    const marker = await preparationMarker();
-    const responses: Array<Response | Error> = [...preparationAuthorityResponses()];
-    responses.push(json({
-      total_count: 101,
-      check_runs: [preparedCheck(marker), ...Array.from({ length: 99 }, () => ({ external_id: null }))],
-    }));
-    responses.push(json({ total_count: 101, check_runs: [preparedCheck(marker, { id: 502 })] }));
-    const mock = sequence(responses);
-    await expect(prepareGitHubCheck(authority, preparation, mock.fetch, now)).resolves.toMatchObject({
-      state: "blocked",
-      error: "duplicate Check preparation marker",
-    });
-    expect(mock.calls.some((call) => call.method === "POST" && call.url.endsWith("/check-runs"))).toBe(false);
+  it("blocks same-marker Checks from another App and duplicate matches across pages", async ({ expect }) => {
+    const marker = await derivePreparationMarker(preparation);
+    for (const listings of [
+      [json({ total_count: 1, check_runs: [preparedCheck(marker, { app: { id: 999 } })] })],
+      [
+        json({
+          total_count: 101,
+          check_runs: [preparedCheck(marker), ...Array.from({ length: 99 }, () => ({ external_id: null }))],
+        }),
+        json({ total_count: 101, check_runs: [preparedCheck(marker, { id: 502 })] }),
+      ],
+    ]) {
+      const mock = sequence([...authorityResponses(), ...stableCanonicalReads(), ...listings]);
+      await expect(prepareGitHubCheck(authority, preparation, mock.fetch, now)).resolves.toMatchObject({ state: "blocked" });
+      expect(mock.calls.some((call) => call.method === "POST" && call.url.endsWith("/check-runs"))).toBe(false);
+    }
   });
 });
 

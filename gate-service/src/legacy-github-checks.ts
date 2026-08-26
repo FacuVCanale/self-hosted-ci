@@ -1,6 +1,6 @@
 import { exportJWK, importPKCS8, SignJWT } from "jose";
 import { z } from "zod";
-import type { OidcActor, PreparedCheck } from "./contracts";
+import type { OidcActor, PreparedCheck } from "./legacy-contracts";
 
 const GITHUB_API = "https://api.github.com";
 const GITHUB_API_VERSION = "2026-03-10";
@@ -8,8 +8,6 @@ const RESPONSE_LIMIT = 128 * 1024;
 const TOKEN_MAX_TTL_MS = 62 * 60 * 1_000;
 const TOKEN_MIN_TTL_MS = 30 * 1_000;
 const EXACT_PERMISSIONS = { checks: "write", metadata: "read" } as const;
-export const MERGE_POLICY_VERSION = "local-ort-v1" as const;
-export const RUNNER_IMAGE_POLICY = "ubuntu-24.04" as const;
 
 const authoritySchema = z.strictObject({
   appId: z.string().regex(/^\d+$/).transform(Number).pipe(z.number().int().positive()),
@@ -52,16 +50,15 @@ export interface CheckPreparationEvent {
   prNumber: number;
   headSha: string;
   baseSha: string;
-  mergePolicyVersion: typeof MERGE_POLICY_VERSION;
+  testedMergeSha: string;
   actor: OidcActor;
 }
 
-export type PullRequestExpectation = Omit<CheckPreparationEvent, "baseSha" | "mergePolicyVersion">;
+export type PullRequestExpectation = Omit<CheckPreparationEvent, "baseSha" | "testedMergeSha">;
 
 export interface CanonicalPullRequest {
   baseSha: string;
-  headSha: string;
-  mergePolicyVersion: typeof MERGE_POLICY_VERSION;
+  testedMergeSha: string;
 }
 
 interface Authority {
@@ -147,11 +144,11 @@ export async function prepareGitHubCheck(
     const token = await authenticate(authority, request, now);
     const marker = await derivePreparationMarker(event);
     if (allowCreate) await verifyCurrentPullRequest(authority, event, request);
-    const existing = await findPreparedCheck(authority, token, event.headSha, marker, request);
+    const existing = await findPreparedCheck(authority, token, event.testedMergeSha, marker, request);
     if (existing !== null) {
       return prepared(
         existing.id,
-        event.headSha,
+        event.testedMergeSha,
         true,
         allowCreate || await tupleIsCurrent(authority, event, request),
       );
@@ -169,15 +166,15 @@ export async function prepareGitHubCheck(
           headers: tokenHeaders(token),
           body: JSON.stringify({
             name: "ci-gate",
-            head_sha: event.headSha,
+            head_sha: event.testedMergeSha,
             status: "in_progress",
             external_id: marker,
           }),
         },
         201,
       );
-      assertPreparedCheck(created, event.headSha, marker, authority);
-      return prepared(created.id as number, event.headSha, false, true);
+      assertPreparedCheck(created, event.testedMergeSha, marker, authority);
+      return prepared(created.id as number, event.testedMergeSha, false, true);
     } catch (createError) {
       // A transport failure or retryable GitHub response may happen after the
       // Check was committed. Re-list by the server-derived marker before ever
@@ -185,11 +182,11 @@ export async function prepareGitHubCheck(
       const reconciled = await findPreparedCheck(
         authority,
         token,
-        event.headSha,
+        event.testedMergeSha,
         marker,
         request,
       );
-      if (reconciled !== null) return prepared(reconciled.id, event.headSha, true, true);
+      if (reconciled !== null) return prepared(reconciled.id, event.testedMergeSha, true, true);
       throw createError;
     }
   } catch (error) {
@@ -288,7 +285,9 @@ function parseAuthority(rawEnv: CheckDeliveryEnv): Authority {
 
 function validatePreparationEvent(event: CheckPreparationEvent, authority: Authority): void {
   validatePullRequestExpectation(event, authority);
-  if (event.mergePolicyVersion !== MERGE_POLICY_VERSION) throw new BlockingGitHubError("merge policy mismatch");
+  if (!/^[0-9a-f]{40}$/.test(event.testedMergeSha)) {
+    throw new BlockingGitHubError("Check preparation SHA is invalid");
+  }
 }
 
 function validatePullRequestExpectation(event: PullRequestExpectation, authority: Authority): void {
@@ -307,12 +306,12 @@ function validatePullRequestExpectation(event: PullRequestExpectation, authority
 
 export async function derivePreparationMarker(event: CheckPreparationEvent): Promise<string> {
   const canonical = [
-    "ci-gate-preparation-local-ort-v1",
+    "ci-gate-preparation-v1",
     event.repositoryId,
     String(event.prNumber),
     event.headSha,
     event.baseSha,
-    event.mergePolicyVersion,
+    event.testedMergeSha,
     event.actor.runId,
     event.actor.runAttempt,
   ].join("\n");
@@ -329,8 +328,7 @@ async function verifyCurrentPullRequest(
   request: typeof fetch,
 ): Promise<void> {
   const canonical = await readCanonicalPullRequest(authority, event, request);
-  if (canonical.baseSha !== event.baseSha || canonical.headSha !== event.headSha
-    || canonical.mergePolicyVersion !== event.mergePolicyVersion) {
+  if (canonical.baseSha !== event.baseSha || canonical.testedMergeSha !== event.testedMergeSha) {
     throw new BlockingGitHubError("current pull request tuple mismatch");
   }
 }
@@ -340,19 +338,19 @@ async function readCanonicalPullRequest(
   event: PullRequestExpectation,
   request: typeof fetch,
 ): Promise<CanonicalPullRequest> {
-  const firstPull = await githubJson(
+  const pull = await githubJson(
     request,
     `${GITHUB_API}/repos/${authority.repository}/pulls/${event.prNumber}`,
     { headers: publicHeaders() },
     200,
   );
-  const head = objectValue(firstPull.head);
-  const base = objectValue(firstPull.base);
+  const head = objectValue(pull.head);
+  const base = objectValue(pull.base);
   const baseRepo = objectValue(base?.repo);
   const baseRef = base?.ref;
   if (
-    firstPull.number !== event.prNumber
-    || firstPull.state !== "open"
+    pull.number !== event.prNumber
+    || pull.state !== "open"
     || head?.sha !== event.headSha
     || baseRepo?.id !== authority.repositoryId
     || baseRepo?.full_name !== authority.repository
@@ -361,54 +359,57 @@ async function readCanonicalPullRequest(
   ) {
     throw new BlockingGitHubError("current pull request tuple mismatch");
   }
-  const firstRef = await githubJson(
+  if (pull.mergeable === false) {
+    throw new BlockingGitHubError("current pull request has a merge conflict");
+  }
+  const gitRef = await githubJson(
     request,
     `${GITHUB_API}/repos/${authority.repository}/git/ref/heads/${encodeURIComponent(baseRef)}`,
     { headers: publicHeaders() },
     200,
   );
-  const refObject = objectValue(firstRef.object);
+  const refObject = objectValue(gitRef.object);
   const baseSha = refObject?.sha;
   if (
-    firstRef.ref !== `refs/heads/${baseRef}`
+    gitRef.ref !== `refs/heads/${baseRef}`
     || refObject?.type !== "commit"
     || typeof baseSha !== "string"
     || !/^[0-9a-f]{40}$/.test(baseSha)
   ) {
     throw new BlockingGitHubError("canonical base ref is invalid");
   }
-  const secondPull = await githubJson(
+  const mergeRef = await githubJson(
     request,
-    `${GITHUB_API}/repos/${authority.repository}/pulls/${event.prNumber}`,
+    `${GITHUB_API}/repos/${authority.repository}/git/ref/pull/${event.prNumber}/merge`,
     { headers: publicHeaders() },
     200,
+    { pollableStatuses: [404] },
   );
-  const secondHead = objectValue(secondPull.head);
-  const secondBase = objectValue(secondPull.base);
-  const secondRepo = objectValue(secondBase?.repo);
-  const secondRefName = secondBase?.ref;
+  const mergeObject = objectValue(mergeRef.object);
+  const mergeSha = mergeObject?.sha;
   if (
-    secondPull.number !== event.prNumber
-    || secondPull.state !== "open"
-    || secondHead?.sha !== event.headSha
-    || secondRepo?.id !== authority.repositoryId
-    || secondRepo?.full_name !== authority.repository
-    || secondRefName !== baseRef
+    mergeRef.ref !== `refs/pull/${event.prNumber}/merge`
+    || mergeObject?.type !== "commit"
+    || typeof mergeSha !== "string"
+    || !/^[0-9a-f]{40}$/.test(mergeSha)
   ) {
-    throw new TransientGitHubError("pull request changed during canonical read", undefined, true);
+    throw new BlockingGitHubError("canonical pull request merge ref is invalid");
   }
-  const secondGitRef = await githubJson(
+  const commit = await githubJson(
     request,
-    `${GITHUB_API}/repos/${authority.repository}/git/ref/heads/${encodeURIComponent(baseRef)}`,
+    `${GITHUB_API}/repos/${authority.repository}/commits/${mergeSha}`,
     { headers: publicHeaders() },
     200,
+    { pollableStatuses: [404] },
   );
-  const secondRefObject = objectValue(secondGitRef.object);
-  if (secondGitRef.ref !== `refs/heads/${baseRef}` || secondRefObject?.type !== "commit"
-    || secondRefObject.sha !== baseSha) {
-    throw new TransientGitHubError("base ref changed during canonical read", undefined, true);
+  if (commit.sha !== mergeSha || !Array.isArray(commit.parents) || commit.parents.length !== 2) {
+    throw new TransientGitHubError("canonical tested merge commit is not ready", undefined, true);
   }
-  return { baseSha, headSha: event.headSha, mergePolicyVersion: MERGE_POLICY_VERSION };
+  const parents = commit.parents.map((parent) => objectValue(parent)?.sha);
+  if (parents[0] !== baseSha || parents[1] !== event.headSha) {
+    throw new TransientGitHubError("canonical tested merge parents are stale", undefined, true);
+  }
+  return { baseSha, testedMergeSha: mergeSha };
 }
 
 function validBranchRef(value: string): boolean {

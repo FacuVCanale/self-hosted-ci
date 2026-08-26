@@ -25,15 +25,6 @@ export const transitionGateSchema = z.strictObject({
   from_state: z.literal("hosted_selected"),
   to_state: z.enum(["hosted_success", "hosted_failure"]),
   evidence_digest: digest,
-  base_sha: sha,
-  head_sha: sha,
-  merge_policy_version: z.literal("local-ort-v1"),
-  git_version: z.string().regex(/^git version [0-9]+\.[0-9]+\.[0-9]+(?:\.[A-Za-z0-9.-]+)?(?: \(Apple Git-[0-9]+\))?$/),
-  runner_image: z.literal("ubuntu-24.04"),
-  merge_base_sha: sha,
-  tested_tree_sha: sha,
-  local_commit_sha: sha,
-  command_digest: digest,
 });
 
 export const acknowledgeActionSchema = z.strictObject({
@@ -63,9 +54,7 @@ export interface GateSnapshot {
   owner: string;
   check_run_id: number;
   base_sha: string;
-  head_sha: string;
-  merge_policy_version: "local-ort-v1";
-  runner_image: "ubuntu-24.04";
+  tested_merge_sha: string;
   evidence_digest: string | null;
 }
 

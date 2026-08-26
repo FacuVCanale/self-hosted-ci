@@ -1,10 +1,13 @@
 import { AuthenticationError, verifyGitHubOidc } from "./auth";
 import { activationModeSchema, runnerPoolIdSchema } from "./contracts";
-import { GateConflict, GateFenced, RunnerPoolGate } from "./runner-pool-gate";
+import { GateConflict, GateFenced, LocalMergeRunnerPoolGate } from "./runner-pool-gate";
 import { CanonicalPullRequestBlocked, CanonicalPullRequestUnavailable } from "./github-checks";
 import { ZodError } from "zod";
 
-export { RunnerPoolGate } from "./runner-pool-gate";
+export {
+  LocalMergeRunnerPoolGate,
+} from "./runner-pool-gate";
+export { RunnerPoolGate } from "./legacy-runner-pool-gate";
 
 const MAX_BODY_BYTES = 32 * 1024;
 
@@ -128,7 +131,7 @@ export async function handleRequest(request: Request, env: Cloudflare.Env): Prom
       if (matched === null) return json({ error: "not_found", request_id: requestId }, 404);
       const body = await boundedBody(request);
       const payload = parseJson(body);
-      const stub = env.RUNNER_POOLS.getByName(`repository:${env.GITHUB_REPOSITORY_ID}`);
+      const stub = env.RUNNER_POOLS_V2.getByName(`repository:${env.GITHUB_REPOSITORY_ID}`);
       const actor = await verifyGitHubOidc(bearer(request), {
         audience: env.OIDC_AUDIENCE,
         repository: env.OIDC_REPOSITORY,
