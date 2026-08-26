@@ -25,7 +25,7 @@ dispatch ref == current trusted default branch
 child git HEAD == tested_sha
 child repository/pr/generation/backend == coordinator package
 ci-gate source == dedicated private ci-gate App ID
-dispatch uses pinned API version + return_run_details:true + HTTP 200 exact run ID
+dispatch uses GitHub REST 2026-03-10 + HTTP 200 exact workflow_run_id/run_url/html_url receipt
 execution_trust_policy_version == 1
 execution_trust_attestation_authority_version == 1
 execution_trust_key_manifest_version == 1
@@ -196,7 +196,7 @@ Coordinator evidence proves no PR checkout, PR-local action/script, PR artifact 
 - Dispatch ref is trusted default; checkout ref is detached tested SHA.
 - Full exact SHA comparisons; no branch inference.
 - Dedicated App ID is the only accepted `ci-gate` source; native workflow/job, commit status and foreign-App collisions reject.
-- `return_run_details:true` is required and exact HTTP 200 run ID is consumed directly.
+- GitHub REST `2026-03-10` is required and the exact HTTP 200 `workflow_run_id`, `run_url`, `html_url` receipt is consumed directly; URLs bind the repository and run ID.
 - Local package requires `execution_trust_mode=exact-sha-attestation`; it carries `local_result_kind`, admission ID/digest, exact child run/job, marker-core digest, tested merge, canonical-command digest and authoritative `terminal_at`. Fallback package requires `backend=github` plus `execution_trust_mode=github-hosted` and null/evidence-only attestation/admission fields. Crossed result kinds, identities, digests or modes reject.
 - Hosted conclusion predicate requires immutable GitHub winner, current lease, logical/generation/current tuple, exact tested merge/check target, canonical command, trustworthy hosted child/deadline and dedicated App; no attestation input.
 
@@ -288,7 +288,7 @@ Use disposable private personal sandbox and selected disposable org repo:
 - Prove its automatic workflow/job check has a distinct name and cannot satisfy `ci-gate`.
 - Inject hostile title/body/branch/ref/filename strings and prove no executable interpolation.
 - Dispatch trusted default-branch child with `tested_sha`.
-- Pin API version and `return_run_details:true`; require HTTP 200 exact run ID; reject flag omission, 204/no-ID and ambiguous schemas without listing/guessing runs.
+- Pin GitHub REST `2026-03-10`; require HTTP 200 exact `workflow_run_id`, `run_url`, `html_url`; reject 204/no-ID, missing/extra fields, crossed repository/run URLs and ambiguous schemas without listing/guessing runs.
 - Resolve synthetic merge, checkout exact detached SHA, verify HEAD.
 - Use wrapper outside PR workspace to successfully pre-marker verify and atomically persist admission+marker, then prove both precede the first intercepted npm/pip/install/build/script process. Deny verifier/admission/marker persistence separately and prove zero PR-dependent child processes.
 - Observe formal claim through Runs/Jobs APIs.
@@ -412,7 +412,7 @@ Preserve without secrets: protocol package; GateStore ownership/transitions/hear
 - Rotation/revocation cannot prove old key/token failure and GitHub-only recovery.
 - Hostile metadata reaches executable context.
 - Dispatch lacks pinned API version, HTTP 200, or exact returned run ID.
-- Dispatch omits `return_run_details:true`.
+- Dispatch is not pinned to GitHub REST `2026-03-10`, or its HTTP 200 receipt omits/crosses any exact repository/run-bound URL field.
 - `started_test_at` is recorded after any PR-dependent install/build/script/tooling operation.
 - Admission/marker wrapper is PR-writable/in-workspace, admission exists without successful pre-marker verify, binding omits authority/execution fields, marker lacks admission ID/digest, hashes are circular/forgeable, uses runner clock, or persistence failure starts a PR process/fallback.
 - Thresholds lack persisted absolute deadlines/authoritative clock/exact comparator, or timeout beats a completion exactly at deadline.

@@ -24,9 +24,9 @@ class CoordinatorWorkflowTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", self.text)
 
     def test_s15_s45_dispatch_contract_is_explicit(self) -> None:
-        self.assertIn('GITHUB_API_VERSION: "2022-11-28"', self.text)
+        self.assertIn('GITHUB_API_VERSION: "2026-03-10"', self.text)
         self.assertIn("CI_GATE_CHILD_WORKFLOW: ci-gate-child.yml", self.text)
-        self.assertIn('CI_GATE_RETURN_RUN_DETAILS: "true"', self.text)
+        self.assertNotIn("RETURN_RUN_DETAILS", self.text)
         self.assertNotRegex(self.text, r"actions/runs|listWorkflowRuns|workflow-runs")
 
     def test_s43_automatic_check_has_distinct_name(self) -> None:
@@ -99,6 +99,7 @@ class ChildWorkflowTests(unittest.TestCase):
 class ReconcilerAndConsumerBoundaryTests(unittest.TestCase):
     def test_reconciler_has_schedule_and_workflow_run_recovery(self) -> None:
         text = read("ci-gate-reconciler.yml")
+        self.assertIn('GITHUB_API_VERSION: "2026-03-10"', text)
         self.assertIn('cron: "*/5 * * * *"', text)
         self.assertIn("workflow_run:", text)
         self.assertIn('workflows: ["ci-gate coordinator control", "ci-gate child attempt"]', text)

@@ -12,7 +12,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 
-PINNED_GITHUB_API_VERSION = "2022-11-28"
+PINNED_GITHUB_API_VERSION = "2026-03-10"
 CI_GATE_NAME = "ci-gate"
 ALLOWED_CONTROL_ROLES = frozenset({"coordinator", "reconciler"})
 MINIMUM_APP_PERMISSIONS = {"metadata": "read", "checks": "write"}
@@ -185,28 +185,38 @@ class DispatchRequest:
     ref: str
     default_branch: str
     api_version: str = PINNED_GITHUB_API_VERSION
-    return_run_details: bool = True
 
     def __post_init__(self) -> None:
         _exact_repository(self.repository, ProtocolFailure)
-        if not self.workflow_id or not self.default_branch:
-            raise ProtocolFailure("exact workflow and default branch are required")
+        if (
+            not isinstance(self.workflow_id, str)
+            or not self.workflow_id
+            or "/" in self.workflow_id
+            or self.workflow_id in {".", ".."}
+        ):
+            raise ProtocolFailure("dispatch workflow_id must be one exact workflow file or ID")
+        if not isinstance(self.default_branch, str) or not self.default_branch:
+            raise ProtocolFailure("exact default branch is required")
         if self.ref != self.default_branch:
             raise ProtocolFailure("child workflow ref must be the trusted default branch")
         if self.api_version != PINNED_GITHUB_API_VERSION:
             raise ProtocolFailure("GitHub API version is not pinned")
-        if self.return_run_details is not True:
-            raise ProtocolFailure("return_run_details:true is required")
 
 
 def parse_dispatch_response(request: DispatchRequest, status: int, body: Mapping[str, Any]) -> int:
     """Consume the exact returned run ID.  Run-list correlation is not an API."""
     if status != 200:
         raise ProtocolFailure("dispatch must return HTTP 200")
-    if set(body) != {"workflow_run_id"}:
-        raise ProtocolFailure("dispatch response schema must contain only exact workflow_run_id")
+    if set(body) != {"workflow_run_id", "run_url", "html_url"}:
+        raise ProtocolFailure("dispatch response schema must contain only workflow_run_id, run_url and html_url")
     run_id = body.get("workflow_run_id")
     _positive_int(run_id, "workflow_run_id", ProtocolFailure)
+    expected_run_url = f"https://api.github.com/repos/{request.repository}/actions/runs/{run_id}"
+    expected_html_url = f"https://github.com/{request.repository}/actions/runs/{run_id}"
+    if body.get("run_url") != expected_run_url:
+        raise ProtocolFailure("dispatch run_url is not bound to the exact repository and run")
+    if body.get("html_url") != expected_html_url:
+        raise ProtocolFailure("dispatch html_url is not bound to the exact repository and run")
     return run_id
 
 
