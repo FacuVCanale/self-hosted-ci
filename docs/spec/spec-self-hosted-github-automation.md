@@ -184,7 +184,7 @@ request_linkage_hash: <opaque non-transcript hash>
 - The automatic workflow/job check emitted for `pull_request_target` has a different name and must not satisfy `ci-gate`; only the explicit custom Check Run may do so.
 - PR title, body, labels, branch/ref names and filenames are untrusted data and never interpolate into shell/code/action references.
 - Coordinator dispatches the child workflow definition from the trusted current default branch.
-- Dispatch uses a pinned GitHub REST API version with `return_run_details:true` and must return HTTP 200 with the exact child workflow run ID. A boundary call without that flag, a 204/no-ID response, ambiguous lookup, or unexpected schema is a protocol failure; list-and-guess correlation is forbidden.
+- Dispatch uses GitHub REST API version `2026-03-10` and must return HTTP 200 with the exact schema `workflow_run_id`, `run_url`, `html_url`. The URLs must bind the same repository and returned run ID. A 204/no-ID response, missing/extra field, cross-repository/run URL, ambiguous lookup, or unexpected schema is a protocol failure; list-and-guess correlation is forbidden.
 - Child receives and validates the versioned package before checkout:
 
 ```yaml

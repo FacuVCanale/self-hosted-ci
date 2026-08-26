@@ -193,16 +193,29 @@ class AppAuthorityTests(unittest.TestCase):
 class DispatchAndProtocolTests(unittest.TestCase):
     def test_s45_dispatch_is_pinned_and_consumes_exact_http_200_run_id(self) -> None:
         request = DispatchRequest(REPOSITORY, "child.yml", "main", "main")
-        self.assertEqual(777, parse_dispatch_response(request, 200, {"workflow_run_id": 777}))
+        receipt = {
+            "workflow_run_id": 777,
+            "run_url": f"https://api.github.com/repos/{REPOSITORY}/actions/runs/777",
+            "html_url": f"https://github.com/{REPOSITORY}/actions/runs/777",
+        }
+        self.assertEqual(777, parse_dispatch_response(request, 200, receipt))
         invalid_requests = (
-            {"api_version": "latest"}, {"return_run_details": False}, {"ref": "feature"},
+            {"api_version": "latest"}, {"ref": "feature"}, {"workflow_id": "dir/child.yml"},
         )
         for changes in invalid_requests:
             values = {"repository": REPOSITORY, "workflow_id": "child.yml", "ref": "main", "default_branch": "main"}
             values.update(changes)
             with self.subTest(changes=changes), self.assertRaises(ProtocolFailure):
                 DispatchRequest(**values)
-        for status, body in ((204, {}), (200, {}), (200, {"workflow_run_id": 1, "other": 2}), (200, {"workflow_run_id": "1"})):
+        invalid_responses = (
+            (204, {}),
+            (200, {}),
+            (200, {**receipt, "other": 2}),
+            (200, {**receipt, "workflow_run_id": "777"}),
+            (200, {**receipt, "run_url": "https://api.github.com/repos/example-owner/other/actions/runs/777"}),
+            (200, {**receipt, "html_url": f"https://github.com/{REPOSITORY}/actions/runs/778"}),
+        )
+        for status, body in invalid_responses:
             with self.subTest(status=status, body=body), self.assertRaises(ProtocolFailure):
                 parse_dispatch_response(request, status, body)
 

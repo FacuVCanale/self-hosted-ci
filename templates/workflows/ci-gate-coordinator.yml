@@ -23,10 +23,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
-      GITHUB_API_VERSION: "2022-11-28"
+      GITHUB_API_VERSION: "2026-03-10"
       CI_GATE_COORDINATOR_ENABLED: ${{ vars.CI_GATE_COORDINATOR_ENABLED }}
       CI_GATE_CHILD_WORKFLOW: ci-gate-child.yml
-      CI_GATE_RETURN_RUN_DETAILS: "true"
       # Event metadata is passed only as data through GITHUB_EVENT_PATH. Never
       # interpolate PR title/body/ref/labels/filenames into shell or action refs.
       CI_GATE_EVENT_PATH: ${{ github.event_path }}
