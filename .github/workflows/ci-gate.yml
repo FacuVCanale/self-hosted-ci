@@ -55,7 +55,35 @@ jobs:
         run: |
           set -euo pipefail
           payload="$(jq -cn --arg repository_id "$REPOSITORY_ID" --argjson pr_number "$PR_NUMBER" --arg head_sha "$HEAD_SHA" '{repository_id:$repository_id,pr_number:$pr_number,head_sha:$head_sha}')"
-          response="$(curl -fsS -X POST -H "Authorization: Bearer $OIDC_TOKEN" -H 'Content-Type: application/json' --data "$payload" "${URL%/}/v1/pools/${POOL}/gates")"
+          response_file="$(mktemp)"; header_file="$(mktemp)"
+          trap 'rm -f "$response_file" "$header_file"' EXIT
+          status=000
+          for attempt in 1 2; do
+            : >"$response_file"; : >"$header_file"
+            if ! status="$(curl --connect-timeout 5 --max-time 30 -sS -o "$response_file" -D "$header_file" -w '%{http_code}' -X POST -H "Authorization: Bearer $OIDC_TOKEN" -H 'Content-Type: application/json' --data "$payload" "${URL%/}/v1/pools/${POOL}/gates")"; then
+              status=000
+            fi
+            if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then break; fi
+            retryable=false
+            if [[ "$status" == 503 ]] && jq -e '.error == "canonical_pull_request_unavailable"' "$response_file" >/dev/null 2>&1; then
+              retryable=true
+            fi
+            if [[ "$attempt" -eq 2 || "$retryable" != true ]]; then
+              cat "$response_file" >&2
+              exit 1
+            fi
+            retry_after="$(awk 'BEGIN{IGNORECASE=1} /^retry-after:/ {gsub("\r", "", $2); print $2; exit}' "$header_file")"
+            if ! [[ "$retry_after" =~ ^[0-9]+$ ]]; then
+              echo "Gate Service returned an invalid Retry-After" >&2
+              exit 1
+            fi
+            if [[ "$retry_after" -gt 180 ]]; then
+              echo "Gate Service Retry-After exceeds the acquire job retry budget: ${retry_after}s" >&2
+              exit 1
+            fi
+            sleep "$retry_after"
+          done
+          response="$(<"$response_file")"
           jq -e '(.logical_key|type == "string" and length > 0) and (.generation|type == "number" and . > 0) and (.version|type == "number" and . > 0) and (.state == "hosted_selected" or .state == "hosted_success" or .state == "hosted_failure") and (.check_run_id|type == "number" and . > 0) and (.base_sha|type == "string" and test("^[0-9a-f]{40}$")) and (.tested_merge_sha|type == "string" and test("^[0-9a-f]{40}$"))' <<<"$response" >/dev/null
           printf 'logical_key=%s\n' "$(jq -r '.logical_key' <<<"$response")" >>"$GITHUB_OUTPUT"
           printf 'generation=%s\n' "$(jq -r '.generation' <<<"$response")" >>"$GITHUB_OUTPUT"

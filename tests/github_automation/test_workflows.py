@@ -151,6 +151,18 @@ class HostedReusableGateWorkflowTests(unittest.TestCase):
         self.assertIn("printf 'base_sha=%s", acquire_payload)
         self.assertIn("printf 'tested_merge_sha=%s", acquire_payload)
 
+    def test_acquire_retries_only_retryable_canonical_unavailability(self) -> None:
+        acquire = self.text.split("Prepare Check and acquire hosted gate generation atomically", 1)[1]
+        acquire = acquire.split("  quality:", 1)[0]
+        self.assertIn("for attempt in 1 2", acquire)
+        self.assertIn('"$status" == 503', acquire)
+        self.assertIn('canonical_pull_request_unavailable', acquire)
+        self.assertIn("/^retry-after:/", acquire)
+        self.assertIn('sleep "$retry_after"', acquire)
+        self.assertIn("--connect-timeout 5 --max-time 30", acquire)
+        self.assertIn('"$retry_after" -gt 180', acquire)
+        self.assertEqual(1, acquire.count("payload=\"$(jq"))
+
     def test_quality_and_finalize_use_only_acquire_merge_output(self) -> None:
         output = "${{ needs.acquire.outputs.tested_merge_sha }}"
         self.assertIn(f"ref: {output}", self.text)

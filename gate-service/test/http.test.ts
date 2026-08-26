@@ -1,9 +1,25 @@
 import { exports } from "cloudflare:workers";
 import { env } from "cloudflare:workers";
 import { describe, it } from "vitest";
-import { handleRequest } from "../src/index";
+import { classifyRequestError, handleRequest } from "../src/index";
+import { CanonicalPullRequestUnavailable } from "../src/github-checks";
 
 describe("HTTP surface", () => {
+  it("maps canonical exhaustion across RPC identity loss to retryable HTTP semantics", ({ expect }) => {
+    const now = 1_800_000_000_000;
+    expect(classifyRequestError(new CanonicalPullRequestUnavailable("not ready", now + 65_001), now)).toEqual({
+      status: 503,
+      code: "canonical_pull_request_unavailable",
+      headers: { "retry-after": "66" },
+    });
+    const rpcError = new Error("not ready");
+    rpcError.name = `CanonicalPullRequestUnavailable:${now + 5_000}`;
+    expect(classifyRequestError(rpcError, now)).toEqual({
+      status: 503,
+      code: "canonical_pull_request_unavailable",
+      headers: { "retry-after": "5" },
+    });
+  });
   it("exposes health and rejects every route outside the narrow API", async ({ expect }) => {
     const health = await exports.default.fetch(new Request("https://gate.example/health"));
     expect(health.status).toBe(200);
