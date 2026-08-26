@@ -11,7 +11,15 @@
     "OIDC_REPOSITORY": "example-owner/example-repository",
     "OIDC_REPOSITORY_ID": "123456789",
     "OIDC_WORKFLOW_REF": "example-owner/example-repository/.github/workflows/ci-gate.yml@refs/heads/main",
-    "OIDC_JOB_WORKFLOW_REF": "example-owner/self-hosted-ci/.github/workflows/ci-gate.yml@refs/heads/main"
+    "OIDC_JOB_WORKFLOW_REF": "example-owner/self-hosted-ci/.github/workflows/ci-gate.yml@refs/heads/main",
+    "GITHUB_APP_ID": "111",
+    "GITHUB_APP_INSTALLATION_ID": "222",
+    "GITHUB_REPOSITORY": "example-owner/example-repository",
+    "GITHUB_REPOSITORY_ID": "123456789",
+    "GITHUB_APP_KEY_FINGERPRINT": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "secrets": {
+    "required": ["GITHUB_APP_PRIVATE_KEY_PEM"]
   },
   "durable_objects": {
     "bindings": [
@@ -38,7 +46,15 @@
         "OIDC_REPOSITORY": "SET_BY_OPERATOR",
         "OIDC_REPOSITORY_ID": "SET_BY_OPERATOR",
         "OIDC_WORKFLOW_REF": "SET_BY_OPERATOR",
-        "OIDC_JOB_WORKFLOW_REF": "SET_BY_OPERATOR"
+        "OIDC_JOB_WORKFLOW_REF": "SET_BY_OPERATOR",
+        "GITHUB_APP_ID": "SET_BY_OPERATOR",
+        "GITHUB_APP_INSTALLATION_ID": "SET_BY_OPERATOR",
+        "GITHUB_REPOSITORY": "SET_BY_OPERATOR",
+        "GITHUB_REPOSITORY_ID": "SET_BY_OPERATOR",
+        "GITHUB_APP_KEY_FINGERPRINT": "SET_BY_OPERATOR"
+      },
+      "secrets": {
+        "required": ["GITHUB_APP_PRIVATE_KEY_PEM"]
       },
       "durable_objects": {
         "bindings": [
@@ -55,7 +71,15 @@
         "OIDC_REPOSITORY": "SET_BY_OPERATOR",
         "OIDC_REPOSITORY_ID": "SET_BY_OPERATOR",
         "OIDC_WORKFLOW_REF": "SET_BY_OPERATOR",
-        "OIDC_JOB_WORKFLOW_REF": "SET_BY_OPERATOR"
+        "OIDC_JOB_WORKFLOW_REF": "SET_BY_OPERATOR",
+        "GITHUB_APP_ID": "SET_BY_OPERATOR",
+        "GITHUB_APP_INSTALLATION_ID": "SET_BY_OPERATOR",
+        "GITHUB_REPOSITORY": "SET_BY_OPERATOR",
+        "GITHUB_REPOSITORY_ID": "SET_BY_OPERATOR",
+        "GITHUB_APP_KEY_FINGERPRINT": "SET_BY_OPERATOR"
+      },
+      "secrets": {
+        "required": ["GITHUB_APP_PRIVATE_KEY_PEM"]
       },
       "durable_objects": {
         "bindings": [

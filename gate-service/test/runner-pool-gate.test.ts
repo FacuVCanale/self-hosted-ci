@@ -67,15 +67,21 @@ describe("hosted-only RunnerPoolGate", () => {
   it("allows one hosted terminal winner and fences the competing CAS", async ({ expect }) => {
     const stub = env.RUNNER_POOLS.getByName("winner-pool");
     const gate = await stub.acquire("winner-pool", acquisition(), actor);
-    const winner = await stub.transition({
-      logical_key: gate.logical_key,
-      generation: gate.generation,
-      expected_version: gate.version,
-      from_state: "hosted_selected",
-      to_state: "hosted_success",
-      evidence_digest: "a".repeat(64),
-    }, actor);
-    expect(winner.state).toBe("hosted_success");
+    const committed = await runInDurableObject(stub, async (instance: RunnerPoolGate) => {
+      const winner = await instance.transition({
+        logical_key: gate.logical_key,
+        generation: gate.generation,
+        expected_version: gate.version,
+        from_state: "hosted_selected",
+        to_state: "hosted_success",
+        evidence_digest: "a".repeat(64),
+      }, actor);
+      return { winner, outbox: await instance.listCheckOutbox() };
+    });
+    expect(committed.winner.state).toBe("hosted_success");
+    expect(committed.outbox).toHaveLength(1);
+    expect(committed.outbox[0]?.state).toBe("pending");
+    expect(committed.outbox[0]?.attempts).toBe(0);
     const loser = await runInDurableObject(stub, async (instance: RunnerPoolGate) => {
       try {
         await instance.transition({
@@ -91,10 +97,42 @@ describe("hosted-only RunnerPoolGate", () => {
         return error instanceof Error ? error.message : "unknown";
       }
     });
-    expect(loser).toContain("compare-and-swap");
+    expect(loser).toContain("conflicts with committed evidence");
     const outbox = await stub.listCheckOutbox();
     expect(outbox).toHaveLength(1);
-    expect(outbox[0]?.state).toBe("not_deliverable");
+    // The local test runtime is active, so the scheduled alarm immediately
+    // consumes the pending entry and fail-closes on its deliberately invalid key.
+    expect(outbox[0]?.state).toBe("blocked");
+    expect(outbox[0]?.attempts).toBe(1);
+    expect(outbox[0]?.last_error).toContain("private key is malformed");
+  });
+
+  it("returns an identical terminal retry and conflicts different evidence", async ({ expect }) => {
+    const stub = env.RUNNER_POOLS.getByName("terminal-retry-pool");
+    const gate = await stub.acquire("terminal-retry-pool", acquisition(), actor);
+    const transition = {
+      logical_key: gate.logical_key,
+      generation: gate.generation,
+      expected_version: gate.version,
+      from_state: "hosted_selected" as const,
+      to_state: "hosted_success" as const,
+      evidence_digest: "e".repeat(64),
+    };
+    const committed = await stub.transition(transition, actor);
+    await expect(stub.transition(transition, actor)).resolves.toEqual(committed);
+    const conflict = await runInDurableObject(stub, async (instance: RunnerPoolGate) => {
+      try {
+        await instance.transition({
+          ...transition,
+          to_state: "hosted_failure",
+          evidence_digest: "f".repeat(64),
+        }, actor);
+        return "unexpected_success";
+      } catch (error) {
+        return error instanceof Error ? error.message : "unknown";
+      }
+    });
+    expect(conflict).toContain("conflicts with committed evidence");
   });
 
   it("lets the OIDC coordinator acknowledge hosted actions", async ({ expect }) => {

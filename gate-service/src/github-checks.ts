@@ -1,0 +1,423 @@
+import { exportJWK, importPKCS8, SignJWT } from "jose";
+import { z } from "zod";
+
+const GITHUB_API = "https://api.github.com";
+const GITHUB_API_VERSION = "2026-03-10";
+const RESPONSE_LIMIT = 128 * 1024;
+const TOKEN_MAX_TTL_MS = 62 * 60 * 1_000;
+const TOKEN_MIN_TTL_MS = 30 * 1_000;
+const EXACT_PERMISSIONS = { checks: "write", metadata: "read" } as const;
+
+const authoritySchema = z.strictObject({
+  appId: z.string().regex(/^\d+$/).transform(Number).pipe(z.number().int().positive()),
+  installationId: z.string().regex(/^\d+$/).transform(Number).pipe(z.number().int().positive()),
+  repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+  repositoryId: z.string().regex(/^\d+$/).transform(Number).pipe(z.number().int().positive()),
+  keyFingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+  privateKeyPem: z.string().min(1),
+});
+
+export interface CheckDeliveryEnv {
+  GITHUB_APP_ID: string;
+  GITHUB_APP_INSTALLATION_ID: string;
+  GITHUB_REPOSITORY: string;
+  GITHUB_REPOSITORY_ID: string;
+  GITHUB_APP_KEY_FINGERPRINT: string;
+  GITHUB_APP_PRIVATE_KEY_PEM: string;
+}
+
+export interface CheckDeliveryEvent {
+  checkRunId: number;
+  headSha: string;
+  evidenceDigest: string;
+  conclusion: "success" | "failure";
+}
+
+export type CheckDeliveryResult =
+  | { state: "delivered"; reconciled: boolean }
+  | { state: "blocked"; error: string }
+  | { state: "transient"; error: string; retryAt?: number };
+
+interface Authority {
+  appId: number;
+  installationId: number;
+  repository: string;
+  repositoryId: number;
+  keyFingerprint: string;
+  privateKeyPem: string;
+}
+
+interface GitHubResponse {
+  status: number;
+  value: Record<string, unknown> | null;
+}
+
+class TransientGitHubError extends Error {
+  constructor(message: string, readonly retryAt?: number) {
+    super(message);
+  }
+}
+class BlockingGitHubError extends Error {}
+
+export async function deliverGitHubCheck(
+  rawEnv: CheckDeliveryEnv,
+  event: CheckDeliveryEvent,
+  request: typeof fetch = fetch,
+  now = new Date(),
+): Promise<CheckDeliveryResult> {
+  try {
+    const authority = authoritySchema.parse({
+      appId: rawEnv.GITHUB_APP_ID,
+      installationId: rawEnv.GITHUB_APP_INSTALLATION_ID,
+      repository: rawEnv.GITHUB_REPOSITORY,
+      repositoryId: rawEnv.GITHUB_REPOSITORY_ID,
+      keyFingerprint: rawEnv.GITHUB_APP_KEY_FINGERPRINT,
+      privateKeyPem: rawEnv.GITHUB_APP_PRIVATE_KEY_PEM,
+    });
+    validateEvent(event);
+    const token = await authenticate(authority, request, now);
+    const marker = `github-automation-evidence:${event.evidenceDigest}`;
+    const before = await getCheck(authority, token, event.checkRunId, request);
+    const beforeResult = classifyObserved(before, event, marker, authority);
+    if (beforeResult !== null) return beforeResult;
+
+    let patchAmbiguous = false;
+    let retryAt: number | undefined;
+    try {
+      const patched = await githubJson(
+        request,
+        `${GITHUB_API}/repos/${authority.repository}/check-runs/${event.checkRunId}`,
+        {
+          method: "PATCH",
+          headers: tokenHeaders(token),
+          body: JSON.stringify({ external_id: marker, conclusion: event.conclusion }),
+        },
+        200,
+      );
+      assertExactCheck(patched, event, marker, authority);
+      return { state: "delivered", reconciled: false };
+    } catch (error) {
+      if (error instanceof BlockingGitHubError) return { state: "blocked", error: error.message };
+      if (error instanceof TransientGitHubError) retryAt = error.retryAt;
+      patchAmbiguous = true;
+    }
+
+    if (patchAmbiguous) {
+      try {
+        const observed = await getCheck(authority, token, event.checkRunId, request);
+        const reconciled = classifyObserved(observed, event, marker, authority);
+        if (reconciled?.state === "delivered") return { state: "delivered", reconciled: true };
+        if (reconciled?.state === "blocked") return reconciled;
+      } catch (error) {
+        if (error instanceof BlockingGitHubError) return { state: "blocked", error: error.message };
+        if (error instanceof TransientGitHubError && error.retryAt !== undefined) {
+          retryAt = Math.max(retryAt ?? 0, error.retryAt);
+        }
+      }
+      return {
+        state: "transient",
+        error: "ambiguous Check Run PATCH was not reconciled",
+        ...(retryAt !== undefined ? { retryAt } : {}),
+      };
+    }
+    return { state: "transient", error: "Check Run delivery did not complete" };
+  } catch (error) {
+    if (error instanceof BlockingGitHubError || error instanceof z.ZodError) {
+      return { state: "blocked", error: safeMessage(error) };
+    }
+    return {
+      state: "transient",
+      error: safeMessage(error),
+      ...(error instanceof TransientGitHubError && error.retryAt !== undefined
+        ? { retryAt: error.retryAt }
+        : {}),
+    };
+  }
+}
+
+function validateEvent(event: CheckDeliveryEvent): void {
+  if (!Number.isSafeInteger(event.checkRunId) || event.checkRunId < 1) {
+    throw new BlockingGitHubError("check_run_id is invalid");
+  }
+  if (!/^[0-9a-f]{40}$/.test(event.headSha) || !/^[0-9a-f]{64}$/.test(event.evidenceDigest)) {
+    throw new BlockingGitHubError("Check Run evidence is invalid");
+  }
+  if (event.conclusion !== "success" && event.conclusion !== "failure") {
+    throw new BlockingGitHubError("Check Run conclusion is invalid");
+  }
+}
+
+async function authenticate(
+  authority: Authority,
+  request: typeof fetch,
+  now: Date,
+): Promise<string> {
+  let privateKey: CryptoKey;
+  try {
+    privateKey = await importPKCS8(authority.privateKeyPem, "RS256", { extractable: true });
+  } catch {
+    throw new BlockingGitHubError("GitHub App private key is malformed");
+  }
+  if (await spkiFingerprint(privateKey) !== authority.keyFingerprint) {
+    throw new BlockingGitHubError("GitHub App key fingerprint mismatch");
+  }
+  const issuedAt = Math.floor(now.getTime() / 1_000) - 60;
+  const jwt = await new SignJWT({})
+    .setProtectedHeader({ alg: "RS256", typ: "JWT" })
+    .setIssuer(String(authority.appId))
+    .setIssuedAt(issuedAt)
+    .setExpirationTime(issuedAt + 600)
+    .sign(privateKey);
+  const appHeaders = tokenHeaders(jwt);
+  const app = await githubJson(request, `${GITHUB_API}/app`, { headers: appHeaders }, 200);
+  if (app.id !== authority.appId || !exactPermissions(app.permissions)) {
+    throw new BlockingGitHubError("authenticated GitHub App authority mismatch");
+  }
+  const installation = await githubJson(
+    request,
+    `${GITHUB_API}/repos/${authority.repository}/installation`,
+    { headers: appHeaders },
+    200,
+  );
+  if (
+    installation.id !== authority.installationId
+    || installation.app_id !== authority.appId
+    || installation.repository_selection !== "selected"
+    || installation.suspended_at !== null
+    || !exactPermissions(installation.permissions)
+  ) {
+    throw new BlockingGitHubError("GitHub App installation authority mismatch");
+  }
+  const minted = await githubJson(
+    request,
+    `${GITHUB_API}/app/installations/${authority.installationId}/access_tokens`,
+    {
+      method: "POST",
+      headers: appHeaders,
+      body: JSON.stringify({
+        repository_ids: [authority.repositoryId],
+        permissions: EXACT_PERMISSIONS,
+      }),
+    },
+    201,
+  );
+  const token = minted.token;
+  const expiresAt = typeof minted.expires_at === "string" ? Date.parse(minted.expires_at) : Number.NaN;
+  const repositories = minted.repositories;
+  if (
+    typeof token !== "string"
+    || token.length === 0
+    || /\s/.test(token)
+    || !Number.isFinite(expiresAt)
+    || expiresAt <= now.getTime() + TOKEN_MIN_TTL_MS
+    || expiresAt > now.getTime() + TOKEN_MAX_TTL_MS
+    || !exactPermissions(minted.permissions)
+    || !Array.isArray(repositories)
+    || repositories.length !== 1
+    || !exactRepository(repositories[0], authority)
+  ) {
+    throw new BlockingGitHubError("minted installation token scope mismatch");
+  }
+  const repository = await githubJson(
+    request,
+    `${GITHUB_API}/repos/${authority.repository}`,
+    { headers: tokenHeaders(token) },
+    200,
+  );
+  if (!exactRepository(repository, authority)) {
+    throw new BlockingGitHubError("installation token repository identity mismatch");
+  }
+  return token;
+}
+
+async function spkiFingerprint(privateKey: CryptoKey): Promise<string> {
+  const privateJwk = await exportJWK(privateKey);
+  if (privateJwk.kty !== "RSA" || typeof privateJwk.n !== "string" || typeof privateJwk.e !== "string") {
+    throw new BlockingGitHubError("GitHub App private key is not RSA");
+  }
+  const publicKey = await crypto.subtle.importKey(
+    "jwk",
+    { kty: "RSA", n: privateJwk.n, e: privateJwk.e, alg: "RS256", ext: true },
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    true,
+    ["verify"],
+  );
+  const spki = await crypto.subtle.exportKey("spki", publicKey);
+  if (!(spki instanceof ArrayBuffer)) throw new BlockingGitHubError("public key export failed");
+  const digest = await crypto.subtle.digest("SHA-256", spki);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function getCheck(
+  authority: Authority,
+  token: string,
+  checkRunId: number,
+  request: typeof fetch,
+): Promise<Record<string, unknown>> {
+  const observed = await githubJson(
+    request,
+    `${GITHUB_API}/repos/${authority.repository}/check-runs/${checkRunId}`,
+    { headers: tokenHeaders(token) },
+    200,
+  );
+  if (observed.id !== checkRunId) throw new BlockingGitHubError("Check Run read returned another ID");
+  return observed;
+}
+
+function classifyObserved(
+  observed: Record<string, unknown>,
+  event: CheckDeliveryEvent,
+  marker: string,
+  authority: Authority,
+): CheckDeliveryResult | null {
+  if (
+    observed.id !== event.checkRunId
+    || observed.head_sha !== event.headSha
+    || observed.name !== "ci-gate"
+    || !hasExpectedApp(observed, authority.appId)
+  ) {
+    return { state: "blocked", error: "Check Run target identity mismatch" };
+  }
+  if (observed.external_id === marker) {
+    if (observed.status === "completed" && observed.conclusion === event.conclusion) {
+      return { state: "delivered", reconciled: true };
+    }
+    return { state: "blocked", error: "evidence marker exists with conflicting conclusion" };
+  }
+  if (
+    (observed.external_id !== null && observed.external_id !== "")
+    || observed.conclusion !== null
+  ) {
+    return { state: "blocked", error: "Check Run contains different terminal evidence" };
+  }
+  return null;
+}
+
+function assertExactCheck(
+  observed: Record<string, unknown>,
+  event: CheckDeliveryEvent,
+  marker: string,
+  authority: Authority,
+): void {
+  if (
+    observed.id !== event.checkRunId
+    || observed.head_sha !== event.headSha
+    || observed.name !== "ci-gate"
+    || !hasExpectedApp(observed, authority.appId)
+    || observed.external_id !== marker
+    || observed.status !== "completed"
+    || observed.conclusion !== event.conclusion
+  ) {
+    throw new TransientGitHubError("Check Run PATCH response did not confirm exact evidence");
+  }
+}
+
+function hasExpectedApp(observed: Record<string, unknown>, appId: number): boolean {
+  const app = observed.app;
+  return app !== null && typeof app === "object" && !Array.isArray(app)
+    && (app as Record<string, unknown>).id === appId;
+}
+
+async function githubJson(
+  request: typeof fetch,
+  url: string,
+  init: RequestInit,
+  expectedStatus: number,
+): Promise<Record<string, unknown>> {
+  let response: Response;
+  try {
+    response = await request(url, init);
+  } catch {
+    throw new TransientGitHubError("GitHub API transport failed");
+  }
+  const rateLimited = response.status === 403 && (
+    response.headers.has("retry-after") || response.headers.get("x-ratelimit-remaining") === "0"
+  );
+  const retryable = rateLimited || response.status === 408 || response.status === 409 || response.status === 425
+    || response.status === 429 || response.status >= 500;
+  if (response.status !== expectedStatus) {
+    throw retryable
+      ? new TransientGitHubError(
+        `GitHub API transient HTTP ${response.status}`,
+        retryAfter(response.headers),
+      )
+      : new BlockingGitHubError(`GitHub API rejected authority with HTTP ${response.status}`);
+  }
+  const declared = response.headers.get("content-length");
+  if (declared !== null && Number.parseInt(declared, 10) > RESPONSE_LIMIT) {
+    throw new TransientGitHubError("GitHub API response exceeds limit");
+  }
+  const body = await boundedResponseBody(response);
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(body)) as unknown;
+  } catch {
+    throw new TransientGitHubError("GitHub API response is invalid JSON");
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TransientGitHubError("GitHub API response is not an object");
+  }
+  return value as Record<string, unknown>;
+}
+
+async function boundedResponseBody(response: Response): Promise<ArrayBuffer> {
+  if (response.body === null) return new ArrayBuffer(0);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const part = await reader.read();
+    if (part.done) break;
+    size += part.value.byteLength;
+    if (size > RESPONSE_LIMIT) {
+      await reader.cancel();
+      throw new TransientGitHubError("GitHub API response exceeds limit");
+    }
+    chunks.push(part.value);
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body.buffer;
+}
+
+function retryAfter(headers: Headers): number | undefined {
+  const retry = headers.get("retry-after");
+  if (retry !== null) {
+    const seconds = Number(retry);
+    if (Number.isFinite(seconds) && seconds >= 0) return Date.now() + seconds * 1_000;
+    const date = Date.parse(retry);
+    if (Number.isFinite(date)) return date;
+  }
+  const reset = Number(headers.get("x-ratelimit-reset"));
+  return Number.isFinite(reset) && reset > 0 ? reset * 1_000 : undefined;
+}
+
+function tokenHeaders(token: string): HeadersInit {
+  return {
+    accept: "application/vnd.github+json",
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+    "x-github-api-version": GITHUB_API_VERSION,
+  };
+}
+
+function exactPermissions(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const entries = Object.entries(value);
+  return entries.length === 2
+    && entries.every(([key, permission]) => EXACT_PERMISSIONS[key as keyof typeof EXACT_PERMISSIONS] === permission);
+}
+
+function exactRepository(value: unknown, authority: Authority): boolean {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && (value as Record<string, unknown>).id === authority.repositoryId
+    && (value as Record<string, unknown>).full_name === authority.repository;
+}
+
+function safeMessage(error: unknown): string {
+  return error instanceof Error ? error.message.slice(0, 512) : "unknown GitHub delivery error";
+}

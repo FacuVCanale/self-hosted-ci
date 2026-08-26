@@ -8,6 +8,7 @@ import {
   type GateState,
   type OidcActor,
 } from "./contracts";
+import { deliverGitHubCheck, type CheckDeliveryEvent } from "./github-checks";
 
 interface GateRow extends Record<string, SqlStorageValue> {
   logical_key: string;
@@ -27,6 +28,23 @@ interface GateRow extends Record<string, SqlStorageValue> {
   updated_at: number;
 }
 
+interface OutboxRow extends Record<string, SqlStorageValue> {
+  outbox_key: string;
+  logical_key: string;
+  generation: number;
+  check_run_id: number;
+  conclusion: "success" | "failure";
+  evidence_digest: string;
+  head_sha: string;
+  attempts: number;
+  next_attempt_at: number;
+}
+
+const INERT_RECHECK_MS = 5 * 60 * 1_000;
+const MAX_ALARM_BATCH = 10;
+const MAX_BACKOFF_MS = 60 * 60 * 1_000;
+const MAX_SERVER_RETRY_DELAY_MS = 24 * 60 * 60 * 1_000;
+
 export class GateConflict extends Error {
   constructor(message: string) {
     super(message);
@@ -42,6 +60,8 @@ export class GateFenced extends Error {
 }
 
 export class RunnerPoolGate extends DurableObject<Cloudflare.Env> {
+  private deliveryInProgress = false;
+
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => this.migrate());
@@ -127,9 +147,45 @@ export class RunnerPoolGate extends DurableObject<Cloudflare.Env> {
         Date.now(),
       );
     }
+    if (version < 2) {
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec(`
+          ALTER TABLE check_outbox RENAME TO check_outbox_v1;
+          CREATE TABLE check_outbox (
+            outbox_key TEXT PRIMARY KEY,
+            logical_key TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            check_run_id INTEGER NOT NULL,
+            conclusion TEXT NOT NULL CHECK (conclusion IN ('success','failure')),
+            evidence_digest TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('pending','delivered','blocked')),
+            attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+            next_attempt_at INTEGER NOT NULL,
+            last_attempt_at INTEGER,
+            last_error TEXT,
+            delivered_at INTEGER,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (logical_key, generation) REFERENCES gates(logical_key, generation)
+          );
+          INSERT INTO check_outbox(
+            outbox_key,logical_key,generation,check_run_id,conclusion,evidence_digest,
+            state,attempts,next_attempt_at,last_attempt_at,last_error,delivered_at,created_at
+          )
+          SELECT outbox_key,logical_key,generation,check_run_id,conclusion,evidence_digest,
+            'pending',0,created_at,NULL,NULL,NULL,created_at
+          FROM check_outbox_v1;
+          DROP TABLE check_outbox_v1;
+        `);
+        this.ctx.storage.sql.exec(
+          "INSERT INTO _sql_schema_migrations(id,applied_at) VALUES (2,?)",
+          Date.now(),
+        );
+      });
+    }
   }
 
   async acquire(runnerPoolId: string, raw: unknown, actor: OidcActor): Promise<GateSnapshot> {
+    if (this.deliveryInProgress) throw new GateFenced("Check delivery is in progress");
     const input = acquireGateSchema.parse(raw);
     if (input.repository_id !== actor.repositoryId) throw new GateFenced("OIDC repository does not own request");
     const logicalKey = deriveLogicalKey(input.repository_id, input.pr_number, input.head_sha);
@@ -160,6 +216,12 @@ export class RunnerPoolGate extends DurableObject<Cloudflare.Env> {
           `UPDATE gates SET state='superseded',version=version+1,updated_at=?
            WHERE logical_key=? AND generation<? AND state='hosted_selected'`,
           now,
+          logicalKey,
+          generation,
+        );
+        this.ctx.storage.sql.exec(
+          `UPDATE check_outbox SET state='blocked',last_error='superseded by a newer gate generation'
+           WHERE logical_key=? AND generation<? AND state='pending'`,
           logicalKey,
           generation,
         );
@@ -226,6 +288,25 @@ export class RunnerPoolGate extends DurableObject<Cloudflare.Env> {
     const input = transitionGateSchema.parse(raw);
     const now = Date.now();
     let result!: GateSnapshot;
+    const initial = this.gate(input.logical_key, input.generation);
+    if (input.generation !== this.latestGeneration(input.logical_key)) {
+      throw new GateFenced("gate generation is not latest");
+    }
+    if (initial.repository_id !== actor.repositoryId || initial.owner !== `${actor.runId}:${actor.runAttempt}`) {
+      throw new GateFenced("gate belongs to another OIDC coordinator");
+    }
+    if (initial.state === "hosted_success" || initial.state === "hosted_failure") {
+      if (initial.state === input.to_state && initial.evidence_digest === input.evidence_digest) {
+        return this.snapshot(initial);
+      }
+      throw new GateConflict("terminal gate retry conflicts with committed evidence");
+    }
+    if (initial.version !== input.expected_version || initial.state !== input.from_state) {
+      throw new GateFenced("gate compare-and-swap expectation failed");
+    }
+    // Scheduling before the SQL commit means a crash can create only a harmless
+    // empty alarm, never a committed outbox row with no wake-up path.
+    await this.ctx.storage.setAlarm(now);
     this.ctx.storage.transactionSync(() => {
       const current = this.gate(input.logical_key, input.generation);
       if (input.generation !== this.latestGeneration(input.logical_key)) {
@@ -255,7 +336,10 @@ export class RunnerPoolGate extends DurableObject<Cloudflare.Env> {
         input.generation,
       );
       this.ctx.storage.sql.exec(
-        `INSERT INTO check_outbox VALUES (?,?,?,?,?,?,'not_deliverable',?)`,
+        `INSERT INTO check_outbox(
+          outbox_key,logical_key,generation,check_run_id,conclusion,evidence_digest,
+          state,attempts,next_attempt_at,last_attempt_at,last_error,delivered_at,created_at
+         ) VALUES (?,?,?,?,?,?,'pending',0,?,NULL,NULL,NULL,?)`,
         `${input.logical_key}:${input.generation}:${input.to_state}:${input.evidence_digest}`,
         input.logical_key,
         input.generation,
@@ -263,15 +347,35 @@ export class RunnerPoolGate extends DurableObject<Cloudflare.Env> {
         conclusion,
         input.evidence_digest,
         now,
+        now,
       );
       this.audit("hosted_gate_terminal", input.logical_key, input.generation, actor.subject, {
         from: input.from_state,
         to: input.to_state,
-        outbox_delivery: "not_implemented",
+        outbox_delivery: "pending",
       }, now);
       result = this.snapshot(this.gate(input.logical_key, input.generation));
     });
     return result;
+  }
+
+  override async alarm(): Promise<void> {
+    if ((this.env.ACTIVATION_MODE as string) !== "active") {
+      const pending = this.ctx.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM check_outbox WHERE state='pending'",
+      ).one().count;
+      if (pending === 0) await this.ctx.storage.deleteAlarm();
+      else await this.ctx.storage.setAlarm(Date.now() + INERT_RECHECK_MS);
+      return;
+    }
+    let processed = 0;
+    while (processed < MAX_ALARM_BATCH) {
+      const row = this.nextDueOutbox(Date.now());
+      if (row === undefined) break;
+      await this.deliverOutbox(row);
+      processed += 1;
+    }
+    await this.scheduleNextAlarm();
   }
 
   async acknowledgeControlAction(raw: unknown, actor: OidcActor): Promise<{ accepted: true }> {
@@ -348,6 +452,92 @@ export class RunnerPoolGate extends DurableObject<Cloudflare.Env> {
     } else if (existing.runner_pool_id !== runnerPoolId) {
       throw new GateConflict("Durable Object is already bound to another runner pool");
     }
+  }
+
+  private nextDueOutbox(now: number): OutboxRow | undefined {
+    return this.ctx.storage.sql.exec<OutboxRow>(
+      `SELECT o.*,g.head_sha
+       FROM check_outbox o JOIN gates g
+         ON g.logical_key=o.logical_key AND g.generation=o.generation
+       WHERE o.state='pending' AND o.next_attempt_at<=?
+       ORDER BY o.next_attempt_at,o.created_at,o.outbox_key LIMIT 1`,
+      now,
+    ).toArray()[0];
+  }
+
+  private async deliverOutbox(row: OutboxRow): Promise<void> {
+    const attemptAt = Date.now();
+    this.ctx.storage.sql.exec(
+      `UPDATE check_outbox SET attempts=attempts+1,last_attempt_at=?,last_error=NULL
+       WHERE outbox_key=? AND state='pending'`,
+      attemptAt,
+      row.outbox_key,
+    );
+    const event: CheckDeliveryEvent = {
+      checkRunId: row.check_run_id,
+      headSha: row.head_sha,
+      evidenceDigest: row.evidence_digest,
+      conclusion: row.conclusion,
+    };
+    this.deliveryInProgress = true;
+    let result;
+    try {
+      result = await deliverGitHubCheck(this.env, event);
+    } finally {
+      this.deliveryInProgress = false;
+    }
+    const now = Date.now();
+    if (result.state === "delivered") {
+      this.ctx.storage.sql.exec(
+        `UPDATE check_outbox SET state='delivered',delivered_at=?,next_attempt_at=?,last_error=NULL
+         WHERE outbox_key=? AND state='pending'`,
+        now,
+        now,
+        row.outbox_key,
+      );
+      this.audit("check_outbox_delivered", row.logical_key, row.generation, "gate-service", {
+        outbox_key: row.outbox_key,
+        reconciled: result.reconciled,
+      }, now);
+      return;
+    }
+    if (result.state === "blocked") {
+      this.ctx.storage.sql.exec(
+        `UPDATE check_outbox SET state='blocked',last_error=?
+         WHERE outbox_key=? AND state='pending'`,
+        result.error,
+        row.outbox_key,
+      );
+      this.audit("check_outbox_blocked", row.logical_key, row.generation, "gate-service", {
+        outbox_key: row.outbox_key,
+        error: result.error,
+      }, now);
+      return;
+    }
+    const attempts = row.attempts + 1;
+    const delay = Math.min(MAX_BACKOFF_MS, 2 ** Math.min(attempts, 16) * 1_000);
+    const serverRetryAt = result.retryAt === undefined
+      ? 0
+      : Math.min(result.retryAt, now + MAX_SERVER_RETRY_DELAY_MS);
+    const nextAttemptAt = Math.max(now + delay, serverRetryAt);
+    this.ctx.storage.sql.exec(
+      `UPDATE check_outbox SET next_attempt_at=?,last_error=?
+       WHERE outbox_key=? AND state='pending'`,
+      nextAttemptAt,
+      result.error,
+      row.outbox_key,
+    );
+  }
+
+  private async scheduleNextAlarm(): Promise<void> {
+    const next = this.ctx.storage.sql.exec<{ next_attempt_at: number | null }>(
+      "SELECT MIN(next_attempt_at) AS next_attempt_at FROM check_outbox WHERE state='pending'",
+    ).one().next_attempt_at;
+    if (next === null) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    await this.ctx.storage.setAlarm(Math.max(Date.now(), next));
   }
 
   private gate(logicalKey: string, generation: number): GateRow {

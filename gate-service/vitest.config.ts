@@ -7,7 +7,10 @@ export default defineConfig({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
         compatibilityDate: "2026-08-22",
-        bindings: { ACTIVATION_MODE: "active" },
+        bindings: {
+          ACTIVATION_MODE: "active",
+          GITHUB_APP_PRIVATE_KEY_PEM: "invalid-test-key",
+        },
       },
     }),
   ],

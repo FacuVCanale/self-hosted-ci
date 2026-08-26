@@ -30,21 +30,48 @@ this release never dispatches or accepts local execution.
   the contracts, schema, routes, or Durable Object methods.
 - Control-action ACKs require the same OIDC coordinator authority. Manager-style
   headers grant nothing.
+- The pre-existing Check Run is updated only by a dedicated checks-only GitHub
+  App held by this Worker/DO boundary. The non-secret authority pins the App ID,
+  selected installation ID, exact repository name and immutable ID, and the
+  lowercase SHA-256 fingerprint of the App key's DER SubjectPublicKeyInfo.
+- `GITHUB_APP_PRIVATE_KEY_PEM` is a Cloudflare secret. It is imported only in
+  memory for RS256 App JWT signing and is fingerprint-checked before any GitHub
+  request. Installation tokens are minted for exactly one repository with
+  exactly `checks:write` and `metadata:read`, validated against App,
+  installation, repository and token responses, and never persisted.
 
 Local execution stays structurally disabled until an independently reviewed
 exact-SHA verifier v1 and its authority boundary exist.
 
-## Deliberate outbox limitation
+## Effectively-once Check delivery
 
-Terminal evidence is persisted atomically in `check_outbox`, but every entry is
-marked `not_deliverable`. This slice has no GitHub Check writer, delivery claim,
-retry, or read-back implementation and therefore makes no exactly-once delivery
-claim. A later delivery slice must introduce and test that boundary before
-activation.
+Terminal evidence is persisted atomically in `check_outbox` as `pending`, and a
+per-pool Durable Object alarm processes it. Entries progress only to
+`delivered` or `blocked`; transient failures retain attempts, bounded error
+detail and an exponential-backoff `next_attempt_at`. The stable marker is
+`github-automation-evidence:<evidence_digest>`.
+
+Delivery pre-reads the exact Check Run. Matching evidence converges without a
+write; different terminal evidence blocks permanently. A blank Check Run gets a
+minimal PATCH containing only `external_id` and `conclusion`. Transport failure
+or an inexact response is ambiguous, so delivery reads the same Check Run back:
+matching marker, SHA and conclusion reconcile; blank state retries; conflicting
+evidence blocks. A crash after GitHub accepted the PATCH therefore converges on
+the next alarm without a second logical mutation.
+
+Cloudflare alarms are at-least-once, so repeated HTTP PATCH attempts remain
+possible. The guarantee is effectively-once logical evidence, not exactly-once
+network transmission.
 
 There are no D1, KV, R2, Queue, external deployment, or manager-secret bindings.
-OIDC trust values in `wrangler.jsonc` are non-secret configuration; credentials
-must never be committed.
+OIDC and GitHub App authority values in `wrangler.jsonc` are non-secret
+configuration. Before activation, set the five exact authority values and add
+the key interactively with `wrangler secret put GITHUB_APP_PRIVATE_KEY_PEM` for
+the target environment. Never commit the PEM or place it in `vars`.
+
+The default, staging and production configurations remain explicitly `inert`.
+Inert HTTP mutations fail before authentication or DO invocation, and an inert
+DO alarm performs no GitHub request; it only schedules a later inert recheck.
 
 ## Verification
 
