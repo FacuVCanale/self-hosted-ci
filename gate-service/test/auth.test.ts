@@ -8,6 +8,7 @@ const trust = {
   repositoryId: "123456789",
   workflowRef: "example-owner/example-repository/.github/workflows/ci-gate.yml@refs/heads/main",
   jobWorkflowRef: "example-owner/self-hosted-ci/.github/workflows/ci-gate.yml@refs/heads/main",
+  eventName: "pull_request_target",
 };
 
 async function oidcToken(overrides: Record<string, string> = {}) {
@@ -22,7 +23,7 @@ async function oidcToken(overrides: Record<string, string> = {}) {
     job_workflow_ref: trust.jobWorkflowRef,
     run_id: "42",
     run_attempt: "1",
-    event_name: "workflow_call",
+    event_name: trust.eventName,
     runner_environment: "github-hosted",
     ...overrides,
   };
@@ -49,5 +50,10 @@ describe("authentication", () => {
     await expect(
       verifyGitHubOidc(wrongWorkflow.token, trust, wrongWorkflow.keys, new Date(wrongWorkflow.now * 1000)),
     ).rejects.toThrow("claim mismatch: job_workflow_ref");
+
+    const wrongEvent = await oidcToken({ event_name: "pull_request" });
+    await expect(
+      verifyGitHubOidc(wrongEvent.token, trust, wrongEvent.keys, new Date(wrongEvent.now * 1000)),
+    ).rejects.toThrow("claim mismatch: event_name");
   });
 });

@@ -1,5 +1,6 @@
 import { exportJWK, importPKCS8, SignJWT } from "jose";
 import { z } from "zod";
+import type { OidcActor, PreparedCheck } from "./contracts";
 
 const GITHUB_API = "https://api.github.com";
 const GITHUB_API_VERSION = "2026-03-10";
@@ -31,12 +32,27 @@ export interface CheckDeliveryEvent {
   headSha: string;
   evidenceDigest: string;
   conclusion: "success" | "failure";
+  preparationMarker: string;
 }
 
 export type CheckDeliveryResult =
   | { state: "delivered"; reconciled: boolean }
   | { state: "blocked"; error: string }
   | { state: "transient"; error: string; retryAt?: number };
+
+export type CheckPreparationResult =
+  | ({ state: "prepared"; reconciled: boolean; tuple_current: boolean } & PreparedCheck)
+  | { state: "blocked"; error: string }
+  | { state: "transient"; error: string; retryAt?: number };
+
+export interface CheckPreparationEvent {
+  repositoryId: string;
+  prNumber: number;
+  headSha: string;
+  baseSha: string;
+  testedMergeSha: string;
+  actor: OidcActor;
+}
 
 interface Authority {
   appId: number;
@@ -59,6 +75,78 @@ class TransientGitHubError extends Error {
 }
 class BlockingGitHubError extends Error {}
 
+export async function prepareGitHubCheck(
+  rawEnv: CheckDeliveryEnv,
+  event: CheckPreparationEvent,
+  request: typeof fetch = fetch,
+  now = new Date(),
+  allowCreate = true,
+): Promise<CheckPreparationResult> {
+  try {
+    const authority = parseAuthority(rawEnv);
+    validatePreparationEvent(event, authority);
+    const token = await authenticate(authority, request, now);
+    const marker = await derivePreparationMarker(event);
+    if (allowCreate) await verifyCurrentPullRequest(authority, event, request);
+    const existing = await findPreparedCheck(authority, token, event.testedMergeSha, marker, request);
+    if (existing !== null) {
+      return prepared(
+        existing.id,
+        event.testedMergeSha,
+        true,
+        allowCreate || await tupleIsCurrent(authority, event, request),
+      );
+    }
+    if (!allowCreate) {
+      return { state: "transient", error: "Check creation intent is not yet visible" };
+    }
+
+    try {
+      const created = await githubJson(
+        request,
+        `${GITHUB_API}/repos/${authority.repository}/check-runs`,
+        {
+          method: "POST",
+          headers: tokenHeaders(token),
+          body: JSON.stringify({
+            name: "ci-gate",
+            head_sha: event.testedMergeSha,
+            status: "in_progress",
+            external_id: marker,
+          }),
+        },
+        201,
+      );
+      assertPreparedCheck(created, event.testedMergeSha, marker, authority);
+      return prepared(created.id as number, event.testedMergeSha, false, true);
+    } catch (createError) {
+      // A transport failure or retryable GitHub response may happen after the
+      // Check was committed. Re-list by the server-derived marker before ever
+      // attempting another create.
+      const reconciled = await findPreparedCheck(
+        authority,
+        token,
+        event.testedMergeSha,
+        marker,
+        request,
+      );
+      if (reconciled !== null) return prepared(reconciled.id, event.testedMergeSha, true, true);
+      throw createError;
+    }
+  } catch (error) {
+    if (error instanceof BlockingGitHubError || error instanceof z.ZodError) {
+      return { state: "blocked", error: safeMessage(error) };
+    }
+    return {
+      state: "transient",
+      error: safeMessage(error),
+      ...(error instanceof TransientGitHubError && error.retryAt !== undefined
+        ? { retryAt: error.retryAt }
+        : {}),
+    };
+  }
+}
+
 export async function deliverGitHubCheck(
   rawEnv: CheckDeliveryEnv,
   event: CheckDeliveryEvent,
@@ -66,14 +154,7 @@ export async function deliverGitHubCheck(
   now = new Date(),
 ): Promise<CheckDeliveryResult> {
   try {
-    const authority = authoritySchema.parse({
-      appId: rawEnv.GITHUB_APP_ID,
-      installationId: rawEnv.GITHUB_APP_INSTALLATION_ID,
-      repository: rawEnv.GITHUB_REPOSITORY,
-      repositoryId: rawEnv.GITHUB_REPOSITORY_ID,
-      keyFingerprint: rawEnv.GITHUB_APP_KEY_FINGERPRINT,
-      privateKeyPem: rawEnv.GITHUB_APP_PRIVATE_KEY_PEM,
-    });
+    const authority = parseAuthority(rawEnv);
     validateEvent(event);
     const token = await authenticate(authority, request, now);
     const marker = `github-automation-evidence:${event.evidenceDigest}`;
@@ -135,12 +216,172 @@ export async function deliverGitHubCheck(
   }
 }
 
+function parseAuthority(rawEnv: CheckDeliveryEnv): Authority {
+  return authoritySchema.parse({
+    appId: rawEnv.GITHUB_APP_ID,
+    installationId: rawEnv.GITHUB_APP_INSTALLATION_ID,
+    repository: rawEnv.GITHUB_REPOSITORY,
+    repositoryId: rawEnv.GITHUB_REPOSITORY_ID,
+    keyFingerprint: rawEnv.GITHUB_APP_KEY_FINGERPRINT,
+    privateKeyPem: rawEnv.GITHUB_APP_PRIVATE_KEY_PEM,
+  });
+}
+
+function validatePreparationEvent(event: CheckPreparationEvent, authority: Authority): void {
+  if (
+    event.repositoryId !== String(authority.repositoryId)
+    || event.actor.repositoryId !== event.repositoryId
+    || event.actor.repository !== authority.repository
+  ) {
+    throw new BlockingGitHubError("Check preparation repository authority mismatch");
+  }
+  if (!Number.isSafeInteger(event.prNumber) || event.prNumber < 1) {
+    throw new BlockingGitHubError("Check preparation PR number is invalid");
+  }
+  for (const sha of [event.headSha, event.baseSha, event.testedMergeSha]) {
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new BlockingGitHubError("Check preparation SHA is invalid");
+  }
+}
+
+export async function derivePreparationMarker(event: CheckPreparationEvent): Promise<string> {
+  const canonical = [
+    "ci-gate-preparation-v1",
+    event.repositoryId,
+    String(event.prNumber),
+    event.headSha,
+    event.baseSha,
+    event.testedMergeSha,
+    event.actor.runId,
+    event.actor.runAttempt,
+  ].join("\n");
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  const hex = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return `github-automation-preparation:${hex}`;
+}
+
+async function verifyCurrentPullRequest(
+  authority: Authority,
+  event: CheckPreparationEvent,
+  request: typeof fetch,
+): Promise<void> {
+  const pull = await githubJson(
+    request,
+    `${GITHUB_API}/repos/${authority.repository}/pulls/${event.prNumber}`,
+    { headers: publicHeaders() },
+    200,
+  );
+  const head = objectValue(pull.head);
+  const base = objectValue(pull.base);
+  const baseRepo = objectValue(base?.repo);
+  if (
+    pull.number !== event.prNumber
+    || pull.state !== "open"
+    || head?.sha !== event.headSha
+    || base?.sha !== event.baseSha
+    || pull.merge_commit_sha !== event.testedMergeSha
+    || baseRepo?.id !== authority.repositoryId
+    || baseRepo?.full_name !== authority.repository
+  ) {
+    throw new BlockingGitHubError("current pull request tuple mismatch");
+  }
+}
+
+function prepared(
+  checkRunId: number,
+  checkTargetSha: string,
+  reconciled: boolean,
+  tupleCurrent: boolean,
+): CheckPreparationResult {
+  return {
+    state: "prepared",
+    reconciled,
+    tuple_current: tupleCurrent,
+    check_run_id: checkRunId,
+    check_target_sha: checkTargetSha,
+  };
+}
+
+async function tupleIsCurrent(
+  authority: Authority,
+  event: CheckPreparationEvent,
+  request: typeof fetch,
+): Promise<boolean> {
+  try {
+    await verifyCurrentPullRequest(authority, event, request);
+    return true;
+  } catch (error) {
+    if (error instanceof BlockingGitHubError) return false;
+    throw error;
+  }
+}
+
+async function findPreparedCheck(
+  authority: Authority,
+  token: string,
+  headSha: string,
+  marker: string,
+  request: typeof fetch,
+): Promise<{ id: number } | null> {
+  const matches: Record<string, unknown>[] = [];
+  let page = 1;
+  let total = Number.POSITIVE_INFINITY;
+  while ((page - 1) * 100 < total) {
+    const listed = await githubJson(
+      request,
+      `${GITHUB_API}/repos/${authority.repository}/commits/${headSha}/check-runs?check_name=ci-gate&filter=all&per_page=100&page=${page}`,
+      { headers: tokenHeaders(token) },
+      200,
+    );
+    if (!Number.isSafeInteger(listed.total_count) || !Array.isArray(listed.check_runs)) {
+      throw new TransientGitHubError("GitHub Check Run list response is invalid");
+    }
+    total = listed.total_count as number;
+    matches.push(...listed.check_runs.filter((value) => {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+      const check = value as Record<string, unknown>;
+      return check.external_id === marker;
+    }) as Record<string, unknown>[]);
+    if (listed.check_runs.length === 0) break;
+    page += 1;
+  }
+  if (matches.length > 1) throw new BlockingGitHubError("duplicate Check preparation marker");
+  if (matches.length === 0) return null;
+  const match = matches[0]!;
+  assertPreparedCheck(match, headSha, marker, authority);
+  return { id: match.id as number };
+}
+
+function assertPreparedCheck(
+  observed: Record<string, unknown>,
+  headSha: string,
+  marker: string,
+  authority: Authority,
+): void {
+  if (
+    !Number.isSafeInteger(observed.id)
+    || (observed.id as number) < 1
+    || observed.name !== "ci-gate"
+    || observed.head_sha !== headSha
+    || observed.external_id !== marker
+    || observed.status !== "in_progress"
+    || observed.conclusion !== null
+    || !hasExpectedApp(observed, authority.appId)
+  ) {
+    throw new BlockingGitHubError("prepared Check Run identity mismatch");
+  }
+}
+
 function validateEvent(event: CheckDeliveryEvent): void {
   if (!Number.isSafeInteger(event.checkRunId) || event.checkRunId < 1) {
     throw new BlockingGitHubError("check_run_id is invalid");
   }
   if (!/^[0-9a-f]{40}$/.test(event.headSha) || !/^[0-9a-f]{64}$/.test(event.evidenceDigest)) {
     throw new BlockingGitHubError("Check Run evidence is invalid");
+  }
+  if (!/^github-automation-preparation:[0-9a-f]{64}$/.test(event.preparationMarker)) {
+    throw new BlockingGitHubError("Check Run preparation marker is invalid");
   }
   if (event.conclusion !== "success" && event.conclusion !== "failure") {
     throw new BlockingGitHubError("Check Run conclusion is invalid");
@@ -285,12 +526,19 @@ function classifyObserved(
     return { state: "blocked", error: "evidence marker exists with conflicting conclusion" };
   }
   if (
-    (observed.external_id !== null && observed.external_id !== "")
+    observed.external_id !== event.preparationMarker
+    || observed.status !== "in_progress"
     || observed.conclusion !== null
   ) {
     return { state: "blocked", error: "Check Run contains different terminal evidence" };
   }
   return null;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 function assertExactCheck(
@@ -401,6 +649,15 @@ function tokenHeaders(token: string): HeadersInit {
     accept: "application/vnd.github+json",
     authorization: `Bearer ${token}`,
     "content-type": "application/json",
+    "x-github-api-version": GITHUB_API_VERSION,
+  };
+}
+
+function publicHeaders(): HeadersInit {
+  return {
+    accept: "application/vnd.github+json",
+    "content-type": "application/json",
+    "user-agent": "self-hosted-ci-gate-service",
     "x-github-api-version": GITHUB_API_VERSION,
   };
 }
