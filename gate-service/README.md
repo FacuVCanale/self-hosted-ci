@@ -47,7 +47,12 @@ namespace. This release never dispatches or accepts local execution.
 ## Durable Check preparation and gate acquisition
 
 The single `POST /v1/pools/:runner_pool_id/gates` operation accepts only the exact OIDC
-coordinator and immutable PR tuple. The Durable Object derives a preparation
+coordinator plus repository, PR, expected head and expected base. The caller
+cannot supply `tested_merge_sha`: the Worker re-reads the current pull request,
+takes GitHub's current `merge_commit_sha`, and accepts it only when the public
+commit object has exactly the ordered parents `[base_sha, head_sha]`. Acquire
+returns that server-canonical SHA for exact checkout and terminal evidence. The
+Durable Object derives a preparation
 marker from that tuple plus the exact workflow run/attempt owner. Retries by the
 same owner adopt the same durably bound Check. A legitimate rerun gets a new
 marker, Check and gate generation only after the active owner terminates or its
@@ -64,8 +69,9 @@ that durable intent. Terminal reruns resolve the durable gate first; terminal
 evidence found only by a GitHub listing is never adopted heuristically.
 
 Before a new POST, the Worker re-reads the current public pull request
-from GitHub and requires exact repository, PR, head, base and synthetic merge
-identity. This public sandbox read deliberately does not broaden the checks-only
+from GitHub and requires exact repository, PR, head and base plus the already
+canonicalized synthetic merge identity and its ordered parents. This public
+sandbox read deliberately does not broaden the checks-only
 App; private repositories require a future separate read identity. The Worker
 then lists `ci-gate` Check Runs on the exact
 `tested_merge_sha` and reconciles the marker. It repeats that lookup after an

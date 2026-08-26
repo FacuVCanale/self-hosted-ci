@@ -12,6 +12,7 @@ import {
   deliverGitHubCheck,
   derivePreparationMarker,
   prepareGitHubCheck,
+  resolveCanonicalTestedMerge,
   type CheckDeliveryEvent,
 } from "./github-checks";
 
@@ -288,24 +289,48 @@ export class RunnerPoolGate extends DurableObject<Cloudflare.Env> {
     if (this.deliveryInProgress) throw new GateFenced("Check delivery is in progress");
     const input = acquireGateSchema.parse(raw);
     if (input.repository_id !== actor.repositoryId) throw new GateFenced("OIDC repository does not own request");
+    this.ctx.storage.transactionSync(() => this.bindPool(runnerPoolId));
+    const owner = `${actor.runId}:${actor.runAttempt}`;
+    const testedMergeSha = await resolveCanonicalTestedMerge(this.env, {
+      repositoryId: input.repository_id,
+      prNumber: input.pr_number,
+      headSha: input.head_sha,
+      baseSha: input.base_sha,
+      actor,
+    });
+    const local = this.ctx.storage.sql.exec<GateRow>(
+      `SELECT * FROM gates WHERE repository_id=? AND pr_number=?
+       ORDER BY created_at DESC,generation DESC LIMIT 1`,
+      input.repository_id,
+      input.pr_number,
+    ).toArray()[0];
+    const sameCanonicalTuple = local !== undefined
+      && local.head_sha === input.head_sha
+      && local.base_sha === input.base_sha
+      && local.tested_merge_sha === testedMergeSha;
+    if (sameCanonicalTuple && local.owner === owner) return this.snapshot(local);
+    if (sameCanonicalTuple && local.state === "hosted_selected" && local.owner !== owner
+      && (local.hosted_deadline_at === null || Date.now() < local.hosted_deadline_at)) {
+      throw new GateFenced("logical gate is owned by an active coordinator");
+    }
+    const resolvedInput = { ...input, tested_merge_sha: testedMergeSha };
     const logicalKey = deriveLogicalKey(input.repository_id, input.pr_number, input.head_sha);
     const preparationMarker = await derivePreparationMarker({
       repositoryId: input.repository_id,
       prNumber: input.pr_number,
       headSha: input.head_sha,
       baseSha: input.base_sha,
-      testedMergeSha: input.tested_merge_sha,
+      testedMergeSha,
       actor,
     });
     const acquisitionKey = `${input.repository_id}:${input.pr_number}`;
     const inProgress = this.acquisitions.get(acquisitionKey);
-    const owner = `${actor.runId}:${actor.runAttempt}`;
     if (inProgress !== undefined) {
       if (inProgress.owner === owner && inProgress.marker === preparationMarker) return inProgress.promise;
       await inProgress.promise.catch(() => undefined);
       return this.acquire(runnerPoolId, input, actor);
     }
-    const acquisition = this.acquireOnce(runnerPoolId, input, actor, logicalKey, preparationMarker);
+    const acquisition = this.acquireOnce(runnerPoolId, resolvedInput, actor, logicalKey, preparationMarker);
     this.acquisitions.set(acquisitionKey, { owner, marker: preparationMarker, promise: acquisition });
     try {
       return await acquisition;
@@ -316,7 +341,7 @@ export class RunnerPoolGate extends DurableObject<Cloudflare.Env> {
 
   private async acquireOnce(
     runnerPoolId: string,
-    input: ReturnType<typeof acquireGateSchema.parse>,
+    input: ReturnType<typeof acquireGateSchema.parse> & { tested_merge_sha: string },
     actor: OidcActor,
     logicalKey: string,
     preparationMarker: string,
@@ -1197,6 +1222,7 @@ export class RunnerPoolGate extends DurableObject<Cloudflare.Env> {
       runner_pool_id: row.runner_pool_id,
       owner: row.owner,
       check_run_id: row.check_run_id,
+      tested_merge_sha: row.tested_merge_sha,
       evidence_digest: row.evidence_digest,
     };
   }

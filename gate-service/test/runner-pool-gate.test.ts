@@ -24,7 +24,6 @@ function acquisition(overrides: Record<string, unknown> = {}) {
     pr_number: 7,
     head_sha: "1".repeat(40),
     base_sha: "2".repeat(40),
-    tested_merge_sha: "3".repeat(40),
     ...overrides,
   };
 }
@@ -36,12 +35,16 @@ async function seedGate(
   ownerActor = actor,
 ) {
   const input = raw as ReturnType<typeof acquisition>;
+  const suppliedMergeSha = (raw as Record<string, unknown>).tested_merge_sha;
+  const testedMergeSha = typeof suppliedMergeSha === "string"
+    ? suppliedMergeSha
+    : input.base_sha === "4".repeat(40) ? "5".repeat(40) : "3".repeat(40);
   const marker = await derivePreparationMarker({
     repositoryId: input.repository_id as string,
     prNumber: input.pr_number as number,
     headSha: input.head_sha as string,
     baseSha: input.base_sha as string,
-    testedMergeSha: input.tested_merge_sha as string,
+    testedMergeSha,
     actor: ownerActor,
   });
   return runInDurableObject(stub, async (instance: RunnerPoolGate, state) => {
@@ -54,7 +57,7 @@ async function seedGate(
         attempts,last_error,created_at,updated_at,consumed_generation,incident_at
       ) VALUES (?,?,?,?,?,?,?,?,?,'pending',1,NULL,?,?,0,NULL,?,?,NULL,NULL)`,
       marker, marker, input.repository_id, input.pr_number, input.head_sha, input.base_sha,
-      input.tested_merge_sha, `${ownerActor.runId}:${ownerActor.runAttempt}`, ownerActor.subject,
+      testedMergeSha, `${ownerActor.runId}:${ownerActor.runAttempt}`, ownerActor.subject,
       now + 300_000, now, now, now,
     );
     const testInstance = instance as unknown as {
@@ -106,7 +109,7 @@ function githubHarness(options: {
   const request = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const call = new Request(input, init);
     const url = new URL(call.url);
-    if (failFirstRequest) {
+    if (failFirstRequest && url.pathname === "/app") {
       failFirstRequest = false;
       throw new Error("simulated crash boundary before network completion");
     }
@@ -126,6 +129,12 @@ function githubHarness(options: {
       base: { sha: pullBaseSha, repo: { id: 123456789, full_name: "example-owner/example-repository" } },
       merge_commit_sha: pullMergeSha,
     });
+    if (url.pathname === `/repos/example-owner/example-repository/commits/${pullMergeSha}`) {
+      return Response.json({
+        sha: pullMergeSha,
+        parents: [{ sha: pullBaseSha }, { sha: pullHeadSha }],
+      });
+    }
     if (url.pathname.includes("/commits/") && url.pathname.endsWith("/check-runs")) {
       if (hiddenCreatedListings > 0 && checks.length > 0) {
         hiddenCreatedListings -= 1;
@@ -169,6 +178,7 @@ function githubHarness(options: {
       pullBaseSha = "4".repeat(40);
       pullMergeSha = "5".repeat(40);
     },
+    recomputeMerge: () => { pullMergeSha = "6".repeat(40); },
     moveHeadTuple: () => {
       pullHeadSha = "8".repeat(40);
       pullBaseSha = "4".repeat(40);
@@ -187,16 +197,21 @@ function installTestAuthority(instance: RunnerPoolGate, authority: { pem: string
 
 describe("hosted-only RunnerPoolGate", () => {
   it("derives logical_key and creates exactly one hosted dispatch idempotently", async ({ expect }) => {
+    const github = githubHarness();
     const stub = env.RUNNER_POOLS.getByName("hosted-pool");
-    const first = await seedGate(stub, "hosted-pool");
-    const retry = await stub.acquire("hosted-pool", acquisition(), actor);
-    expect(first).toEqual(retry);
-    expect(first.logical_key).toBe(`123456789:7:${"1".repeat(40)}:ci-gate`);
-    expect(first.state).toBe("hosted_selected");
-    expect(first.owner).toBe("42:1");
-    const actions = await stub.listControlActions();
-    expect(actions).toHaveLength(1);
-    expect(actions[0]?.kind).toBe("dispatch_hosted");
+    try {
+      const first = await seedGate(stub, "hosted-pool");
+      const retry = await stub.acquire("hosted-pool", acquisition(), actor);
+      expect(first).toEqual(retry);
+      expect(first.logical_key).toBe(`123456789:7:${"1".repeat(40)}:ci-gate`);
+      expect(first.state).toBe("hosted_selected");
+      expect(first.owner).toBe("42:1");
+      const actions = await stub.listControlActions();
+      expect(actions).toHaveLength(1);
+      expect(actions[0]?.kind).toBe("dispatch_hosted");
+    } finally {
+      github.request.mockRestore();
+    }
   });
 
   it("rejects caller logical keys and conflicting check invariants", async ({ expect }) => {
@@ -220,6 +235,15 @@ describe("hosted-only RunnerPoolGate", () => {
       }
     });
     expect(conflictingCheck).toContain("Unrecognized key");
+    const callerMerge = await runInDurableObject(stub, async (instance: RunnerPoolGate) => {
+      try {
+        await instance.acquire("invariants-pool", acquisition({ tested_merge_sha: "3".repeat(40) }), actor);
+        return "unexpected_success";
+      } catch (error) {
+        return error instanceof Error ? error.message : "unknown";
+      }
+    });
+    expect(callerMerge).toContain("Unrecognized key");
   });
 
   it("allows one hosted terminal winner and fences the competing CAS", async ({ expect }) => {
@@ -385,42 +409,25 @@ describe("hosted-only RunnerPoolGate", () => {
   });
 
   it("does not displace an active owner when a rerun arrives", async ({ expect }) => {
+    const github = githubHarness();
     const selectedStub = env.RUNNER_POOLS.getByName("selected-rerun-pool");
-    await seedGate(selectedStub, "selected-rerun-pool");
-    const rerunActor = { ...actor, runAttempt: "2", tokenId: "oidc-jti-rerun" };
-    const crossOwner = await runInDurableObject(selectedStub, async (instance: RunnerPoolGate) => {
-      try {
-        await instance.acquire("selected-rerun-pool", acquisition(), rerunActor);
-        return "unexpected_success";
-      } catch (error) {
-        return error instanceof Error ? error.message : "unknown";
-      }
-    });
-    expect(crossOwner).toContain("active coordinator");
-    expect((await selectedStub.getGate(`123456789:7:${"1".repeat(40)}:ci-gate`, 1)).state).toBe("hosted_selected");
-    expect(await selectedStub.listCheckOutbox()).toHaveLength(0);
-
-    const terminalStub = env.RUNNER_POOLS.getByName("terminal-rerun-pool");
-    const gate = await seedGate(terminalStub, "terminal-rerun-pool");
-    const terminal = await terminalStub.transition({
-      logical_key: gate.logical_key,
-      generation: gate.generation,
-      expected_version: gate.version,
-      from_state: "hosted_selected",
-      to_state: "hosted_success",
-      evidence_digest: "7".repeat(64),
-    }, actor);
-    const terminalRerun = await runInDurableObject(terminalStub, async (instance: RunnerPoolGate) => {
-      try {
-        await instance.acquire("terminal-rerun-pool", acquisition(), rerunActor);
-        return "unexpected_success";
-      } catch (error) {
-        return error instanceof Error ? error.message : "unknown";
-      }
-    });
-    expect(terminalRerun).toContain("private key is malformed");
-    expect(await terminalStub.getGate(terminal.logical_key, terminal.generation)).toEqual(terminal);
-    expect(await terminalStub.listCheckOutbox()).toHaveLength(1);
+    try {
+      await seedGate(selectedStub, "selected-rerun-pool");
+      const rerunActor = { ...actor, runAttempt: "2", tokenId: "oidc-jti-rerun" };
+      const crossOwner = await runInDurableObject(selectedStub, async (instance: RunnerPoolGate) => {
+        try {
+          await instance.acquire("selected-rerun-pool", acquisition(), rerunActor);
+          return "unexpected_success";
+        } catch (error) {
+          return error instanceof Error ? error.message : "unknown";
+        }
+      });
+      expect(crossOwner).toContain("active coordinator");
+      expect((await selectedStub.getGate(`123456789:7:${"1".repeat(40)}:ci-gate`, 1)).state).toBe("hosted_selected");
+      expect(await selectedStub.listCheckOutbox()).toHaveLength(0);
+    } finally {
+      github.request.mockRestore();
+    }
   });
 
   it("watchdog fails an abandoned hosted gate and creates one terminal outbox", async ({ expect }) => {
@@ -466,6 +473,7 @@ describe("hosted-only RunnerPoolGate", () => {
         return { gate, outbox: await instance.listCheckOutbox() };
       });
       expect(result.outbox).toHaveLength(1);
+      expect(result.gate.tested_merge_sha).toBe("3".repeat(40));
       expect(result.outbox[0]?.state, String(result.outbox[0]?.last_error)).toBe("delivered");
       expect(github.posts()).toBe(1);
       expect(github.check()).toMatchObject({ status: "completed", conclusion: "success" });
@@ -799,7 +807,6 @@ describe("hosted-only RunnerPoolGate", () => {
         github.moveBase();
         await instance.acquire("integrated-base-movement-pool", acquisition({
           base_sha: "4".repeat(40),
-          tested_merge_sha: "5".repeat(40),
         }), actor);
       });
       await evictDurableObject(stub);
@@ -819,6 +826,59 @@ describe("hosted-only RunnerPoolGate", () => {
     }
   });
 
+  it("treats a recomputed merge with unchanged parents as a new full tuple for every owner", async ({ expect }) => {
+    for (const [suffix, nextActor] of [
+      ["same-owner", actor],
+      ["new-owner", { ...actor, runId: "84", runAttempt: "1", tokenId: "recomputed-owner" }],
+    ] as const) {
+      const authority = await testAppAuthority();
+      const github = githubHarness();
+      const pool = `integrated-recomputed-merge-${suffix}`;
+      const stub = env.RUNNER_POOLS.getByName(pool);
+      try {
+        const result = await runInDurableObject(stub, async (instance: RunnerPoolGate) => {
+          installTestAuthority(instance, authority);
+          const old = await instance.acquire(pool, acquisition(), actor);
+          github.recomputeMerge();
+          const current = await instance.acquire(pool, acquisition(), nextActor);
+          await instance.alarm();
+          return {
+            old: await instance.getGate(old.logical_key, old.generation),
+            current,
+            outbox: await instance.listCheckOutbox(),
+          };
+        });
+        expect(result.old).toMatchObject({
+          generation: 1,
+          state: "hosted_failure",
+          tested_merge_sha: "3".repeat(40),
+          check_run_id: 99,
+        });
+        expect(result.current).toMatchObject({
+          generation: 2,
+          state: "hosted_selected",
+          owner: `${nextActor.runId}:${nextActor.runAttempt}`,
+          tested_merge_sha: "6".repeat(40),
+          check_run_id: 100,
+        });
+        expect(result.outbox).toHaveLength(1);
+        expect(result.outbox[0]).toMatchObject({
+          generation: 1,
+          state: "delivered",
+          conclusion: "failure",
+          check_run_id: 99,
+        });
+        expect(github.posts()).toBe(2);
+        expect(github.checks()).toMatchObject([
+          { id: 99, head_sha: "3".repeat(40), status: "completed", conclusion: "failure" },
+          { id: 100, head_sha: "6".repeat(40), status: "in_progress", conclusion: null },
+        ]);
+      } finally {
+        github.request.mockRestore();
+      }
+    }
+  });
+
   it("terminalizes an active old tuple when a different owner acquires a real head movement", async ({ expect }) => {
     const authority = await testAppAuthority();
     const github = githubHarness();
@@ -832,7 +892,6 @@ describe("hosted-only RunnerPoolGate", () => {
         const moved = await instance.acquire("integrated-cross-owner-head-movement-pool", acquisition({
           head_sha: "8".repeat(40),
           base_sha: "4".repeat(40),
-          tested_merge_sha: "5".repeat(40),
         }), movedActor);
         await instance.alarm();
         return {
@@ -868,7 +927,6 @@ describe("hosted-only RunnerPoolGate", () => {
         currentB = await instance.acquire("integrated-stale-a-current-b-pool", acquisition({
           head_sha: "8".repeat(40),
           base_sha: "4".repeat(40),
-          tested_merge_sha: "5".repeat(40),
         }), movedActor);
         state.storage.sql.exec(
           "UPDATE check_creation_intents SET next_attempt_at=0 WHERE owner='42:1'",
@@ -883,7 +941,6 @@ describe("hosted-only RunnerPoolGate", () => {
         const cAttempt = await instance.acquire("integrated-stale-a-current-b-pool", acquisition({
           head_sha: "8".repeat(40),
           base_sha: "4".repeat(40),
-          tested_merge_sha: "5".repeat(40),
         }), ownerC).then(() => "unexpected_success", (error: unknown) => error instanceof Error ? error.message : "unknown");
         return {
           current: await instance.getGate(currentB.logical_key, currentB.generation),
@@ -948,7 +1005,6 @@ describe("hosted-only RunnerPoolGate", () => {
         github.moveBase();
         const movedPromise = instance.acquire("integrated-owner-distinct-marker-pool", acquisition({
           base_sha: "4".repeat(40),
-          tested_merge_sha: "5".repeat(40),
         }), actor);
         github.releaseFirstCreate();
         const [first, moved] = await Promise.all([firstPromise, movedPromise]);

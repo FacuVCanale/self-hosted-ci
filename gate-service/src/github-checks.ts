@@ -54,6 +54,8 @@ export interface CheckPreparationEvent {
   actor: OidcActor;
 }
 
+export type PullRequestExpectation = Omit<CheckPreparationEvent, "testedMergeSha">;
+
 interface Authority {
   appId: number;
   installationId: number;
@@ -74,6 +76,16 @@ class TransientGitHubError extends Error {
   }
 }
 class BlockingGitHubError extends Error {}
+
+export async function resolveCanonicalTestedMerge(
+  rawEnv: CheckDeliveryEnv,
+  event: PullRequestExpectation,
+  request: typeof fetch = fetch,
+): Promise<string> {
+  const authority = parseAuthority(rawEnv);
+  validatePullRequestExpectation(event, authority);
+  return readCanonicalTestedMerge(authority, event, request);
+}
 
 export async function prepareGitHubCheck(
   rawEnv: CheckDeliveryEnv,
@@ -228,6 +240,13 @@ function parseAuthority(rawEnv: CheckDeliveryEnv): Authority {
 }
 
 function validatePreparationEvent(event: CheckPreparationEvent, authority: Authority): void {
+  validatePullRequestExpectation(event, authority);
+  if (!/^[0-9a-f]{40}$/.test(event.testedMergeSha)) {
+    throw new BlockingGitHubError("Check preparation SHA is invalid");
+  }
+}
+
+function validatePullRequestExpectation(event: PullRequestExpectation, authority: Authority): void {
   if (
     event.repositoryId !== String(authority.repositoryId)
     || event.actor.repositoryId !== event.repositoryId
@@ -238,7 +257,7 @@ function validatePreparationEvent(event: CheckPreparationEvent, authority: Autho
   if (!Number.isSafeInteger(event.prNumber) || event.prNumber < 1) {
     throw new BlockingGitHubError("Check preparation PR number is invalid");
   }
-  for (const sha of [event.headSha, event.baseSha, event.testedMergeSha]) {
+  for (const sha of [event.headSha, event.baseSha]) {
     if (!/^[0-9a-f]{40}$/.test(sha)) throw new BlockingGitHubError("Check preparation SHA is invalid");
   }
 }
@@ -266,6 +285,17 @@ async function verifyCurrentPullRequest(
   event: CheckPreparationEvent,
   request: typeof fetch,
 ): Promise<void> {
+  const canonical = await readCanonicalTestedMerge(authority, event, request);
+  if (canonical !== event.testedMergeSha) {
+    throw new BlockingGitHubError("current pull request tuple mismatch");
+  }
+}
+
+async function readCanonicalTestedMerge(
+  authority: Authority,
+  event: PullRequestExpectation,
+  request: typeof fetch,
+): Promise<string> {
   const pull = await githubJson(
     request,
     `${GITHUB_API}/repos/${authority.repository}/pulls/${event.prNumber}`,
@@ -275,17 +305,33 @@ async function verifyCurrentPullRequest(
   const head = objectValue(pull.head);
   const base = objectValue(pull.base);
   const baseRepo = objectValue(base?.repo);
+  const mergeSha = pull.merge_commit_sha;
   if (
     pull.number !== event.prNumber
     || pull.state !== "open"
     || head?.sha !== event.headSha
     || base?.sha !== event.baseSha
-    || pull.merge_commit_sha !== event.testedMergeSha
     || baseRepo?.id !== authority.repositoryId
     || baseRepo?.full_name !== authority.repository
+    || typeof mergeSha !== "string"
+    || !/^[0-9a-f]{40}$/.test(mergeSha)
   ) {
     throw new BlockingGitHubError("current pull request tuple mismatch");
   }
+  const commit = await githubJson(
+    request,
+    `${GITHUB_API}/repos/${authority.repository}/commits/${mergeSha}`,
+    { headers: publicHeaders() },
+    200,
+  );
+  if (commit.sha !== mergeSha || !Array.isArray(commit.parents) || commit.parents.length !== 2) {
+    throw new BlockingGitHubError("canonical tested merge commit is invalid");
+  }
+  const parents = commit.parents.map((parent) => objectValue(parent)?.sha);
+  if (parents[0] !== event.baseSha || parents[1] !== event.headSha) {
+    throw new BlockingGitHubError("canonical tested merge parents mismatch");
+  }
+  return mergeSha;
 }
 
 function prepared(
