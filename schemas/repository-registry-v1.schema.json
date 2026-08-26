@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github-automation.invalid/schemas/repository-registry-v1.schema.json",
+  "title": "Exact repository opt-in registry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["registry_schema_version", "repositories"],
+  "properties": {
+    "$schema": { "type": "string", "const": "../schemas/repository-registry-v1.schema.json" },
+    "registry_schema_version": { "const": 1 },
+    "repositories": { "type": "object", "propertyNames": { "$ref": "#/$defs/repositoryName" }, "additionalProperties": { "$ref": "#/$defs/repositoryConfig" } }
+  },
+  "$defs": {
+    "repositoryName": { "type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$", "not": { "pattern": "\\*" } },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "repositoryConfig": {
+      "type": "object", "additionalProperties": false, "required": ["ci_runner", "ai_reviewer"],
+      "properties": {
+        "ci_runner": { "enum": ["github", "local-with-github-fallback"] }, "ai_reviewer": { "enum": ["enabled", "disabled"] },
+        "execution_trust": {
+          "type": "object", "additionalProperties": false,
+          "required": ["policy_version", "mode", "attestation_authority_version", "key_manifest_version", "key_manifest_generation", "key_manifest_digest", "offline_root_public_fingerprint", "public_key_id", "public_key_fingerprint", "inventory_drift_guard"],
+          "properties": {
+            "policy_version": { "const": 1 }, "mode": { "const": "exact-sha-attestation" }, "attestation_authority_version": { "const": 1 }, "key_manifest_version": { "const": 1 },
+            "key_manifest_generation": { "type": "integer", "minimum": 1 }, "key_manifest_digest": { "$ref": "#/$defs/sha256" }, "offline_root_public_fingerprint": { "$ref": "#/$defs/sha256" },
+            "public_key_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" }, "public_key_fingerprint": { "$ref": "#/$defs/sha256" }, "inventory_drift_guard": { "const": "enabled" }
+          }
+        },
+        "authority": {
+          "type": "object", "additionalProperties": false, "required": ["kind", "installation_id", "runner_group"],
+          "properties": { "kind": { "enum": ["personal-repository", "organization-runner-group"] }, "installation_id": { "type": "integer", "minimum": 1 }, "runner_group": { "type": ["string", "null"] } },
+          "allOf": [
+            { "if": { "properties": { "kind": { "const": "personal-repository" } }, "required": ["kind"] }, "then": { "properties": { "runner_group": { "type": "null" } } } },
+            { "if": { "properties": { "kind": { "const": "organization-runner-group" } }, "required": ["kind"] }, "then": { "properties": { "runner_group": { "type": "string", "minLength": 1, "not": { "pattern": "\\*" } } } } }
+          ]
+        }
+      },
+      "allOf": [
+        { "if": { "properties": { "ci_runner": { "const": "github" } }, "required": ["ci_runner"] }, "then": { "not": { "anyOf": [{ "required": ["execution_trust"] }, { "required": ["authority"] }] } } },
+        { "if": { "properties": { "ci_runner": { "const": "local-with-github-fallback" } }, "required": ["ci_runner"] }, "then": { "required": ["execution_trust", "authority"] } }
+      ]
+    }
+  }
+}

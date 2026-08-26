@@ -1,0 +1,16 @@
+{
+  "ci_gate_authority_version": 1,
+  "enabled": false,
+  "owner": "example-owner",
+  "app_id": 123456,
+  "app_slug": "example-ci-gate",
+  "installations": {
+    "example-owner/example-repository": 12345678
+  },
+  "allowed_control_workflow": null,
+  "key_fingerprint": "EXAMPLE_SHA256_FINGERPRINT_REPLACE_LOCALLY",
+  "minimum_permissions": { "metadata": "read", "checks": "write" },
+  "explicitly_denied_permissions": ["contents", "commit_statuses", "actions", "workflows", "administration", "pull_requests_write", "issues_write", "deployments", "environments", "secrets", "members", "organization_administration"],
+  "token_ttl_max_seconds": 3600,
+  "activation_blockers": ["trusted control workflow not configured", "private key not installed in a workflow-scoped encrypted secret"]
+}

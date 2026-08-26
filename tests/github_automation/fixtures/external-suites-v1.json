@@ -1,0 +1,32 @@
+{
+  "contract_version": 1,
+  "suites": {
+    "SANDBOX": {
+      "command_env": "GITHUB_AUTOMATION_SANDBOX_COMMAND",
+      "required_env": [
+        "GITHUB_AUTOMATION_SANDBOX_REPOSITORY",
+        "GITHUB_AUTOMATION_SANDBOX_INSTALLATION_ID",
+        "GITHUB_AUTOMATION_SANDBOX_COMMAND"
+      ],
+      "evidence": "disposable private GitHub repository protocol and fallback evidence"
+    },
+    "WSL": {
+      "command_env": "GITHUB_AUTOMATION_WSL_COMMAND",
+      "required_env": [
+        "GITHUB_AUTOMATION_WSL_DISTRO",
+        "GITHUB_AUTOMATION_WSL_EVIDENCE_DIR",
+        "GITHUB_AUTOMATION_WSL_COMMAND"
+      ],
+      "evidence": "dedicated WSL/Windows boundary, network policy and lifecycle evidence"
+    },
+    "PILOT": {
+      "command_env": "GITHUB_AUTOMATION_PILOT_COMMAND",
+      "required_env": [
+        "GITHUB_AUTOMATION_PILOT_REPOSITORY",
+        "GITHUB_AUTOMATION_PILOT_AUTHORITY_RECORD",
+        "GITHUB_AUTOMATION_PILOT_COMMAND"
+      ],
+      "evidence": "credentialed pilot, required-check source, push-main and rollback evidence"
+    }
+  }
+}

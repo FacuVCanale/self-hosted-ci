@@ -1,0 +1,45 @@
+name: ci-gate coordinator control
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+# This workflow deliberately cannot write Checks. The dedicated ci-gate App is
+# the only Check Run writer; the coordinator only owns routing/dispatch.
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-gate-coordinator-${{ github.repository_id }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  coordinate:
+    name: ci-gate coordinator (not the required gate)
+    # Inert until the reviewed control-plane package and authority are installed.
+    if: vars.CI_GATE_COORDINATOR_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GITHUB_API_VERSION: "2022-11-28"
+      CI_GATE_COORDINATOR_ENABLED: ${{ vars.CI_GATE_COORDINATOR_ENABLED }}
+      CI_GATE_CHILD_WORKFLOW: ci-gate-child.yml
+      CI_GATE_RETURN_RUN_DETAILS: "true"
+      # Event metadata is passed only as data through GITHUB_EVENT_PATH. Never
+      # interpolate PR title/body/ref/labels/filenames into shell or action refs.
+      CI_GATE_EVENT_PATH: ${{ github.event_path }}
+      CI_GATE_REPOSITORY: ${{ github.repository }}
+      CI_GATE_REPOSITORY_ID: ${{ github.repository_id }}
+      CI_GATE_OWNER_RUN_ID: ${{ github.run_id }}
+      CI_GATE_OWNER_RUN_ATTEMPT: ${{ github.run_attempt }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Route exact PR tuple and dispatch trusted child
+        # Equivalent runtime command: python -m github_automation.coordinator coordinate
+        # Render this inert template before installation so the public Action is
+        # pinned to a real full commit SHA. No PR-controlled checkout is used.
+        uses: FacuVCanale/self-hosted-ci/actions/ci-control@0000000000000000000000000000000000000000
+        with:
+          command: coordinate

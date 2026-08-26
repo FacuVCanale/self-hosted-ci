@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github-automation.invalid/schemas/execution-trust-protocol-v1.schema.json",
+  "title": "Trusted child execution package v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version", "timing_policy_version", "execution_trust_policy_version", "repository_id", "repository", "pr_number", "logical_key", "generation", "owner_run_id", "owner_run_attempt", "head_sha", "base_sha", "tested_merge_sha", "tested_sha", "check_target_sha", "default_branch", "backend", "policy_version", "execution_trust_mode", "execution_trust_attestation_authority_version", "execution_trust_key_manifest_version", "key_manifest_generation", "key_manifest_digest", "key_manifest_generation_at_issuance", "key_manifest_digest_at_issuance", "attestation_id", "attestation_key_id", "attestation_key_version", "attestation_public_key_fingerprint", "attestation_head_generation", "attestation_expires_at", "attestation_nonce_binding", "attestation_envelope_digest", "attestation_request_linkage_hash", "inventory_guard_status", "missing_source_ids", "effective_writer_inventory_hash", "inventory_observed_at", "inventory_guard_freshness_policy_version", "local_admission_id", "local_admission_digest", "local_evidence_id", "local_evidence_digest", "local_result_kind", "local_child_run_id", "local_child_job_id", "started_test_marker_digest", "canonical_command_digest", "terminal_at", "ci_gate_authority_version", "ci_gate_check_run_id", "check_outbox_idempotency_key", "claim_deadline", "execution_deadline"
+  ],
+  "properties": {
+    "protocol_version": { "const": 1 }, "timing_policy_version": { "const": 1 }, "execution_trust_policy_version": { "const": 1 },
+    "repository_id": { "$ref": "#/$defs/canonicalPositiveInteger" }, "repository": { "$ref": "#/$defs/repository" }, "pr_number": { "type": "integer", "minimum": 1 },
+    "logical_key": { "type": "string", "minLength": 1 }, "generation": { "$ref": "#/$defs/canonicalPositiveInteger" }, "owner_run_id": { "$ref": "#/$defs/canonicalPositiveInteger" }, "owner_run_attempt": { "type": "integer", "minimum": 1 },
+    "head_sha": { "$ref": "#/$defs/sha" }, "base_sha": { "$ref": "#/$defs/sha" }, "tested_merge_sha": { "$ref": "#/$defs/sha" }, "tested_sha": { "$ref": "#/$defs/sha" }, "check_target_sha": { "$ref": "#/$defs/sha" },
+    "default_branch": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^\\s~^:?*\\[\\]\\\\]+$" },
+    "backend": { "enum": ["local", "github"] }, "policy_version": { "$ref": "#/$defs/sha" }, "execution_trust_mode": { "enum": ["github-hosted", "exact-sha-attestation"] },
+    "execution_trust_attestation_authority_version": { "const": 1 }, "execution_trust_key_manifest_version": { "const": 1 }, "key_manifest_generation": { "$ref": "#/$defs/canonicalPositiveInteger" }, "key_manifest_digest": { "$ref": "#/$defs/digest" },
+    "key_manifest_generation_at_issuance": { "$ref": "#/$defs/nullableCanonicalPositiveInteger" }, "key_manifest_digest_at_issuance": { "$ref": "#/$defs/nullableDigest" }, "attestation_id": { "$ref": "#/$defs/nullableUuidV7" },
+    "attestation_key_id": { "$ref": "#/$defs/nullableIdentifier" }, "attestation_key_version": { "type": ["integer", "null"], "minimum": 1 }, "attestation_public_key_fingerprint": { "$ref": "#/$defs/nullableDigest" },
+    "attestation_head_generation": { "$ref": "#/$defs/nullableCanonicalPositiveInteger" }, "attestation_expires_at": { "$ref": "#/$defs/nullableTimestamp" }, "attestation_nonce_binding": { "$ref": "#/$defs/nullableOpaque" },
+    "attestation_envelope_digest": { "$ref": "#/$defs/nullableDigest" }, "attestation_request_linkage_hash": { "$ref": "#/$defs/nullableDigest" },
+    "inventory_guard_status": { "enum": ["complete", "partial", "unavailable"] }, "missing_source_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "effective_writer_inventory_hash": { "$ref": "#/$defs/nullableDigest" }, "inventory_observed_at": { "$ref": "#/$defs/nullableTimestamp" }, "inventory_guard_freshness_policy_version": { "const": 1 },
+    "local_admission_id": { "$ref": "#/$defs/nullableOpaque" }, "local_admission_digest": { "$ref": "#/$defs/nullableDigest" }, "local_evidence_id": { "$ref": "#/$defs/nullableOpaque" }, "local_evidence_digest": { "$ref": "#/$defs/nullableDigest" },
+    "local_result_kind": { "enum": ["success", "functional_failure", null] }, "local_child_run_id": { "$ref": "#/$defs/nullableCanonicalPositiveInteger" }, "local_child_job_id": { "$ref": "#/$defs/nullableCanonicalPositiveInteger" },
+    "started_test_marker_digest": { "$ref": "#/$defs/nullableDigest" }, "canonical_command_digest": { "$ref": "#/$defs/nullableDigest" }, "terminal_at": { "$ref": "#/$defs/nullableTimestamp" },
+    "ci_gate_authority_version": { "const": 1 }, "ci_gate_check_run_id": { "$ref": "#/$defs/canonicalPositiveInteger" }, "check_outbox_idempotency_key": { "$ref": "#/$defs/nullableOpaque" },
+    "claim_deadline": { "$ref": "#/$defs/timestamp" }, "execution_deadline": { "$ref": "#/$defs/timestamp" }
+  },
+  "allOf": [
+    { "if": { "properties": { "backend": { "const": "local" } }, "required": ["backend"] }, "then": { "properties": {
+      "execution_trust_mode": { "const": "exact-sha-attestation" }, "key_manifest_generation_at_issuance": { "$ref": "#/$defs/canonicalPositiveInteger" }, "key_manifest_digest_at_issuance": { "$ref": "#/$defs/digest" },
+      "attestation_id": { "$ref": "#/$defs/uuidV7" }, "attestation_key_id": { "$ref": "#/$defs/identifier" }, "attestation_key_version": { "type": "integer", "minimum": 1 }, "attestation_public_key_fingerprint": { "$ref": "#/$defs/digest" },
+      "attestation_head_generation": { "$ref": "#/$defs/canonicalPositiveInteger" }, "attestation_expires_at": { "$ref": "#/$defs/timestamp" }, "attestation_nonce_binding": { "$ref": "#/$defs/opaque" },
+      "attestation_envelope_digest": { "$ref": "#/$defs/digest" }, "attestation_request_linkage_hash": { "$ref": "#/$defs/digest" }, "effective_writer_inventory_hash": { "$ref": "#/$defs/digest" }, "inventory_observed_at": { "$ref": "#/$defs/timestamp" }
+    } } },
+    { "if": { "properties": { "backend": { "const": "github" } }, "required": ["backend"] }, "then": { "properties": {
+      "execution_trust_mode": { "const": "github-hosted" }, "key_manifest_generation_at_issuance": { "type": "null" }, "key_manifest_digest_at_issuance": { "type": "null" }, "attestation_id": { "type": "null" }, "attestation_key_id": { "type": "null" },
+      "attestation_key_version": { "type": "null" }, "attestation_public_key_fingerprint": { "type": "null" }, "attestation_head_generation": { "type": "null" }, "attestation_expires_at": { "type": "null" }, "attestation_nonce_binding": { "type": "null" },
+      "attestation_envelope_digest": { "type": "null" }, "attestation_request_linkage_hash": { "type": "null" }, "local_admission_id": { "type": "null" }, "local_admission_digest": { "type": "null" }
+    } } },
+    { "if": { "properties": { "inventory_guard_status": { "const": "complete" } }, "required": ["inventory_guard_status"] }, "then": { "properties": { "missing_source_ids": { "maxItems": 0 }, "effective_writer_inventory_hash": { "$ref": "#/$defs/digest" } } } },
+    { "if": { "properties": { "inventory_guard_status": { "const": "partial" } }, "required": ["inventory_guard_status"] }, "then": { "properties": { "missing_source_ids": { "minItems": 1 }, "effective_writer_inventory_hash": { "$ref": "#/$defs/digest" } } } },
+    { "if": { "properties": { "inventory_guard_status": { "const": "unavailable" } }, "required": ["inventory_guard_status"] }, "then": { "properties": { "effective_writer_inventory_hash": { "type": "null" } } } }
+  ],
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" }, "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "canonicalPositiveInteger": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "Z$" }, "repository": { "type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$", "not": { "pattern": "\\*" } },
+    "uuidV7": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" }, "identifier": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" }, "opaque": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "nullableDigest": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/digest" }] }, "nullableCanonicalPositiveInteger": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/canonicalPositiveInteger" }] }, "nullableTimestamp": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/timestamp" }] },
+    "nullableUuidV7": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/uuidV7" }] }, "nullableIdentifier": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/identifier" }] }, "nullableOpaque": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/opaque" }] }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github-automation.invalid/schemas/execution-trust-key-manifest-v1.schema.json",
+  "title": "Execution trust key manifest v1 signed envelope",
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "signed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["payload", "signature"],
+      "properties": {
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["execution_trust_key_manifest_version", "manifest_generation", "previous_manifest_digest", "issued_at", "offline_root_public_fingerprint", "keys"],
+      "properties": {
+        "execution_trust_key_manifest_version": { "const": 1 },
+        "manifest_generation": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "previous_manifest_digest": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }] },
+        "issued_at": { "type": "string", "format": "date-time", "pattern": "Z$" },
+        "offline_root_public_fingerprint": { "$ref": "#/$defs/sha256" },
+        "keys": {
+          "type": "array", "minItems": 1, "maxItems": 128,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["key_id", "key_version", "algorithm", "public_key_fingerprint", "state"],
+            "properties": {
+              "key_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
+              "key_version": { "type": "integer", "minimum": 1 },
+              "algorithm": { "enum": ["Ed25519", "platform-native-P256"] },
+              "public_key_fingerprint": { "$ref": "#/$defs/sha256" },
+              "state": { "enum": ["active", "retiring", "revoked"] }
+            }
+          }
+        }
+      }
+    },
+        "signature": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" }
+      }
+    }
+  },
+  "$ref": "#/$defs/signed"
+}

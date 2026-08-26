@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github-automation.invalid/schemas/scenario-definitions-v1.schema.json",
+  "title": "Canonical S01-S108 definitions extracted from the normative test specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source", "source_sha256", "scenario_count", "scenarios"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "source": { "const": "docs/spec/test-spec-self-hosted-github-automation.md" },
+    "source_sha256": { "$ref": "#/$defs/sha256" },
+    "scenario_count": { "const": 108 },
+    "scenarios": {
+      "type": "array", "minItems": 108, "maxItems": 108,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "scenario", "expected"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^S(?:0[1-9]|[1-9][0-9]|10[0-8])$" },
+          "scenario": { "type": "string", "minLength": 1 },
+          "expected": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "$defs": { "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+}

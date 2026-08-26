@@ -1,0 +1,127 @@
+name: ci-gate child attempt
+
+on:
+  workflow_dispatch:
+    inputs:
+      protocol_package:
+        description: Versioned ci-gate protocol package (JSON)
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      protocol_package:
+        description: Versioned ci-gate protocol package (JSON)
+        required: true
+        type: string
+
+# A child can read source and report its own run, but cannot create/update the
+# required ci-gate Check Run, dispatch Actions, mint an App token, or deploy.
+permissions:
+  contents: read
+
+jobs:
+  validate-package:
+    name: validate trusted dispatch package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      backend: ${{ steps.validate.outputs.backend }}
+      tested_sha: ${{ steps.validate.outputs.tested_sha }}
+      logical_key: ${{ steps.validate.outputs.logical_key }}
+      generation: ${{ steps.validate.outputs.generation }}
+    env:
+      CI_GATE_PROTOCOL_PACKAGE: ${{ inputs.protocol_package }}
+      CI_GATE_EVENT_PATH: ${{ github.event_path }}
+      CI_GATE_WORKFLOW_REF: ${{ github.workflow_ref }}
+      CI_GATE_REPOSITORY: ${{ github.repository }}
+      CI_GATE_REPOSITORY_ID: ${{ github.repository_id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validate package before checkout
+        id: validate
+        # Equivalent runtime command: python -m github_automation.coordinator child
+        # The rendered consumer pins this Action to an immutable full SHA.
+        uses: FacuVCanale/self-hosted-ci/actions/ci-control@0000000000000000000000000000000000000000
+        with:
+          command: child
+
+  hosted-quality:
+    name: ci-gate hosted attempt
+    needs: validate-package
+    if: needs.validate-package.outputs.backend == 'github'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out exact detached tested merge
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-package.outputs.tested_sha }}
+          persist-credentials: false
+
+      - name: Verify exact checkout before quality
+        env:
+          EXPECTED_TESTED_SHA: ${{ needs.validate-package.outputs.tested_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_TESTED_SHA"
+
+      - name: Record hosted start boundary
+        env:
+          CI_GATE_LOGICAL_KEY: ${{ needs.validate-package.outputs.logical_key }}
+          CI_GATE_GENERATION: ${{ needs.validate-package.outputs.generation }}
+        # Equivalent runtime command: python -m github_automation.coordinator child --mark-started
+        uses: FacuVCanale/self-hosted-ci/actions/ci-control@0000000000000000000000000000000000000000
+        with:
+          command: child-mark-started
+
+      - name: Run canonical quality gate
+        run: make test
+
+      - name: Persist hosted terminal evidence
+        if: always()
+        env:
+          CI_GATE_LOGICAL_KEY: ${{ needs.validate-package.outputs.logical_key }}
+          CI_GATE_GENERATION: ${{ needs.validate-package.outputs.generation }}
+        # Equivalent runtime command: python -m github_automation.coordinator child --complete-hosted
+        uses: FacuVCanale/self-hosted-ci/actions/ci-control@0000000000000000000000000000000000000000
+        with:
+          command: child-complete-hosted
+
+  local-quality:
+    name: ci-gate local attempt
+    needs: validate-package
+    # Both the signed package and independently provisioned authority are
+    # mandatory. The repository ships with this variable absent, so local is
+    # fail-closed until the external JIT/runner authority ceremony is complete.
+    if: >-
+      needs.validate-package.outputs.backend == 'local' &&
+      vars.CI_GATE_LOCAL_AUTHORITY_ENABLED == 'true'
+    runs-on: [self-hosted, ci-gate-jit, linux, x64]
+    timeout-minutes: 40
+    steps:
+      - name: Revalidate claim authority before checkout
+        # Equivalent runtime command: python -m github_automation.coordinator child --claim
+        uses: FacuVCanale/self-hosted-ci/actions/ci-control@0000000000000000000000000000000000000000
+        with:
+          command: child-claim
+
+      - name: Check out exact detached tested merge
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-package.outputs.tested_sha }}
+          persist-credentials: false
+
+      - name: Verify exact checkout before admission
+        env:
+          EXPECTED_TESTED_SHA: ${{ needs.validate-package.outputs.tested_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_TESTED_SHA"
+
+      - name: Atomically admit and persist start marker
+        # The trusted wrapper is outside and unwritable from the PR workspace.
+        # It must finish before make can resolve/install/read project tooling.
+        run: /opt/github-automation/bin/ci-gate-start --admit-and-mark
+
+      - name: Run canonical quality gate
+        run: make test
+
+      - name: Persist local terminal evidence
+        if: always()
+        run: /opt/github-automation/bin/ci-gate-complete

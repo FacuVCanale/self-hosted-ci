@@ -1,0 +1,31 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+.env.*
+!.env.example
+
+# Operator-private configuration and credentials
+config/private/
+config/local/
+credentials/
+secrets/
+*.pem
+*.key
+*.p12
+*.sqlite
+*.sqlite3
+
+# Generated operational state and evidence
+state/
+evidence/*
+!evidence/README.md
+registry/repositories.local.json
+policies/*.local.yaml
+policies/*.local.json
+decisions/*.local.yaml
+decisions/*.local.json

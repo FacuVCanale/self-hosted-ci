@@ -1,0 +1,12 @@
+{
+  "network_policy_version": 1,
+  "enabled": false,
+  "default_egress": "deny",
+  "blocked_cidrs": ["10.0.0.0/8", "100.64.0.0/10", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7", "fe80::/10"],
+  "blocked_endpoints": ["windows-host", "windows-gateway", "metadata", "management-plane", "reviewer", "control-plane", "deploy", "container-engine-sockets"],
+  "allowed_destinations": [],
+  "dns_private_or_rebound_resolution": "deny",
+  "must_load_before_runner_registration": true,
+  "must_survive_reboot": true,
+  "on_install_or_verification_failure": "block-local-dispatch"
+}

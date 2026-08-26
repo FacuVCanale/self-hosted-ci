@@ -1,0 +1,28 @@
+name: Self-hosted CI control runtime
+description: Run the fail-closed CI control command from an immutable Action checkout.
+inputs:
+  command:
+    description: One of coordinate, reconcile, child, child-claim, child-mark-started, child-complete-hosted.
+    required: true
+outputs:
+  backend:
+    description: Validated execution backend for child validation.
+    value: ${{ steps.runtime.outputs.backend }}
+  tested_sha:
+    description: Validated exact SHA to test.
+    value: ${{ steps.runtime.outputs.tested_sha }}
+  logical_key:
+    description: Validated logical execution key.
+    value: ${{ steps.runtime.outputs.logical_key }}
+  generation:
+    description: Validated execution generation.
+    value: ${{ steps.runtime.outputs.generation }}
+runs:
+  using: composite
+  steps:
+    - id: runtime
+      name: Run trusted control command
+      shell: bash
+      env:
+        CI_CONTROL_COMMAND: ${{ inputs.command }}
+      run: python "$GITHUB_ACTION_PATH/run.py"

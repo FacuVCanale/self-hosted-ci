@@ -1,0 +1,4 @@
+# Reviewed false positives: identifiers and normative field names, no values.
+tests/github_automation/test_gatestore.py:generic-api-key:361
+github_automation/crypto.py:generic-api-key:252
+docs/spec/prd-self-hosted-github-automation.md:generic-api-key:316

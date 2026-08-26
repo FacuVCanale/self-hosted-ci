@@ -1,0 +1,5 @@
+{
+  "$schema": "../schemas/repository-registry-v1.schema.json",
+  "registry_schema_version": 1,
+  "repositories": {}
+}

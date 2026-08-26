@@ -1,0 +1,18 @@
+{
+  "reviewer_provider_decision_version": 1,
+  "status": "BLOCKED",
+  "activation_allowed": false,
+  "provider": null,
+  "model": null,
+  "cost_ceilings": null,
+  "token_ceilings": null,
+  "timeout_seconds": null,
+  "retry_policy": null,
+  "size_limits": { "max_files": 100, "max_diff_bytes": 1048576, "max_changed_lines": 50000 },
+  "oversized_pr_behavior": null,
+  "secret_management": null,
+  "provider_data_terms": null,
+  "skill_provenance": null,
+  "approved_by": null,
+  "approved_at": null
+}

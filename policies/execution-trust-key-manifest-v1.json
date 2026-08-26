@@ -1,0 +1,13 @@
+{
+  "activation_allowed": false,
+  "blockers": [
+    "offline root fingerprint not pinned by the security approver with user presence",
+    "generation-1 manifest has not been signed by the offline root",
+    "no active online signing key has been provisioned outside the repository"
+  ],
+  "execution_trust_key_manifest_version": 1,
+  "manifest_digest": null,
+  "payload": null,
+  "signature": null,
+  "status": "UNINITIALIZED"
+}

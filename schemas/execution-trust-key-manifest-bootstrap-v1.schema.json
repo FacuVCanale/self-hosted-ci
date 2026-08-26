@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github-automation.invalid/schemas/execution-trust-key-manifest-bootstrap-v1.schema.json",
+  "title": "Fail-closed uninitialized execution trust key manifest bootstrap v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "execution_trust_key_manifest_version", "status", "activation_allowed",
+    "manifest_digest", "payload", "signature", "blockers"
+  ],
+  "properties": {
+    "execution_trust_key_manifest_version": { "const": 1 },
+    "status": { "const": "UNINITIALIZED" },
+    "activation_allowed": { "const": false },
+    "manifest_digest": { "type": "null" },
+    "payload": { "type": "null" },
+    "signature": { "type": "null" },
+    "blockers": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

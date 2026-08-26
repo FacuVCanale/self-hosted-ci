@@ -1,0 +1,44 @@
+name: ci-gate reconciler control
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_run:
+    workflows: ["ci-gate coordinator control", "ci-gate child attempt"]
+    types: [completed, requested, in_progress]
+  workflow_dispatch:
+
+# Reconciliation may inspect/cancel/dispatch runs, but it cannot write the
+# ci-gate Check Run with GITHUB_TOKEN. Check delivery remains App-only/outbox.
+permissions:
+  actions: write
+  checks: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-gate-reconciler-${{ github.repository_id }}
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: ci-gate reconciler (not the required gate)
+    if: vars.CI_GATE_COORDINATOR_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GITHUB_API_VERSION: "2022-11-28"
+      CI_GATE_COORDINATOR_ENABLED: ${{ vars.CI_GATE_COORDINATOR_ENABLED }}
+      CI_GATE_EVENT_PATH: ${{ github.event_path }}
+      CI_GATE_REPOSITORY: ${{ github.repository }}
+      CI_GATE_REPOSITORY_ID: ${{ github.repository_id }}
+      CI_GATE_OWNER_RUN_ID: ${{ github.run_id }}
+      CI_GATE_OWNER_RUN_ATTEMPT: ${{ github.run_attempt }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Reconcile leases, fallback, cancellation and outbox
+        # Equivalent runtime command: python -m github_automation.coordinator reconcile
+        # The rendered consumer pins this Action to an immutable full SHA.
+        uses: FacuVCanale/self-hosted-ci/actions/ci-control@0000000000000000000000000000000000000000
+        with:
+          command: reconcile

@@ -1,0 +1,28 @@
+name: Thermonuclear PR review policy
+description: Expose the pinned informational review policy without executing PR code or a model provider.
+inputs:
+  mode:
+    description: Only informational is supported.
+    required: false
+    default: informational
+  activation-approved:
+    description: Must remain false until a separately reviewed provider adapter exists.
+    required: false
+    default: "false"
+outputs:
+  status:
+    description: Current reviewer activation status.
+    value: ${{ steps.policy.outputs.status }}
+  policy_sha256:
+    description: SHA-256 of the bundled Thermonuclear policy.
+    value: ${{ steps.policy.outputs.policy_sha256 }}
+runs:
+  using: composite
+  steps:
+    - id: policy
+      name: Verify informational policy boundary
+      shell: bash
+      env:
+        REVIEW_MODE: ${{ inputs.mode }}
+        ACTIVATION_APPROVED: ${{ inputs.activation-approved }}
+      run: python "$GITHUB_ACTION_PATH/run.py"

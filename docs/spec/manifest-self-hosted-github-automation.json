@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-26T18:40:00Z",
+  "artifacts": [
+    {
+      "path": "docs/spec/spec-self-hosted-github-automation.md",
+      "bytes": 47592,
+      "lines": 454,
+      "sha256": "fb60dabff420b9f93c6fe7adf13e8bae5cf7195f3cde30018faaf299150a217c"
+    },
+    {
+      "path": "docs/spec/prd-self-hosted-github-automation.md",
+      "bytes": 65430,
+      "lines": 613,
+      "sha256": "e0bc88a2dbdc2f76caca0bfa679e41ec9c31e9a13922a32ae7b80e16721acc50"
+    },
+    {
+      "path": "docs/spec/review-self-hosted-github-automation.md",
+      "bytes": 15172,
+      "lines": 147,
+      "sha256": "717449cd049d7545c3a64c34048e3fca3abe1754f696e53485c3e879e9d7c78b"
+    },
+    {
+      "path": "docs/spec/test-spec-self-hosted-github-automation.md",
+      "bytes": 51253,
+      "lines": 445,
+      "sha256": "7c0f6fafd45132419f2cd0a1436bf955cdc8aef644145b71724ec60cfdea221b"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "fixture_version": 1,
+  "repository_id": "123",
+  "repository": "example-owner/reference-platform",
+  "pr_number": 7,
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "tested_merge_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "default_branch": "main",
+  "policy_version": "dddddddddddddddddddddddddddddddddddddddd",
+  "logical_key": "123:7:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:ci-gate",
+  "owner": "coordinator:900:1",
+  "check_run_id": 7001,
+  "child_run_id": 8001,
+  "child_job_id": 8002,
+  "canonical_command_digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "wrapper_digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+}

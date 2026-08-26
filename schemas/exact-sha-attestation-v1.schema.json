@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github-automation.invalid/schemas/exact-sha-attestation-v1.schema.json",
+  "title": "Exact SHA attestation envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["payload", "signature"],
+  "properties": {
+    "payload": { "$ref": "#/$defs/payload" },
+    "signature": { "$ref": "#/$defs/base64url64" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "canonicalInteger": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "Z$" },
+    "base64url64": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attestation_schema_version", "execution_trust_policy_version",
+        "execution_trust_attestation_authority_version", "execution_trust_key_manifest_version",
+        "key_manifest_generation_at_issuance", "key_manifest_digest_at_issuance",
+        "attestation_id", "algorithm", "key_id", "key_version", "public_key_fingerprint",
+        "repository_id", "repository", "pr_number", "head_sha", "head_generation",
+        "inventory_guard_status", "missing_source_ids", "effective_writer_inventory_hash",
+        "inventory_guard_freshness_policy_version", "inventory_observed_at_at_issuance",
+        "issued_at", "expires_at", "nonce", "request_linkage_hash"
+      ],
+      "properties": {
+        "attestation_schema_version": { "const": 1 },
+        "execution_trust_policy_version": { "const": 1 },
+        "execution_trust_attestation_authority_version": { "const": 1 },
+        "execution_trust_key_manifest_version": { "const": 1 },
+        "key_manifest_generation_at_issuance": { "$ref": "#/$defs/canonicalInteger" },
+        "key_manifest_digest_at_issuance": { "$ref": "#/$defs/sha256" },
+        "attestation_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+        "algorithm": { "enum": ["Ed25519", "platform-native-P256"] },
+        "key_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$" },
+        "key_version": { "type": "integer", "minimum": 1 },
+        "public_key_fingerprint": { "$ref": "#/$defs/sha256" },
+        "repository_id": { "$ref": "#/$defs/canonicalInteger" },
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", "not": { "pattern": "\\*" } },
+        "pr_number": { "type": "integer", "minimum": 1 },
+        "head_sha": { "$ref": "#/$defs/sha" },
+        "head_generation": { "$ref": "#/$defs/canonicalInteger" },
+        "inventory_guard_status": { "enum": ["complete", "partial"] },
+        "missing_source_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 }, "maxItems": 256 },
+        "effective_writer_inventory_hash": { "$ref": "#/$defs/sha256" },
+        "inventory_guard_freshness_policy_version": { "const": 1 },
+        "inventory_observed_at_at_issuance": { "$ref": "#/$defs/timestamp" },
+        "issued_at": { "$ref": "#/$defs/timestamp" },
+        "expires_at": { "$ref": "#/$defs/timestamp" },
+        "nonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+        "request_linkage_hash": { "$ref": "#/$defs/sha256" }
+      },
+      "allOf": [
+        { "if": { "properties": { "inventory_guard_status": { "const": "complete" } } }, "then": { "properties": { "missing_source_ids": { "maxItems": 0 } } } },
+        { "if": { "properties": { "inventory_guard_status": { "const": "partial" } } }, "then": { "properties": { "missing_source_ids": { "minItems": 1 } } } }
+      ]
+    }
+  }
+}

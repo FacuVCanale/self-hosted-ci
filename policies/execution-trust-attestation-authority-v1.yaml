@@ -1,0 +1,35 @@
+{
+  "execution_trust_attestation_authority_version": 1,
+  "enabled": false,
+  "default": "github-hosted",
+  "local_eligible": false,
+  "on_unknown_or_drift": "github-hosted_or_fenced",
+  "positive_authorization_mode": "exact-sha-attestation",
+  "enumerated_writers_positive_authorization": false,
+  "inventory_guard": {
+    "mode": "negative-only",
+    "freshness_policy_version": 1,
+    "maximum_observation_age_seconds": 300,
+    "required_source_ids": []
+  },
+  "attestation": {
+    "default_ttl_seconds": 3600,
+    "maximum_ttl_seconds": 5400,
+    "gate_store_clock_authoritative": true,
+    "required_revalidation_boundaries": ["dispatch", "claim", "pre-marker-admission", "local-success"]
+  },
+  "key_manifest": {
+    "version": 1,
+    "accepted_generation": null,
+    "accepted_digest": null,
+    "offline_root_public_fingerprint": null,
+    "status": "UNINITIALIZED"
+  },
+  "private_key_locations": [],
+  "activation_blockers": [
+    "offline root fingerprint not pinned",
+    "generation-1 manifest not signed and accepted",
+    "no active online signing key",
+    "no repository is registered"
+  ]
+}
