@@ -1,0 +1,67 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "self-hosted-ci-gate-service",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "ENVIRONMENT": "local-test",
+    "ACTIVATION_MODE": "inert",
+    "OIDC_AUDIENCE": "self-hosted-ci-gate",
+    "OIDC_REPOSITORY": "example-owner/example-repository",
+    "OIDC_REPOSITORY_ID": "123456789",
+    "OIDC_WORKFLOW_REF": "example-owner/example-repository/.github/workflows/ci-gate.yml@refs/heads/main",
+    "OIDC_JOB_WORKFLOW_REF": "example-owner/self-hosted-ci/.github/workflows/ci-gate.yml@refs/heads/main"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "RUNNER_POOLS", "class_name": "RunnerPoolGate" }
+    ]
+  },
+  "exports": {
+    "RunnerPoolGate": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "env": {
+    "staging": {
+      "name": "self-hosted-ci-gate-service-staging",
+      "vars": {
+        "ENVIRONMENT": "staging",
+        "ACTIVATION_MODE": "inert",
+        "OIDC_AUDIENCE": "SET_BY_OPERATOR",
+        "OIDC_REPOSITORY": "SET_BY_OPERATOR",
+        "OIDC_REPOSITORY_ID": "SET_BY_OPERATOR",
+        "OIDC_WORKFLOW_REF": "SET_BY_OPERATOR",
+        "OIDC_JOB_WORKFLOW_REF": "SET_BY_OPERATOR"
+      },
+      "durable_objects": {
+        "bindings": [
+          { "name": "RUNNER_POOLS", "class_name": "RunnerPoolGate" }
+        ]
+      }
+    },
+    "production": {
+      "name": "self-hosted-ci-gate-service-production",
+      "vars": {
+        "ENVIRONMENT": "production",
+        "ACTIVATION_MODE": "inert",
+        "OIDC_AUDIENCE": "SET_BY_OPERATOR",
+        "OIDC_REPOSITORY": "SET_BY_OPERATOR",
+        "OIDC_REPOSITORY_ID": "SET_BY_OPERATOR",
+        "OIDC_WORKFLOW_REF": "SET_BY_OPERATOR",
+        "OIDC_JOB_WORKFLOW_REF": "SET_BY_OPERATOR"
+      },
+      "durable_objects": {
+        "bindings": [
+          { "name": "RUNNER_POOLS", "class_name": "RunnerPoolGate" }
+        ]
+      }
+    }
+  }
+}

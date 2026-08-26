@@ -26,3 +26,18 @@ jobs:
           make test
           make validate
           make distribution-check
+
+      - name: Set up Node.js for Gate Service validation
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: gate-service/package-lock.json
+
+      - name: Install Gate Service dependencies
+        working-directory: gate-service
+        run: npm ci
+
+      - name: Validate hosted-only Gate Service
+        working-directory: gate-service
+        run: npm run check
