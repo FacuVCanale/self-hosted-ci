@@ -1,0 +1,28 @@
+{
+  "name": "@facuvcanale/self-hosted-ci-gate-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "npm run types:check && npm run typecheck && npm test && npm run dry-run",
+    "dry-run": "wrangler deploy --dry-run --env=\"\" --outdir dist",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types worker-configuration.d.ts",
+    "types:check": "wrangler types worker-configuration.d.ts --check"
+  },
+  "dependencies": {
+    "jose": "6.2.10",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
+    "@types/node": "^26.3.0",
+    "typescript": "5.9.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.126.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
