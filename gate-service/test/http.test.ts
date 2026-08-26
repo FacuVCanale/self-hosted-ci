@@ -55,7 +55,6 @@ describe("HTTP surface", () => {
           repository_id: "123456789",
           pr_number: 7,
           head_sha: "1".repeat(40),
-          base_sha: "2".repeat(40),
         }),
       },
     ));

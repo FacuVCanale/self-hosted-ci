@@ -11,7 +11,6 @@ export const acquireGateSchema = z.strictObject({
   repository_id: z.string().regex(/^\d+$/),
   pr_number: positiveInteger,
   head_sha: sha,
-  base_sha: sha,
 });
 
 export interface PreparedCheck {
@@ -54,6 +53,7 @@ export interface GateSnapshot {
   runner_pool_id: string;
   owner: string;
   check_run_id: number;
+  base_sha: string;
   tested_merge_sha: string;
   evidence_digest: string | null;
 }

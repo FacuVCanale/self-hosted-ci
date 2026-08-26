@@ -23,7 +23,6 @@ function acquisition(overrides: Record<string, unknown> = {}) {
     repository_id: "123456789",
     pr_number: 7,
     head_sha: "1".repeat(40),
-    base_sha: "2".repeat(40),
     ...overrides,
   };
 }
@@ -35,15 +34,17 @@ async function seedGate(
   ownerActor = actor,
 ) {
   const input = raw as ReturnType<typeof acquisition>;
+  const suppliedBaseSha = (raw as Record<string, unknown>).base_sha;
+  const baseSha = typeof suppliedBaseSha === "string" ? suppliedBaseSha : "2".repeat(40);
   const suppliedMergeSha = (raw as Record<string, unknown>).tested_merge_sha;
   const testedMergeSha = typeof suppliedMergeSha === "string"
     ? suppliedMergeSha
-    : input.base_sha === "4".repeat(40) ? "5".repeat(40) : "3".repeat(40);
+    : baseSha === "4".repeat(40) ? "5".repeat(40) : "3".repeat(40);
   const marker = await derivePreparationMarker({
     repositoryId: input.repository_id as string,
     prNumber: input.pr_number as number,
     headSha: input.head_sha as string,
-    baseSha: input.base_sha as string,
+    baseSha,
     testedMergeSha,
     actor: ownerActor,
   });
@@ -56,7 +57,7 @@ async function seedGate(
         owner,actor_subject,state,post_attempted,check_run_id,deadline_at,next_attempt_at,
         attempts,last_error,created_at,updated_at,consumed_generation,incident_at
       ) VALUES (?,?,?,?,?,?,?,?,?,'pending',1,NULL,?,?,0,NULL,?,?,NULL,NULL)`,
-      marker, marker, input.repository_id, input.pr_number, input.head_sha, input.base_sha,
+      marker, marker, input.repository_id, input.pr_number, input.head_sha, baseSha,
       testedMergeSha, `${ownerActor.runId}:${ownerActor.runAttempt}`, ownerActor.subject,
       now + 300_000, now, now, now,
     );
@@ -126,9 +127,16 @@ function githubHarness(options: {
     }, { status: 201 });
     if (url.pathname.endsWith("/pulls/7")) return Response.json({
       number: 7, state: "open", head: { sha: pullHeadSha },
-      base: { sha: pullBaseSha, repo: { id: 123456789, full_name: "example-owner/example-repository" } },
+      base: {
+        sha: "2".repeat(40),
+        ref: "main",
+        repo: { id: 123456789, full_name: "example-owner/example-repository" },
+      },
       merge_commit_sha: pullMergeSha,
     });
+    if (url.pathname === "/repos/example-owner/example-repository/git/ref/heads/main") {
+      return Response.json({ ref: "refs/heads/main", object: { type: "commit", sha: pullBaseSha } });
+    }
     if (url.pathname === `/repos/example-owner/example-repository/commits/${pullMergeSha}`) {
       return Response.json({
         sha: pullMergeSha,
@@ -244,6 +252,15 @@ describe("hosted-only RunnerPoolGate", () => {
       }
     });
     expect(callerMerge).toContain("Unrecognized key");
+    const callerBase = await runInDurableObject(stub, async (instance: RunnerPoolGate) => {
+      try {
+        await instance.acquire("invariants-pool", acquisition({ base_sha: "2".repeat(40) }), actor);
+        return "unexpected_success";
+      } catch (error) {
+        return error instanceof Error ? error.message : "unknown";
+      }
+    });
+    expect(callerBase).toContain("Unrecognized key");
   });
 
   it("allows one hosted terminal winner and fences the competing CAS", async ({ expect }) => {
@@ -805,9 +822,7 @@ describe("hosted-only RunnerPoolGate", () => {
         installTestAuthority(instance, authority);
         await instance.acquire("integrated-base-movement-pool", acquisition(), actor);
         github.moveBase();
-        await instance.acquire("integrated-base-movement-pool", acquisition({
-          base_sha: "4".repeat(40),
-        }), actor);
+        await instance.acquire("integrated-base-movement-pool", acquisition(), actor);
       });
       await evictDurableObject(stub);
       const outbox = await runInDurableObject(stub, async (instance: RunnerPoolGate) => {
@@ -891,7 +906,6 @@ describe("hosted-only RunnerPoolGate", () => {
         const movedActor = { ...actor, runId: "84", runAttempt: "1", tokenId: "moved-owner" };
         const moved = await instance.acquire("integrated-cross-owner-head-movement-pool", acquisition({
           head_sha: "8".repeat(40),
-          base_sha: "4".repeat(40),
         }), movedActor);
         await instance.alarm();
         return {
@@ -926,7 +940,6 @@ describe("hosted-only RunnerPoolGate", () => {
         github.moveHeadTuple();
         currentB = await instance.acquire("integrated-stale-a-current-b-pool", acquisition({
           head_sha: "8".repeat(40),
-          base_sha: "4".repeat(40),
         }), movedActor);
         state.storage.sql.exec(
           "UPDATE check_creation_intents SET next_attempt_at=0 WHERE owner='42:1'",
@@ -940,7 +953,6 @@ describe("hosted-only RunnerPoolGate", () => {
         const ownerC = { ...actor, runId: "126", runAttempt: "1", tokenId: "current-c-owner" };
         const cAttempt = await instance.acquire("integrated-stale-a-current-b-pool", acquisition({
           head_sha: "8".repeat(40),
-          base_sha: "4".repeat(40),
         }), ownerC).then(() => "unexpected_success", (error: unknown) => error instanceof Error ? error.message : "unknown");
         return {
           current: await instance.getGate(currentB.logical_key, currentB.generation),
@@ -1003,9 +1015,7 @@ describe("hosted-only RunnerPoolGate", () => {
         const firstPromise = instance.acquire("integrated-owner-distinct-marker-pool", acquisition(), actor);
         await github.waitForFirstCreate();
         github.moveBase();
-        const movedPromise = instance.acquire("integrated-owner-distinct-marker-pool", acquisition({
-          base_sha: "4".repeat(40),
-        }), actor);
+        const movedPromise = instance.acquire("integrated-owner-distinct-marker-pool", acquisition(), actor);
         github.releaseFirstCreate();
         const [first, moved] = await Promise.all([firstPromise, movedPromise]);
         return { first, moved, old: await instance.getGate(first.logical_key, first.generation) };

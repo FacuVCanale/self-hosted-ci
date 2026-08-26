@@ -54,7 +54,12 @@ export interface CheckPreparationEvent {
   actor: OidcActor;
 }
 
-export type PullRequestExpectation = Omit<CheckPreparationEvent, "testedMergeSha">;
+export type PullRequestExpectation = Omit<CheckPreparationEvent, "baseSha" | "testedMergeSha">;
+
+export interface CanonicalPullRequest {
+  baseSha: string;
+  testedMergeSha: string;
+}
 
 interface Authority {
   appId: number;
@@ -77,14 +82,14 @@ class TransientGitHubError extends Error {
 }
 class BlockingGitHubError extends Error {}
 
-export async function resolveCanonicalTestedMerge(
+export async function resolveCanonicalPullRequest(
   rawEnv: CheckDeliveryEnv,
   event: PullRequestExpectation,
   request: typeof fetch = fetch,
-): Promise<string> {
+): Promise<CanonicalPullRequest> {
   const authority = parseAuthority(rawEnv);
   validatePullRequestExpectation(event, authority);
-  return readCanonicalTestedMerge(authority, event, request);
+  return readCanonicalPullRequest(authority, event, request);
 }
 
 export async function prepareGitHubCheck(
@@ -257,9 +262,7 @@ function validatePullRequestExpectation(event: PullRequestExpectation, authority
   if (!Number.isSafeInteger(event.prNumber) || event.prNumber < 1) {
     throw new BlockingGitHubError("Check preparation PR number is invalid");
   }
-  for (const sha of [event.headSha, event.baseSha]) {
-    if (!/^[0-9a-f]{40}$/.test(sha)) throw new BlockingGitHubError("Check preparation SHA is invalid");
-  }
+  if (!/^[0-9a-f]{40}$/.test(event.headSha)) throw new BlockingGitHubError("Check preparation SHA is invalid");
 }
 
 export async function derivePreparationMarker(event: CheckPreparationEvent): Promise<string> {
@@ -285,17 +288,17 @@ async function verifyCurrentPullRequest(
   event: CheckPreparationEvent,
   request: typeof fetch,
 ): Promise<void> {
-  const canonical = await readCanonicalTestedMerge(authority, event, request);
-  if (canonical !== event.testedMergeSha) {
+  const canonical = await readCanonicalPullRequest(authority, event, request);
+  if (canonical.baseSha !== event.baseSha || canonical.testedMergeSha !== event.testedMergeSha) {
     throw new BlockingGitHubError("current pull request tuple mismatch");
   }
 }
 
-async function readCanonicalTestedMerge(
+async function readCanonicalPullRequest(
   authority: Authority,
   event: PullRequestExpectation,
   request: typeof fetch,
-): Promise<string> {
+): Promise<CanonicalPullRequest> {
   const pull = await githubJson(
     request,
     `${GITHUB_API}/repos/${authority.repository}/pulls/${event.prNumber}`,
@@ -305,18 +308,36 @@ async function readCanonicalTestedMerge(
   const head = objectValue(pull.head);
   const base = objectValue(pull.base);
   const baseRepo = objectValue(base?.repo);
+  const baseRef = base?.ref;
   const mergeSha = pull.merge_commit_sha;
   if (
     pull.number !== event.prNumber
     || pull.state !== "open"
     || head?.sha !== event.headSha
-    || base?.sha !== event.baseSha
     || baseRepo?.id !== authority.repositoryId
     || baseRepo?.full_name !== authority.repository
+    || typeof baseRef !== "string"
+    || !validBranchRef(baseRef)
     || typeof mergeSha !== "string"
     || !/^[0-9a-f]{40}$/.test(mergeSha)
   ) {
     throw new BlockingGitHubError("current pull request tuple mismatch");
+  }
+  const gitRef = await githubJson(
+    request,
+    `${GITHUB_API}/repos/${authority.repository}/git/ref/heads/${encodeURIComponent(baseRef)}`,
+    { headers: publicHeaders() },
+    200,
+  );
+  const refObject = objectValue(gitRef.object);
+  const baseSha = refObject?.sha;
+  if (
+    gitRef.ref !== `refs/heads/${baseRef}`
+    || refObject?.type !== "commit"
+    || typeof baseSha !== "string"
+    || !/^[0-9a-f]{40}$/.test(baseSha)
+  ) {
+    throw new BlockingGitHubError("canonical base ref is invalid");
   }
   const commit = await githubJson(
     request,
@@ -328,10 +349,22 @@ async function readCanonicalTestedMerge(
     throw new BlockingGitHubError("canonical tested merge commit is invalid");
   }
   const parents = commit.parents.map((parent) => objectValue(parent)?.sha);
-  if (parents[0] !== event.baseSha || parents[1] !== event.headSha) {
+  if (parents[0] !== baseSha || parents[1] !== event.headSha) {
     throw new BlockingGitHubError("canonical tested merge parents mismatch");
   }
-  return mergeSha;
+  return { baseSha, testedMergeSha: mergeSha };
+}
+
+function validBranchRef(value: string): boolean {
+  return value.length > 0
+    && value.length <= 255
+    && !value.startsWith("/")
+    && !value.endsWith("/")
+    && !value.endsWith(".")
+    && !value.includes("..")
+    && !value.includes("@{")
+    && !/[\u0000-\u0020~^:?*[\\]/.test(value)
+    && value.split("/").every((part) => part !== "." && part !== ".." && !part.endsWith(".lock"));
 }
 
 function prepared(
