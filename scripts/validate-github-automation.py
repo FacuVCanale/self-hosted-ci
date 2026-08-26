@@ -29,6 +29,16 @@ NORMATIVE_SPEC_PATHS = (
     "docs/spec/review-self-hosted-github-automation.md",
     "docs/spec/test-spec-self-hosted-github-automation.md",
 )
+INCOMPATIBLE_LOCAL_MERGE_CLAIMS = (
+    "tested_sha=check_target_sha=head_sha",
+    "check_target_sha == tested_merge_sha",
+    "assert pr check target and tested sha both equal",
+    "exact synthetic merge sha",
+    "github deterministic local ort merge sha",
+    "github's deterministic local ort merge sha",
+    "github's mutable deterministic local ort merge sha",
+    "ci-gate` routes only the canonical quality workload across local/fallback and targets the current deterministic local ort merge",
+)
 
 INSTANCE_SCHEMAS = {
     "registry/repositories.json": "schemas/repository-registry-v1.schema.json",
@@ -42,6 +52,16 @@ EVIDENCE_INSTANCE_SCHEMAS = {
     "evidence/gate-results-v1.json": "schemas/gate-results-v1.schema.json",
     "evidence/scenario-proof-records-v1.json": "schemas/scenario-proof-records-v1.schema.json",
 }
+
+
+def _normative_semantic_errors(documents: dict[str, str]) -> list[str]:
+    errors: list[str] = []
+    for name, text in documents.items():
+        lowered = text.lower()
+        for claim in INCOMPATIBLE_LOCAL_MERGE_CLAIMS:
+            if claim in lowered:
+                errors.append(f"normative-local-merge-contradiction:{name}:{claim}")
+    return errors
 
 REQUIRED_FILES = (
     *INSTANCE_SCHEMAS,
@@ -183,6 +203,9 @@ def validate(root: Path = ROOT, *, evidence_root: Path | None = None) -> dict[st
             if len(payload) != artifact["bytes"]: errors.append(f"spec-manifest-bytes:{name}")
             if len(payload.splitlines()) != artifact["lines"]: errors.append(f"spec-manifest-lines:{name}")
             if hashlib.sha256(payload).hexdigest() != artifact["sha256"]: errors.append(f"spec-manifest-sha256:{name}")
+        errors.extend(_normative_semantic_errors({
+            name: (root / name).read_text(encoding="utf-8") for name in NORMATIVE_SPEC_PATHS
+        }))
     except Exception as exc:
         errors.append(f"spec-manifest-invalid:{exc}")
 

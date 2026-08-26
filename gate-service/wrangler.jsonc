@@ -25,11 +25,15 @@
   },
   "durable_objects": {
     "bindings": [
-      { "name": "RUNNER_POOLS", "class_name": "RunnerPoolGate" }
+      { "name": "RUNNER_POOLS_V2", "class_name": "LocalMergeRunnerPoolGate" }
     ]
   },
   "exports": {
     "RunnerPoolGate": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "LocalMergeRunnerPoolGate": {
       "type": "durable-object",
       "storage": "sqlite"
     }
@@ -62,7 +66,7 @@
       },
       "durable_objects": {
         "bindings": [
-          { "name": "RUNNER_POOLS", "class_name": "RunnerPoolGate" }
+          { "name": "RUNNER_POOLS_V2", "class_name": "LocalMergeRunnerPoolGate" }
         ]
       }
     },
@@ -89,7 +93,7 @@
       },
       "durable_objects": {
         "bindings": [
-          { "name": "RUNNER_POOLS", "class_name": "RunnerPoolGate" }
+          { "name": "RUNNER_POOLS_V2", "class_name": "LocalMergeRunnerPoolGate" }
         ]
       }
     }

@@ -7,16 +7,14 @@ import {
   type GateSnapshot,
   type GateState,
   type OidcActor,
-} from "./contracts";
+} from "./legacy-contracts";
 import {
   deliverGitHubCheck,
   derivePreparationMarker,
   prepareGitHubCheck,
   resolveCanonicalPullRequest,
-  MERGE_POLICY_VERSION,
-  RUNNER_IMAGE_POLICY,
   type CheckDeliveryEvent,
-} from "./github-checks";
+} from "./legacy-github-checks";
 
 interface GateRow extends Record<string, SqlStorageValue> {
   logical_key: string;
@@ -28,7 +26,7 @@ interface GateRow extends Record<string, SqlStorageValue> {
   pr_number: number;
   head_sha: string;
   base_sha: string;
-  merge_policy_version: string;
+  tested_merge_sha: string;
   check_run_id: number;
   owner: string;
   evidence_digest: string | null;
@@ -58,7 +56,7 @@ interface CheckCreationIntentRow extends Record<string, SqlStorageValue> {
   pr_number: number;
   head_sha: string;
   base_sha: string;
-  merge_policy_version: string;
+  tested_merge_sha: string;
   owner: string;
   actor_subject: string;
   state: "pending" | "check_bound" | "blocked";
@@ -102,7 +100,7 @@ export class GateFenced extends Error {
   }
 }
 
-export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
+export class RunnerPoolGate extends DurableObject<Cloudflare.Env> {
   private deliveryInProgress = false;
   private readonly acquisitions = new Map<string, {
     owner: string;
@@ -135,7 +133,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
         pr_number INTEGER NOT NULL CHECK (pr_number > 0),
         head_sha TEXT NOT NULL,
         base_sha TEXT NOT NULL,
-        merge_policy_version TEXT NOT NULL,
+        tested_merge_sha TEXT NOT NULL,
         check_run_id INTEGER NOT NULL CHECK (check_run_id > 0),
         owner TEXT NOT NULL,
         evidence_digest TEXT,
@@ -184,26 +182,6 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
         actor TEXT NOT NULL,
         detail_json TEXT NOT NULL,
         created_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS terminal_evidence (
-        logical_key TEXT NOT NULL,
-        generation INTEGER NOT NULL,
-        evidence_digest TEXT NOT NULL,
-        conclusion TEXT NOT NULL CHECK (conclusion IN ('success','failure')),
-        base_sha TEXT NOT NULL,
-        head_sha TEXT NOT NULL,
-        merge_policy_version TEXT NOT NULL,
-        git_version TEXT NOT NULL,
-        runner_image TEXT NOT NULL,
-        merge_base_sha TEXT NOT NULL,
-        tested_tree_sha TEXT NOT NULL,
-        local_commit_sha TEXT NOT NULL,
-        command_digest TEXT NOT NULL,
-        owner_run_id TEXT NOT NULL,
-        owner_run_attempt TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY (logical_key,generation),
-        FOREIGN KEY (logical_key,generation) REFERENCES gates(logical_key,generation)
       );
     `);
     const version = this.ctx.storage.sql
@@ -273,7 +251,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
             pr_number INTEGER NOT NULL CHECK (pr_number > 0),
             head_sha TEXT NOT NULL,
             base_sha TEXT NOT NULL,
-            merge_policy_version TEXT NOT NULL,
+            tested_merge_sha TEXT NOT NULL,
             owner TEXT NOT NULL,
             actor_subject TEXT NOT NULL,
             state TEXT NOT NULL CHECK (state IN ('pending','check_bound','blocked')),
@@ -305,12 +283,6 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
         );
       });
     }
-    if (version < 6) {
-      this.ctx.storage.sql.exec(
-        "INSERT INTO _sql_schema_migrations(id,applied_at) VALUES (6,?)",
-        Date.now(),
-      );
-    }
   }
 
   async acquire(runnerPoolId: string, raw: unknown, actor: OidcActor): Promise<GateSnapshot> {
@@ -334,7 +306,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
     const sameCanonicalTuple = local !== undefined
       && local.head_sha === input.head_sha
       && local.base_sha === canonical.baseSha
-      && local.merge_policy_version === canonical.mergePolicyVersion;
+      && local.tested_merge_sha === canonical.testedMergeSha;
     if (sameCanonicalTuple && local.owner === owner) return this.snapshot(local);
     if (sameCanonicalTuple && local.state === "hosted_selected" && local.owner !== owner
       && (local.hosted_deadline_at === null || Date.now() < local.hosted_deadline_at)) {
@@ -343,7 +315,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
     const resolvedInput = {
       ...input,
       base_sha: canonical.baseSha,
-      merge_policy_version: canonical.mergePolicyVersion,
+      tested_merge_sha: canonical.testedMergeSha,
     };
     const logicalKey = deriveLogicalKey(input.repository_id, input.pr_number, input.head_sha);
     const preparationMarker = await derivePreparationMarker({
@@ -351,7 +323,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
       prNumber: input.pr_number,
       headSha: input.head_sha,
       baseSha: canonical.baseSha,
-      mergePolicyVersion: canonical.mergePolicyVersion,
+      testedMergeSha: canonical.testedMergeSha,
       actor,
     });
     const acquisitionKey = `${input.repository_id}:${input.pr_number}`;
@@ -372,7 +344,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
 
   private async acquireOnce(
     runnerPoolId: string,
-    input: ReturnType<typeof acquireGateSchema.parse> & { base_sha: string; merge_policy_version: string },
+    input: ReturnType<typeof acquireGateSchema.parse> & { base_sha: string; tested_merge_sha: string },
     actor: OidcActor,
     logicalKey: string,
     preparationMarker: string,
@@ -393,7 +365,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
     const observedSameTuple = observed !== undefined
       && observed.head_sha === input.head_sha
       && observed.base_sha === input.base_sha
-      && observed.merge_policy_version === input.merge_policy_version;
+      && observed.tested_merge_sha === input.tested_merge_sha;
     if (observedSameTuple && observed.owner !== owner && observed.state === "hosted_selected") {
       if (observed.hosted_deadline_at === null || now < observed.hosted_deadline_at) {
         throw new GateFenced("logical gate is owned by an active coordinator");
@@ -412,7 +384,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
         && latest.pr_number === input.pr_number
         && latest.head_sha === input.head_sha
         && latest.base_sha === input.base_sha
-        && latest.merge_policy_version === input.merge_policy_version;
+        && latest.tested_merge_sha === input.tested_merge_sha;
       if (sameTuple && latest !== undefined && latest.owner !== owner && latest.state === "hosted_selected") {
         throw new GateFenced("logical gate is owned by an active coordinator");
       }
@@ -437,7 +409,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
       if (intent === undefined) {
         this.ctx.storage.sql.exec(
           `INSERT INTO check_creation_intents(
-            intent_key,marker,repository_id,pr_number,head_sha,base_sha,merge_policy_version,
+            intent_key,marker,repository_id,pr_number,head_sha,base_sha,tested_merge_sha,
             owner,actor_subject,state,post_attempted,check_run_id,deadline_at,next_attempt_at,
             attempts,last_error,created_at,updated_at,consumed_generation,incident_at
           ) VALUES (?,?,?,?,?,?,?,?,?,'pending',0,NULL,?,?,0,NULL,?,?,NULL,NULL)`,
@@ -447,7 +419,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
           input.pr_number,
           input.head_sha,
           input.base_sha,
-          input.merge_policy_version,
+          input.tested_merge_sha,
           owner,
           actor.subject,
           intentDeadline,
@@ -484,7 +456,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
       prNumber: input.pr_number,
       headSha: input.head_sha,
       baseSha: input.base_sha,
-      mergePolicyVersion: input.merge_policy_version as typeof MERGE_POLICY_VERSION,
+      testedMergeSha: input.tested_merge_sha,
       actor,
     };
     const prepared = await prepareGitHubCheck(this.env, event, fetch, new Date(), allowCreate);
@@ -524,58 +496,14 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
     if (initial.repository_id !== actor.repositoryId || initial.owner !== `${actor.runId}:${actor.runAttempt}`) {
       throw new GateFenced("gate belongs to another OIDC coordinator");
     }
-    if (input.base_sha !== initial.base_sha || input.head_sha !== initial.head_sha
-      || input.merge_policy_version !== initial.merge_policy_version) {
-      throw new GateFenced("terminal evidence tuple mismatch");
-    }
-    if (input.runner_image !== RUNNER_IMAGE_POLICY) {
-      throw new GateFenced("terminal evidence toolchain mismatch");
-    }
-    const conclusion = input.to_state === "hosted_success" ? "success" : "failure";
-    const expectedEvidence = await sha256Hex([
-      "ci-gate-local-ort-evidence-v1",
-      input.logical_key,
-      String(input.generation),
-      input.base_sha,
-      input.head_sha,
-      input.merge_policy_version,
-      input.git_version,
-      input.runner_image,
-      input.merge_base_sha,
-      input.tested_tree_sha,
-      input.local_commit_sha,
-      input.command_digest,
-      actor.runId,
-      actor.runAttempt,
-      conclusion,
-    ].join("\n") + "\n");
-    if (expectedEvidence !== input.evidence_digest) {
-      throw new GateConflict("terminal evidence digest mismatch");
-    }
     if (initial.state === "hosted_success" || initial.state === "hosted_failure") {
-      if (initial.state === input.to_state && initial.evidence_digest === input.evidence_digest
-        && this.terminalEvidenceMatches(input, actor)) {
+      if (initial.state === input.to_state && initial.evidence_digest === input.evidence_digest) {
         return this.snapshot(initial);
       }
       throw new GateConflict("terminal gate retry conflicts with committed evidence");
     }
     if (initial.version !== input.expected_version || initial.state !== input.from_state) {
       throw new GateFenced("gate compare-and-swap expectation failed");
-    }
-    if (input.to_state === "hosted_success") {
-      if ([input.merge_base_sha, input.tested_tree_sha, input.local_commit_sha].some((sha) => /^0+$/.test(sha))) {
-        throw new GateConflict("success requires complete local merge evidence");
-      }
-      const canonical = await resolveCanonicalPullRequest(this.env, {
-        repositoryId: initial.repository_id,
-        prNumber: initial.pr_number,
-        headSha: initial.head_sha,
-        actor,
-      });
-      if (canonical.headSha !== initial.head_sha || canonical.baseSha !== initial.base_sha
-        || canonical.mergePolicyVersion !== initial.merge_policy_version) {
-        throw new GateFenced("pull request moved before successful transition");
-      }
     }
     // Scheduling before the SQL commit means a crash can create only a harmless
     // empty alarm, never a committed outbox row with no wake-up path.
@@ -591,29 +519,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
       if (current.version !== input.expected_version || current.state !== input.from_state) {
         throw new GateFenced("gate compare-and-swap expectation failed");
       }
-      this.ctx.storage.sql.exec(
-        `INSERT INTO terminal_evidence(
-          logical_key,generation,evidence_digest,conclusion,base_sha,head_sha,
-          merge_policy_version,git_version,runner_image,merge_base_sha,tested_tree_sha,
-          local_commit_sha,command_digest,owner_run_id,owner_run_attempt,created_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        input.logical_key,
-        input.generation,
-        input.evidence_digest,
-        conclusion,
-        input.base_sha,
-        input.head_sha,
-        input.merge_policy_version,
-        input.git_version,
-        input.runner_image,
-        input.merge_base_sha,
-        input.tested_tree_sha,
-        input.local_commit_sha,
-        input.command_digest,
-        actor.runId,
-        actor.runAttempt,
-        now,
-      );
+      const conclusion = input.to_state === "hosted_success" ? "success" : "failure";
       this.ctx.storage.sql.exec(
         `UPDATE gates SET state=?,version=version+1,evidence_digest=?,updated_at=?
          WHERE logical_key=? AND generation=? AND version=? AND state='hosted_selected'`,
@@ -649,19 +555,6 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
       this.audit("hosted_gate_terminal", input.logical_key, input.generation, actor.subject, {
         from: input.from_state,
         to: input.to_state,
-        evidence_digest: input.evidence_digest,
-        base_sha: input.base_sha,
-        head_sha: input.head_sha,
-        merge_policy_version: input.merge_policy_version,
-        git_version: input.git_version,
-        runner_image: input.runner_image,
-        merge_base_sha: input.merge_base_sha,
-        tested_tree_sha: input.tested_tree_sha,
-        local_commit_sha: input.local_commit_sha,
-        command_digest: input.command_digest,
-        owner_run_id: actor.runId,
-        owner_run_attempt: actor.runAttempt,
-        conclusion,
         outbox_delivery: "pending",
       }, now);
       result = this.snapshot(this.gate(input.logical_key, input.generation));
@@ -771,7 +664,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
 
   private nextDueOutbox(now: number): OutboxRow | undefined {
     return this.ctx.storage.sql.exec<OutboxRow>(
-      `SELECT o.*,g.head_sha AS head_sha
+      `SELECT o.*,g.tested_merge_sha AS head_sha
        FROM check_outbox o JOIN gates g
          ON g.logical_key=o.logical_key AND g.generation=o.generation
        WHERE o.state='pending' AND o.next_attempt_at<=?
@@ -873,7 +766,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
 
   private assertExactIntent(
     intent: CheckCreationIntentRow,
-    input: { repository_id: string; pr_number: number; head_sha: string; base_sha: string; merge_policy_version: string },
+    input: { repository_id: string; pr_number: number; head_sha: string; base_sha: string; tested_merge_sha: string },
     marker: string,
   ): void {
     if (
@@ -882,7 +775,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
       || intent.pr_number !== input.pr_number
       || intent.head_sha !== input.head_sha
       || intent.base_sha !== input.base_sha
-      || intent.merge_policy_version !== input.merge_policy_version
+      || intent.tested_merge_sha !== input.tested_merge_sha
     ) throw new GateConflict("Check creation intent tuple mismatch");
   }
 
@@ -909,7 +802,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
           logicalKey,
           marker,
           String(checkRunId),
-          intent.merge_policy_version,
+          intent.tested_merge_sha,
         ].join("\n"))
       : undefined;
     const prior = this.ctx.storage.sql.exec<GateRow>(
@@ -923,7 +816,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
           "ci-gate-generation-superseded-v1",
           prior.logical_key,
           String(prior.generation),
-          prior.merge_policy_version,
+          prior.tested_merge_sha,
           marker,
         ].join("\n"))
       : undefined;
@@ -943,7 +836,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
       ).toArray()[0];
       const sameTuple = existing !== undefined
         && existing.base_sha === currentIntent.base_sha
-        && existing.merge_policy_version === currentIntent.merge_policy_version;
+        && existing.tested_merge_sha === currentIntent.tested_merge_sha;
       if (sameTuple && existing.owner === currentIntent.owner) {
         if (existing.check_run_id !== checkRunId || existing.preparation_marker !== marker) {
           throw new GateConflict("durable Check binding conflicts with existing gate");
@@ -968,7 +861,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
       if (activePrior !== undefined && !obsolete) {
         const activeSameTuple = activePrior.head_sha === currentIntent.head_sha
           && activePrior.base_sha === currentIntent.base_sha
-          && activePrior.merge_policy_version === currentIntent.merge_policy_version;
+          && activePrior.tested_merge_sha === currentIntent.tested_merge_sha;
         if (activeSameTuple && activePrior.owner !== currentIntent.owner) {
           throw new GateFenced("logical gate is owned by an active coordinator");
         }
@@ -987,7 +880,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
         this.ctx.storage.sql.exec(
           `INSERT INTO gates(
             logical_key,generation,version,state,runner_pool_id,repository_id,pr_number,
-            head_sha,base_sha,merge_policy_version,check_run_id,owner,evidence_digest,
+            head_sha,base_sha,tested_merge_sha,check_run_id,owner,evidence_digest,
             created_at,updated_at,preparation_marker,hosted_deadline_at
           ) VALUES (?,?,1,'hosted_failure',?,?,?,?,?,?,?,?,?,?,?,?,NULL)`,
           logicalKey,
@@ -997,7 +890,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
           currentIntent.pr_number,
           currentIntent.head_sha,
           currentIntent.base_sha,
-          currentIntent.merge_policy_version,
+          currentIntent.tested_merge_sha,
           checkRunId,
           currentIntent.owner,
           obsoleteEvidence,
@@ -1046,7 +939,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
       this.ctx.storage.sql.exec(
         `INSERT INTO gates(
           logical_key,generation,version,state,runner_pool_id,repository_id,pr_number,
-          head_sha,base_sha,merge_policy_version,check_run_id,owner,evidence_digest,
+          head_sha,base_sha,tested_merge_sha,check_run_id,owner,evidence_digest,
           created_at,updated_at,preparation_marker,hosted_deadline_at
         ) VALUES (?,?,1,'hosted_selected',?,?,?,?,?,?,?,?,NULL,?,?,?,?)`,
         logicalKey,
@@ -1056,7 +949,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
         currentIntent.pr_number,
         currentIntent.head_sha,
         currentIntent.base_sha,
-        currentIntent.merge_policy_version,
+        currentIntent.tested_merge_sha,
         checkRunId,
         currentIntent.owner,
         now,
@@ -1171,7 +1064,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
         prNumber: intent.pr_number,
         headSha: intent.head_sha,
         baseSha: intent.base_sha,
-        mergePolicyVersion: intent.merge_policy_version as typeof MERGE_POLICY_VERSION,
+        testedMergeSha: intent.tested_merge_sha,
         actor,
       }, fetch, new Date(), false);
       if (prepared.state === "prepared") {
@@ -1240,7 +1133,7 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
         "ci-gate-hosted-timeout-v1",
         row.logical_key,
         String(row.generation),
-        row.merge_policy_version,
+        row.tested_merge_sha,
         String(row.hosted_deadline_at),
       ].join("\n"));
       this.ctx.storage.transactionSync(() => {
@@ -1333,37 +1226,9 @@ export class LocalMergeRunnerPoolGate extends DurableObject<Cloudflare.Env> {
       owner: row.owner,
       check_run_id: row.check_run_id,
       base_sha: row.base_sha,
-      head_sha: row.head_sha,
-      merge_policy_version: row.merge_policy_version as typeof MERGE_POLICY_VERSION,
-      runner_image: RUNNER_IMAGE_POLICY,
+      tested_merge_sha: row.tested_merge_sha,
       evidence_digest: row.evidence_digest,
     };
-  }
-
-  private terminalEvidenceMatches(
-    input: ReturnType<typeof transitionGateSchema.parse>,
-    actor: OidcActor,
-  ): boolean {
-    const row = this.ctx.storage.sql.exec<Record<string, SqlStorageValue>>(
-      "SELECT * FROM terminal_evidence WHERE logical_key=? AND generation=?",
-      input.logical_key,
-      input.generation,
-    ).toArray()[0];
-    const conclusion = input.to_state === "hosted_success" ? "success" : "failure";
-    return row !== undefined
-      && row.evidence_digest === input.evidence_digest
-      && row.conclusion === conclusion
-      && row.base_sha === input.base_sha
-      && row.head_sha === input.head_sha
-      && row.merge_policy_version === input.merge_policy_version
-      && row.git_version === input.git_version
-      && row.runner_image === input.runner_image
-      && row.merge_base_sha === input.merge_base_sha
-      && row.tested_tree_sha === input.tested_tree_sha
-      && row.local_commit_sha === input.local_commit_sha
-      && row.command_digest === input.command_digest
-      && row.owner_run_id === actor.runId
-      && row.owner_run_attempt === actor.runAttempt;
   }
 
   private audit(
