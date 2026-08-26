@@ -82,6 +82,7 @@ export async function deliverGitHubCheck(
     if (beforeResult !== null) return beforeResult;
 
     let patchAmbiguous = false;
+    let retryAt: number | undefined;
     try {
       const patched = await githubJson(
         request,
@@ -97,6 +98,7 @@ export async function deliverGitHubCheck(
       return { state: "delivered", reconciled: false };
     } catch (error) {
       if (error instanceof BlockingGitHubError) return { state: "blocked", error: error.message };
+      if (error instanceof TransientGitHubError) retryAt = error.retryAt;
       patchAmbiguous = true;
     }
 
@@ -108,8 +110,15 @@ export async function deliverGitHubCheck(
         if (reconciled?.state === "blocked") return reconciled;
       } catch (error) {
         if (error instanceof BlockingGitHubError) return { state: "blocked", error: error.message };
+        if (error instanceof TransientGitHubError && error.retryAt !== undefined) {
+          retryAt = Math.max(retryAt ?? 0, error.retryAt);
+        }
       }
-      return { state: "transient", error: "ambiguous Check Run PATCH was not reconciled" };
+      return {
+        state: "transient",
+        error: "ambiguous Check Run PATCH was not reconciled",
+        ...(retryAt !== undefined ? { retryAt } : {}),
+      };
     }
     return { state: "transient", error: "Check Run delivery did not complete" };
   } catch (error) {

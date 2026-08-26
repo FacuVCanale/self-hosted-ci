@@ -43,6 +43,7 @@ interface OutboxRow extends Record<string, SqlStorageValue> {
 const INERT_RECHECK_MS = 5 * 60 * 1_000;
 const MAX_ALARM_BATCH = 10;
 const MAX_BACKOFF_MS = 60 * 60 * 1_000;
+const MAX_SERVER_RETRY_DELAY_MS = 24 * 60 * 60 * 1_000;
 
 export class GateConflict extends Error {
   constructor(message: string) {
@@ -515,7 +516,10 @@ export class RunnerPoolGate extends DurableObject<Cloudflare.Env> {
     }
     const attempts = row.attempts + 1;
     const delay = Math.min(MAX_BACKOFF_MS, 2 ** Math.min(attempts, 16) * 1_000);
-    const nextAttemptAt = Math.max(now + delay, result.retryAt ?? 0);
+    const serverRetryAt = result.retryAt === undefined
+      ? 0
+      : Math.min(result.retryAt, now + MAX_SERVER_RETRY_DELAY_MS);
+    const nextAttemptAt = Math.max(now + delay, serverRetryAt);
     this.ctx.storage.sql.exec(
       `UPDATE check_outbox SET next_attempt_at=?,last_error=?
        WHERE outbox_key=? AND state='pending'`,

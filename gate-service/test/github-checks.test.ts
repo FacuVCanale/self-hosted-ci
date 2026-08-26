@@ -204,4 +204,38 @@ describe("effectively-once GitHub Check delivery", () => {
       state: "blocked",
     });
   });
+
+  it("preserves Retry-After when a rate-limited PATCH remains ambiguous", async ({ expect }) => {
+    const mock = sequence([
+      ...authorityResponses(),
+      json(check()),
+      new Response("{}", {
+        status: 403,
+        headers: { "content-type": "application/json", "retry-after": "60" },
+      }),
+      json(check()),
+    ]);
+    const before = Date.now() + 60_000;
+    const result = await deliverGitHubCheck(authority, event, mock.fetch, now);
+    expect(result.state).toBe("transient");
+    if (result.state !== "transient") throw new Error("unexpected delivery result");
+    expect(result.retryAt).toBeGreaterThanOrEqual(before);
+  });
+
+  it("preserves Retry-After when ambiguous PATCH reconciliation is rate-limited", async ({ expect }) => {
+    const mock = sequence([
+      ...authorityResponses(),
+      json(check()),
+      new Error("connection reset after send"),
+      new Response("{}", {
+        status: 403,
+        headers: { "content-type": "application/json", "retry-after": "90" },
+      }),
+    ]);
+    const before = Date.now() + 90_000;
+    const result = await deliverGitHubCheck(authority, event, mock.fetch, now);
+    expect(result.state).toBe("transient");
+    if (result.state !== "transient") throw new Error("unexpected delivery result");
+    expect(result.retryAt).toBeGreaterThanOrEqual(before);
+  });
 });
