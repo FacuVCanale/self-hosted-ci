@@ -76,20 +76,59 @@ interface GitHubResponse {
 }
 
 class TransientGitHubError extends Error {
-  constructor(message: string, readonly retryAt?: number) {
+  constructor(
+    message: string,
+    readonly retryAt?: number,
+    readonly pollable = false,
+  ) {
     super(message);
   }
 }
 class BlockingGitHubError extends Error {}
 
+export class CanonicalPullRequestUnavailable extends Error {
+  constructor(message: string, retryAt = Date.now() + 2_000) {
+    super(message);
+    this.name = `CanonicalPullRequestUnavailable:${Math.ceil(retryAt)}`;
+  }
+}
+
+export class CanonicalPullRequestBlocked extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CanonicalPullRequestBlocked";
+  }
+}
+
+const CANONICAL_READ_DELAYS_MS = [250, 500] as const;
+const RATE_LIMIT_FALLBACK_MS = 60_000;
+
 export async function resolveCanonicalPullRequest(
   rawEnv: CheckDeliveryEnv,
   event: PullRequestExpectation,
   request: typeof fetch = fetch,
+  pause: (milliseconds: number) => Promise<void> = sleep,
 ): Promise<CanonicalPullRequest> {
   const authority = parseAuthority(rawEnv);
   validatePullRequestExpectation(event, authority);
-  return readCanonicalPullRequest(authority, event, request);
+  for (let attempt = 0; attempt <= CANONICAL_READ_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await readCanonicalPullRequest(authority, event, request);
+    } catch (error) {
+      if (error instanceof BlockingGitHubError) {
+        throw new CanonicalPullRequestBlocked(error.message);
+      }
+      if (!(error instanceof TransientGitHubError)) throw error;
+      if (!error.pollable) {
+        throw new CanonicalPullRequestUnavailable(error.message, error.retryAt);
+      }
+      if (attempt === CANONICAL_READ_DELAYS_MS.length) {
+        throw new CanonicalPullRequestUnavailable(error.message);
+      }
+      await pause(CANONICAL_READ_DELAYS_MS[attempt]!);
+    }
+  }
+  throw new CanonicalPullRequestUnavailable("canonical pull request resolution exhausted");
 }
 
 export async function prepareGitHubCheck(
@@ -309,7 +348,6 @@ async function readCanonicalPullRequest(
   const base = objectValue(pull.base);
   const baseRepo = objectValue(base?.repo);
   const baseRef = base?.ref;
-  const mergeSha = pull.merge_commit_sha;
   if (
     pull.number !== event.prNumber
     || pull.state !== "open"
@@ -318,10 +356,11 @@ async function readCanonicalPullRequest(
     || baseRepo?.full_name !== authority.repository
     || typeof baseRef !== "string"
     || !validBranchRef(baseRef)
-    || typeof mergeSha !== "string"
-    || !/^[0-9a-f]{40}$/.test(mergeSha)
   ) {
     throw new BlockingGitHubError("current pull request tuple mismatch");
+  }
+  if (pull.mergeable === false) {
+    throw new BlockingGitHubError("current pull request has a merge conflict");
   }
   const gitRef = await githubJson(
     request,
@@ -339,18 +378,36 @@ async function readCanonicalPullRequest(
   ) {
     throw new BlockingGitHubError("canonical base ref is invalid");
   }
+  const mergeRef = await githubJson(
+    request,
+    `${GITHUB_API}/repos/${authority.repository}/git/ref/pull/${event.prNumber}/merge`,
+    { headers: publicHeaders() },
+    200,
+    { pollableStatuses: [404] },
+  );
+  const mergeObject = objectValue(mergeRef.object);
+  const mergeSha = mergeObject?.sha;
+  if (
+    mergeRef.ref !== `refs/pull/${event.prNumber}/merge`
+    || mergeObject?.type !== "commit"
+    || typeof mergeSha !== "string"
+    || !/^[0-9a-f]{40}$/.test(mergeSha)
+  ) {
+    throw new BlockingGitHubError("canonical pull request merge ref is invalid");
+  }
   const commit = await githubJson(
     request,
     `${GITHUB_API}/repos/${authority.repository}/commits/${mergeSha}`,
     { headers: publicHeaders() },
     200,
+    { pollableStatuses: [404] },
   );
   if (commit.sha !== mergeSha || !Array.isArray(commit.parents) || commit.parents.length !== 2) {
-    throw new BlockingGitHubError("canonical tested merge commit is invalid");
+    throw new TransientGitHubError("canonical tested merge commit is not ready", undefined, true);
   }
   const parents = commit.parents.map((parent) => objectValue(parent)?.sha);
   if (parents[0] !== baseSha || parents[1] !== event.headSha) {
-    throw new BlockingGitHubError("canonical tested merge parents mismatch");
+    throw new TransientGitHubError("canonical tested merge parents are stale", undefined, true);
   }
   return { baseSha, testedMergeSha: mergeSha };
 }
@@ -365,6 +422,10 @@ function validBranchRef(value: string): boolean {
     && !value.includes("@{")
     && !/[\u0000-\u0020~^:?*[\\]/.test(value)
     && value.split("/").every((part) => part !== "." && part !== ".." && !part.endsWith(".lock"));
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function prepared(
@@ -650,6 +711,7 @@ async function githubJson(
   url: string,
   init: RequestInit,
   expectedStatus: number,
+  retry: { transientStatuses?: readonly number[]; pollableStatuses?: readonly number[] } = {},
 ): Promise<Record<string, unknown>> {
   let response: Response;
   try {
@@ -660,13 +722,18 @@ async function githubJson(
   const rateLimited = response.status === 403 && (
     response.headers.has("retry-after") || response.headers.get("x-ratelimit-remaining") === "0"
   );
-  const retryable = rateLimited || response.status === 408 || response.status === 409 || response.status === 425
+  const pollable = retry.pollableStatuses?.includes(response.status) === true;
+  const retryable = pollable || retry.transientStatuses?.includes(response.status) === true
+    || rateLimited || response.status === 408 || response.status === 409 || response.status === 425
     || response.status === 429 || response.status >= 500;
   if (response.status !== expectedStatus) {
     throw retryable
       ? new TransientGitHubError(
         `GitHub API transient HTTP ${response.status}`,
-        retryAfter(response.headers),
+        rateLimited || response.status === 429
+          ? retryAfter(response.headers) ?? Date.now() + RATE_LIMIT_FALLBACK_MS
+          : retryAfter(response.headers),
+        pollable,
       )
       : new BlockingGitHubError(`GitHub API rejected authority with HTTP ${response.status}`);
   }

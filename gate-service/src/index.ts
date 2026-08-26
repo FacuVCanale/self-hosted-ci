@@ -1,18 +1,20 @@
 import { AuthenticationError, verifyGitHubOidc } from "./auth";
 import { activationModeSchema, runnerPoolIdSchema } from "./contracts";
 import { GateConflict, GateFenced, RunnerPoolGate } from "./runner-pool-gate";
+import { CanonicalPullRequestBlocked, CanonicalPullRequestUnavailable } from "./github-checks";
 import { ZodError } from "zod";
 
 export { RunnerPoolGate } from "./runner-pool-gate";
 
 const MAX_BODY_BYTES = 32 * 1024;
 
-function json(value: unknown, status = 200): Response {
+function json(value: unknown, status = 200, headers: HeadersInit = {}): Response {
   return Response.json(value, {
     status,
     headers: {
       "cache-control": "no-store",
       "content-type": "application/json; charset=utf-8",
+      ...headers,
     },
   });
 }
@@ -76,6 +78,35 @@ function log(level: "info" | "warn" | "error", event: string, detail: Record<str
   console.log(JSON.stringify({ level, event, timestamp: new Date().toISOString(), ...detail }));
 }
 
+export function classifyRequestError(error: unknown, now = Date.now()): {
+  status: number;
+  code: string;
+  headers: HeadersInit;
+} {
+  const retryableMatch = error instanceof Error
+    ? /^CanonicalPullRequestUnavailable:(\d{13})$/.exec(error.name)
+    : null;
+  const retryableCanonical = retryableMatch !== null;
+  const blockedCanonical = error instanceof CanonicalPullRequestBlocked
+    || (error instanceof Error && error.name === "CanonicalPullRequestBlocked");
+  if (retryableCanonical) {
+    const retryAt = Number(retryableMatch[1]);
+    const retryAfterSeconds = Math.max(1, Math.ceil((retryAt - now) / 1_000));
+    return {
+      status: 503,
+      code: "canonical_pull_request_unavailable",
+      headers: { "retry-after": String(retryAfterSeconds) },
+    };
+  }
+  if (error instanceof AuthenticationError) return { status: 401, code: "unauthorized", headers: {} };
+  if (blockedCanonical) return { status: 409, code: "canonical_pull_request_blocked", headers: {} };
+  if (error instanceof GateFenced) return { status: 409, code: "fenced", headers: {} };
+  if (error instanceof GateConflict || error instanceof ZodError) {
+    return { status: 400, code: "invalid_request", headers: {} };
+  }
+  return { status: 500, code: "internal_error", headers: {} };
+}
+
 export async function handleRequest(request: Request, env: Cloudflare.Env): Promise<Response> {
     const requestId = crypto.randomUUID();
     const url = new URL(request.url);
@@ -120,27 +151,18 @@ export async function handleRequest(request: Request, env: Cloudflare.Env): Prom
       });
       return json(result);
     } catch (error) {
-      const status = error instanceof AuthenticationError
-        ? 401
-        : error instanceof GateFenced
-          ? 409
-          : error instanceof GateConflict || error instanceof ZodError
-            ? 400
-            : 500;
-      const code = error instanceof AuthenticationError
-        ? "unauthorized"
-        : error instanceof GateFenced
-          ? "fenced"
-          : error instanceof GateConflict || error instanceof ZodError
-            ? "invalid_request"
-            : "internal_error";
+      const { status, code, headers } = classifyRequestError(error);
       log(status >= 500 ? "error" : "warn", "request_failed", {
         request_id: requestId,
         status,
         code,
         error_type: error instanceof Error ? error.name : "unknown",
       });
-      return json({ error: code, request_id: requestId }, status);
+      return json(
+        { error: code, request_id: requestId },
+        status,
+        headers,
+      );
     }
 }
 

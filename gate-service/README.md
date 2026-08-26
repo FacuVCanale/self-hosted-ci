@@ -50,8 +50,9 @@ The single `POST /v1/pools/:runner_pool_id/gates` operation accepts only the exa
 coordinator plus repository, PR and expected head. The caller cannot supply
 `base_sha` or `tested_merge_sha`: the Worker re-reads the current pull request,
 requires its exact base repository and branch ref, resolves that branch's
-current commit through GitHub's public Git-ref API, and takes the PR's current
-`merge_commit_sha`. It accepts the merge only when the public commit object has
+current commit through GitHub's public Git-ref API, and resolves the exact
+`refs/pull/<PR>/merge` Git ref without trusting the PR payload's nullable or
+stale `merge_commit_sha`. It accepts the merge only when the public commit object has
 exactly the ordered parents `[canonical base_sha, expected head_sha]`. Acquire
 returns both server-canonical SHAs for durable tuple identity, exact checkout
 and terminal evidence. The
@@ -88,6 +89,22 @@ supersedes or mutates the active gate for the current tuple. An exact
 same-App, in-progress match is idempotent; duplicate markers, another App,
 another SHA, or malformed GitHub response fail closed. Every reported page is
 scanned before deciding uniqueness.
+
+Canonical resolution is a bounded read-only poll before any creation intent:
+each attempt re-reads the PR, current base ref, exact PR merge ref and merge
+commit. A temporarily missing merge ref or a commit whose parents have not yet
+converged retries with short backoff; an explicit `mergeable: false` blocks
+immediately. GitHub rate limits and their authoritative `Retry-After` or
+`X-RateLimit-Reset` abort local polling immediately, cross the Durable Object
+RPC encoded in the error identity, and propagate without truncation as HTTP
+`503` plus a ceiling-seconds `Retry-After`. A recognized `403`/`429` rate limit
+without a valid delay uses an explicit 60-second fallback, which remains inside
+the workflow budget and avoids immediate amplification. Eventual-consistency exhaustion also
+creates no durable intent, gate or Check. The reusable workflow makes at most
+two acquire requests with the same OIDC run owner and unchanged payload, gives
+each curl attempt a 5-second connect and 30-second total timeout, and fails
+observably instead of sleeping when `Retry-After` exceeds its explicit
+180-second job budget.
 
 The repository-scoped Durable Object serializes all concurrent acquisition for
 the same pull request and rejects alternate pool aliases. In-flight retries

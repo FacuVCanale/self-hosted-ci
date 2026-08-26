@@ -1,5 +1,5 @@
 import { exportJWK, exportPKCS8, generateKeyPair } from "jose";
-import { beforeAll, describe, it } from "vitest";
+import { beforeAll, describe, it, vi } from "vitest";
 import {
   deliverGitHubCheck,
   derivePreparationMarker,
@@ -124,6 +124,14 @@ function refResponse(overrides: Record<string, unknown> = {}): Response {
   });
 }
 
+function mergeRefResponse(overrides: Record<string, unknown> = {}): Response {
+  return json({
+    ref: `refs/pull/${preparation.prNumber}/merge`,
+    object: { type: "commit", sha: preparation.testedMergeSha },
+    ...overrides,
+  });
+}
+
 function commitResponse(overrides: Record<string, unknown> = {}): Response {
   return json({
     sha: preparation.testedMergeSha,
@@ -133,8 +141,14 @@ function commitResponse(overrides: Record<string, unknown> = {}): Response {
 }
 
 function preparationAuthorityResponses(): Array<Response | Error> {
-  return [...authorityResponses(), pullResponse(), refResponse(), commitResponse()];
+  return [...authorityResponses(), pullResponse(), refResponse(), mergeRefResponse(), commitResponse()];
 }
+
+function canonicalAttempt(commitOverrides: Record<string, unknown> = {}): Array<Response | Error> {
+  return [pullResponse(), refResponse(), mergeRefResponse(), commitResponse(commitOverrides)];
+}
+
+const noPause = async (): Promise<void> => undefined;
 
 function sequence(responses: Array<Response | Error>): { fetch: typeof fetch; calls: Request[] } {
   const calls: Request[] = [];
@@ -189,9 +203,10 @@ describe("idempotent GitHub Check preparation", () => {
           ref: "main",
           repo: { id: 123456789, full_name: "example-owner/example-repository" },
         },
-        merge_commit_sha: recomputedMerge,
+        merge_commit_sha: null,
       }),
       refResponse(),
+      mergeRefResponse({ object: { type: "commit", sha: recomputedMerge } }),
       commitResponse({ sha: recomputedMerge }),
     ]);
     await expect(resolveCanonicalPullRequest(authority, {
@@ -206,6 +221,7 @@ describe("idempotent GitHub Check preparation", () => {
     expect(mock.calls.map((call) => new URL(call.url).pathname)).toEqual([
       "/repos/example-owner/example-repository/pulls/7",
       "/repos/example-owner/example-repository/git/ref/heads/main",
+      "/repos/example-owner/example-repository/git/ref/pull/7/merge",
       `/repos/example-owner/example-repository/commits/${recomputedMerge}`,
     ]);
   });
@@ -285,6 +301,7 @@ describe("idempotent GitHub Check preparation", () => {
     const responses = authorityResponses();
     responses.push(pullResponse({ merge_commit_sha: "4".repeat(40) }));
     responses.push(refResponse());
+    responses.push(mergeRefResponse({ object: { type: "commit", sha: "4".repeat(40) } }));
     responses.push(commitResponse({
       sha: "4".repeat(40),
       parents: [{ sha: preparation.baseSha }, { sha: preparation.headSha }],
@@ -297,30 +314,35 @@ describe("idempotent GitHub Check preparation", () => {
     expect(mock.calls.some((call) => call.url.includes("/check-runs"))).toBe(false);
   });
 
-  it("rejects canonical merge commits with wrong, reordered, or extra parents", async ({ expect }) => {
+  it("treats persistently wrong, reordered, or extra parents as retryable exhaustion", async ({ expect }) => {
     for (const parents of [
       [{ sha: "9".repeat(40) }, { sha: preparation.headSha }],
       [{ sha: preparation.headSha }, { sha: preparation.baseSha }],
       [{ sha: preparation.baseSha }, { sha: preparation.headSha }, { sha: "9".repeat(40) }],
     ]) {
-      const mock = sequence([pullResponse(), refResponse(), commitResponse({ parents })]);
+      const mock = sequence([
+        ...canonicalAttempt({ parents }),
+        ...canonicalAttempt({ parents }),
+        ...canonicalAttempt({ parents }),
+      ]);
       await expect(resolveCanonicalPullRequest(authority, {
         repositoryId: preparation.repositoryId,
         prNumber: preparation.prNumber,
         headSha: preparation.headSha,
         actor: preparation.actor,
-      }, mock.fetch)).rejects.toThrow(/canonical tested merge/);
+      }, mock.fetch, noPause)).rejects.toThrow("canonical tested merge");
     }
   });
 
-  it("rejects a commit response that does not identify the requested canonical SHA", async ({ expect }) => {
-    const mock = sequence([pullResponse(), refResponse(), commitResponse({ sha: "9".repeat(40) })]);
+  it("treats a persistently crossed commit identity as retryable exhaustion", async ({ expect }) => {
+    const crossed = { sha: "9".repeat(40) };
+    const mock = sequence([...canonicalAttempt(crossed), ...canonicalAttempt(crossed), ...canonicalAttempt(crossed)]);
     await expect(resolveCanonicalPullRequest(authority, {
       repositoryId: preparation.repositoryId,
       prNumber: preparation.prNumber,
       headSha: preparation.headSha,
       actor: preparation.actor,
-    }, mock.fetch)).rejects.toThrow("canonical tested merge commit is invalid");
+    }, mock.fetch, noPause)).rejects.toThrow("canonical tested merge commit is not ready");
   });
 
   it("rejects a PR whose base repository is not the configured immutable repository", async ({ expect }) => {
@@ -372,6 +394,130 @@ describe("idempotent GitHub Check preparation", () => {
       headSha: preparation.headSha,
       actor: preparation.actor,
     }, mismatched.fetch)).rejects.toThrow("canonical base ref is invalid");
+  });
+
+  it("ignores an absent PR merge_commit_sha and resolves the exact merge ref", async ({ expect }) => {
+    const mock = sequence([
+      pullResponse({ merge_commit_sha: undefined }),
+      refResponse(),
+      mergeRefResponse(),
+      commitResponse(),
+    ]);
+    await expect(resolveCanonicalPullRequest(authority, {
+      repositoryId: preparation.repositoryId,
+      prNumber: preparation.prNumber,
+      headSha: preparation.headSha,
+      actor: preparation.actor,
+    }, mock.fetch)).resolves.toEqual({
+      baseSha: preparation.baseSha,
+      testedMergeSha: preparation.testedMergeSha,
+    });
+  });
+
+  it("rejects malformed or crossed pull request merge refs", async ({ expect }) => {
+    for (const mergeRef of [
+      mergeRefResponse({ ref: undefined }),
+      mergeRefResponse({ object: undefined }),
+      mergeRefResponse({ ref: "refs/pull/8/merge" }),
+      mergeRefResponse({ object: { type: "tag", sha: preparation.testedMergeSha } }),
+      mergeRefResponse({ object: { type: "commit", sha: "invalid" } }),
+    ]) {
+      const mock = sequence([pullResponse(), refResponse(), mergeRef]);
+      await expect(resolveCanonicalPullRequest(authority, {
+        repositoryId: preparation.repositoryId,
+        prNumber: preparation.prNumber,
+        headSha: preparation.headSha,
+        actor: preparation.actor,
+      }, mock.fetch)).rejects.toThrow("canonical pull request merge ref is invalid");
+    }
+  });
+
+  it("polls from a missing merge ref to one exact Check tuple", async ({ expect }) => {
+    const mock = sequence([
+      pullResponse(), refResponse(), json({ message: "Not Found" }, 404),
+      ...canonicalAttempt(),
+    ]);
+    await expect(resolveCanonicalPullRequest(authority, {
+      repositoryId: preparation.repositoryId,
+      prNumber: preparation.prNumber,
+      headSha: preparation.headSha,
+      actor: preparation.actor,
+    }, mock.fetch, noPause)).resolves.toEqual({
+      baseSha: preparation.baseSha,
+      testedMergeSha: preparation.testedMergeSha,
+    });
+  });
+
+  it("polls a stale merge ref commit until its exact parents converge", async ({ expect }) => {
+    const mock = sequence([
+      ...canonicalAttempt({ parents: [{ sha: "9".repeat(40) }, { sha: preparation.headSha }] }),
+      ...canonicalAttempt(),
+    ]);
+    await expect(resolveCanonicalPullRequest(authority, {
+      repositoryId: preparation.repositoryId,
+      prNumber: preparation.prNumber,
+      headSha: preparation.headSha,
+      actor: preparation.actor,
+    }, mock.fetch, noPause)).resolves.toEqual({
+      baseSha: preparation.baseSha,
+      testedMergeSha: preparation.testedMergeSha,
+    });
+  });
+
+  it("surfaces persistent merge-ref absence as retryable canonical exhaustion", async ({ expect }) => {
+    const missing = () => [pullResponse(), refResponse(), json({ message: "Not Found" }, 404)];
+    const mock = sequence([...missing(), ...missing(), ...missing()]);
+    await expect(resolveCanonicalPullRequest(authority, {
+      repositoryId: preparation.repositoryId,
+      prNumber: preparation.prNumber,
+      headSha: preparation.headSha,
+      actor: preparation.actor,
+    }, mock.fetch, noPause)).rejects.toMatchObject({
+      name: expect.stringMatching(/^CanonicalPullRequestUnavailable:\d{13}$/),
+    });
+  });
+
+  it("propagates authoritative GitHub rate-limit delays without polling amplification", async ({ expect }) => {
+    const currentTime = 1_800_000_000_000;
+    vi.useFakeTimers();
+    vi.setSystemTime(currentTime);
+    try {
+      for (const [status, headers, expectedRetryAt] of [
+        [429, { "retry-after": "17" }, currentTime + 17_000],
+        [429, {}, currentTime + 60_000],
+        [403, { "retry-after": "23", "x-ratelimit-remaining": "0" }, currentTime + 23_000],
+        [403, { "x-ratelimit-remaining": "0" }, currentTime + 60_000],
+        [403, { "retry-after": "invalid" }, currentTime + 60_000],
+        [403, {
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": String((currentTime + 31_000) / 1_000),
+        }, currentTime + 31_000],
+      ] as const) {
+        const mock = sequence([Response.json({ message: "rate limited" }, { status, headers })]);
+        await expect(resolveCanonicalPullRequest(authority, {
+          repositoryId: preparation.repositoryId,
+          prNumber: preparation.prNumber,
+          headSha: preparation.headSha,
+          actor: preparation.actor,
+        }, mock.fetch, noPause)).rejects.toMatchObject({
+          name: `CanonicalPullRequestUnavailable:${expectedRetryAt}`,
+        });
+        expect(mock.calls).toHaveLength(1);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("blocks an explicit merge conflict without polling", async ({ expect }) => {
+    const mock = sequence([pullResponse({ mergeable: false })]);
+    await expect(resolveCanonicalPullRequest(authority, {
+      repositoryId: preparation.repositoryId,
+      prNumber: preparation.prNumber,
+      headSha: preparation.headSha,
+      actor: preparation.actor,
+    }, mock.fetch, noPause)).rejects.toMatchObject({ name: "CanonicalPullRequestBlocked" });
+    expect(mock.calls).toHaveLength(1);
   });
 
   it("binds an exact ambiguous marker before classifying a moved PR obsolete", async ({ expect }) => {

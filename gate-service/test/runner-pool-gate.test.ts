@@ -6,6 +6,7 @@ import { exportJWK, exportPKCS8, generateKeyPair } from "jose";
 import type { GateSnapshot, OidcActor } from "../src/contracts";
 import { RunnerPoolGate } from "../src/runner-pool-gate";
 import { derivePreparationMarker } from "../src/github-checks";
+import { classifyRequestError } from "../src/index";
 
 const actor: OidcActor = {
   repository: "example-owner/example-repository",
@@ -93,6 +94,9 @@ function githubHarness(options: {
   failFirstRequest?: boolean;
   hiddenCreatedListings?: number;
   pauseFirstCreate?: boolean;
+  mergeRefFailures?: number;
+  staleMergeParents?: number;
+  mergeConflict?: boolean;
 } = {}) {
   const checks: Record<string, unknown>[] = [];
   let pullHeadSha = "1".repeat(40);
@@ -107,6 +111,8 @@ function githubHarness(options: {
   const firstCreateStarted = new Promise<void>((resolve) => { signalFirstCreate = resolve; });
   const firstCreateRelease = new Promise<void>((resolve) => { releaseFirstCreate = resolve; });
   let failFirstRequest = options.failFirstRequest === true;
+  let mergeRefFailures = options.mergeRefFailures ?? 0;
+  let staleMergeParents = options.staleMergeParents ?? 0;
   const request = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const call = new Request(input, init);
     const url = new URL(call.url);
@@ -132,12 +138,27 @@ function githubHarness(options: {
         ref: "main",
         repo: { id: 123456789, full_name: "example-owner/example-repository" },
       },
-      merge_commit_sha: pullMergeSha,
+      merge_commit_sha: null,
+      mergeable: options.mergeConflict === true ? false : true,
     });
     if (url.pathname === "/repos/example-owner/example-repository/git/ref/heads/main") {
       return Response.json({ ref: "refs/heads/main", object: { type: "commit", sha: pullBaseSha } });
     }
+    if (url.pathname === "/repos/example-owner/example-repository/git/ref/pull/7/merge") {
+      if (mergeRefFailures > 0) {
+        mergeRefFailures -= 1;
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      return Response.json({ ref: "refs/pull/7/merge", object: { type: "commit", sha: pullMergeSha } });
+    }
     if (url.pathname === `/repos/example-owner/example-repository/commits/${pullMergeSha}`) {
+      if (staleMergeParents > 0) {
+        staleMergeParents -= 1;
+        return Response.json({
+          sha: pullMergeSha,
+          parents: [{ sha: "9".repeat(40) }, { sha: pullHeadSha }],
+        });
+      }
       return Response.json({
         sha: pullMergeSha,
         parents: [{ sha: pullBaseSha }, { sha: pullHeadSha }],
@@ -496,6 +517,100 @@ describe("hosted-only RunnerPoolGate", () => {
       expect(github.check()).toMatchObject({ status: "completed", conclusion: "success" });
     } finally {
       github.request.mockRestore();
+    }
+  });
+
+  it("polls eventual merge-ref and parent convergence before creating exactly one Check", async ({ expect }) => {
+    for (const [suffix, options] of [
+      ["missing-ref", { mergeRefFailures: 1 }],
+      ["stale-parents", { staleMergeParents: 1 }],
+    ] as const) {
+      const authority = await testAppAuthority();
+      const github = githubHarness(options);
+      const pool = `integrated-canonical-poll-${suffix}`;
+      const stub = env.RUNNER_POOLS.getByName(pool);
+      try {
+        const gate = await runInDurableObject(stub, async (instance: RunnerPoolGate) => {
+          installTestAuthority(instance, authority);
+          return instance.acquire(pool, acquisition(), actor);
+        });
+        expect(gate).toMatchObject({
+          state: "hosted_selected",
+          base_sha: "2".repeat(40),
+          tested_merge_sha: "3".repeat(40),
+          check_run_id: 99,
+        });
+        expect(github.posts()).toBe(1);
+        expect(github.checks()).toHaveLength(1);
+      } finally {
+        github.request.mockRestore();
+      }
+    }
+  });
+
+  it("preserves retryable exhaustion type across Durable Object RPC with zero durable state", async ({ expect }) => {
+    const authority = await testAppAuthority();
+    const github = githubHarness({ mergeRefFailures: 3 });
+    const pool = "integrated-canonical-rpc-exhaustion";
+    const stub = env.RUNNER_POOLS.getByName(pool);
+    try {
+      await runInDurableObject(stub, async (instance: RunnerPoolGate) => installTestAuthority(instance, authority));
+      const before = Date.now();
+      let rpcError: unknown;
+      try {
+        await stub.acquire(pool, acquisition(), actor);
+      } catch (error) {
+        rpcError = error;
+      }
+      const after = Date.now();
+      const counts = await runInDurableObject(stub, async (_instance: RunnerPoolGate, state) => ({
+        intents: state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM check_creation_intents").one().count,
+        gates: state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM gates").one().count,
+      }));
+      expect(rpcError).toBeInstanceOf(Error);
+      const name = (rpcError as Error).name;
+      expect(name).toMatch(/^CanonicalPullRequestUnavailable:\d{13}$/);
+      const retryAt = Number(name.split(":")[1]);
+      expect(retryAt).toBeGreaterThanOrEqual(before + 2_000);
+      expect(retryAt).toBeLessThanOrEqual(after + 2_000);
+      expect(classifyRequestError(rpcError, retryAt - 2_000)).toEqual({
+        status: 503,
+        code: "canonical_pull_request_unavailable",
+        headers: { "retry-after": "2" },
+      });
+      expect(counts).toEqual({ intents: 0, gates: 0 });
+      expect(github.posts()).toBe(0);
+      expect(github.checks()).toHaveLength(0);
+    } finally {
+      github.request.mockRestore();
+    }
+  });
+
+  it("creates no durable state or Check for an explicit merge conflict", async ({ expect }) => {
+    for (const [suffix, options, expectedName] of [
+      ["conflict", { mergeConflict: true }, "CanonicalPullRequestBlocked"],
+    ] as const) {
+      const authority = await testAppAuthority();
+      const github = githubHarness(options);
+      const pool = `integrated-canonical-failure-${suffix}`;
+      const stub = env.RUNNER_POOLS.getByName(pool);
+      try {
+        const result = await runInDurableObject(stub, async (instance: RunnerPoolGate, state) => {
+          installTestAuthority(instance, authority);
+          const outcome = await instance.acquire(pool, acquisition(), actor)
+            .then(() => "unexpected_success", (error: unknown) => error instanceof Error ? error.name : "unknown");
+          return {
+            outcome,
+            intents: state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM check_creation_intents").one().count,
+            gates: state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM gates").one().count,
+          };
+        });
+        expect(result).toEqual({ outcome: expectedName, intents: 0, gates: 0 });
+        expect(github.posts()).toBe(0);
+        expect(github.checks()).toHaveLength(0);
+      } finally {
+        github.request.mockRestore();
+      }
     }
   });
 
