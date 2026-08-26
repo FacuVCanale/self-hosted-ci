@@ -140,12 +140,15 @@ class HostedReusableGateWorkflowTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.text = (ACTIVE_WORKFLOWS / "ci-gate.yml").read_text(encoding="utf-8")
 
-    def test_merge_sha_is_server_canonical_and_not_a_caller_input(self) -> None:
+    def test_base_and_merge_shas_are_server_canonical_and_not_caller_inputs(self) -> None:
         inputs = self.text.split("jobs:", 1)[0]
         self.assertNotIn("tested_merge_sha:", inputs)
+        self.assertNotIn("base_sha:", inputs)
         acquire_payload = self.text.split("Prepare Check and acquire hosted gate generation atomically", 1)[1]
         acquire_payload = acquire_payload.split("  quality:", 1)[0]
         self.assertNotIn("--arg tested_merge_sha", acquire_payload)
+        self.assertNotIn("--arg base_sha", acquire_payload)
+        self.assertIn("printf 'base_sha=%s", acquire_payload)
         self.assertIn("printf 'tested_merge_sha=%s", acquire_payload)
 
     def test_quality_and_finalize_use_only_acquire_merge_output(self) -> None:

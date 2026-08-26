@@ -4,7 +4,7 @@ import {
   deliverGitHubCheck,
   derivePreparationMarker,
   prepareGitHubCheck,
-  resolveCanonicalTestedMerge,
+  resolveCanonicalPullRequest,
   type CheckDeliveryEnv,
   type CheckPreparationEvent,
 } from "../src/github-checks";
@@ -108,9 +108,18 @@ function pullResponse(overrides: Record<string, unknown> = {}): Response {
     head: { sha: preparation.headSha },
     base: {
       sha: preparation.baseSha,
+      ref: "main",
       repo: { id: 123456789, full_name: "example-owner/example-repository" },
     },
     merge_commit_sha: preparation.testedMergeSha,
+    ...overrides,
+  });
+}
+
+function refResponse(overrides: Record<string, unknown> = {}): Response {
+  return json({
+    ref: "refs/heads/main",
+    object: { type: "commit", sha: preparation.baseSha },
     ...overrides,
   });
 }
@@ -124,7 +133,7 @@ function commitResponse(overrides: Record<string, unknown> = {}): Response {
 }
 
 function preparationAuthorityResponses(): Array<Response | Error> {
-  return [...authorityResponses(), pullResponse(), commitResponse()];
+  return [...authorityResponses(), pullResponse(), refResponse(), commitResponse()];
 }
 
 function sequence(responses: Array<Response | Error>): { fetch: typeof fetch; calls: Request[] } {
@@ -174,18 +183,29 @@ describe("idempotent GitHub Check preparation", () => {
   it("resolves the server-canonical merge only when its ordered parents are exact", async ({ expect }) => {
     const recomputedMerge = "4".repeat(40);
     const mock = sequence([
-      pullResponse({ merge_commit_sha: recomputedMerge }),
+      pullResponse({
+        base: {
+          sha: "9".repeat(40),
+          ref: "main",
+          repo: { id: 123456789, full_name: "example-owner/example-repository" },
+        },
+        merge_commit_sha: recomputedMerge,
+      }),
+      refResponse(),
       commitResponse({ sha: recomputedMerge }),
     ]);
-    await expect(resolveCanonicalTestedMerge(authority, {
+    await expect(resolveCanonicalPullRequest(authority, {
       repositoryId: preparation.repositoryId,
       prNumber: preparation.prNumber,
       headSha: preparation.headSha,
-      baseSha: preparation.baseSha,
       actor: preparation.actor,
-    }, mock.fetch)).resolves.toBe(recomputedMerge);
+    }, mock.fetch)).resolves.toEqual({
+      baseSha: preparation.baseSha,
+      testedMergeSha: recomputedMerge,
+    });
     expect(mock.calls.map((call) => new URL(call.url).pathname)).toEqual([
       "/repos/example-owner/example-repository/pulls/7",
+      "/repos/example-owner/example-repository/git/ref/heads/main",
       `/repos/example-owner/example-repository/commits/${recomputedMerge}`,
     ]);
   });
@@ -264,6 +284,7 @@ describe("idempotent GitHub Check preparation", () => {
   it("rejects stale PR tuples before listing or creating a Check", async ({ expect }) => {
     const responses = authorityResponses();
     responses.push(pullResponse({ merge_commit_sha: "4".repeat(40) }));
+    responses.push(refResponse());
     responses.push(commitResponse({
       sha: "4".repeat(40),
       parents: [{ sha: preparation.baseSha }, { sha: preparation.headSha }],
@@ -282,24 +303,22 @@ describe("idempotent GitHub Check preparation", () => {
       [{ sha: preparation.headSha }, { sha: preparation.baseSha }],
       [{ sha: preparation.baseSha }, { sha: preparation.headSha }, { sha: "9".repeat(40) }],
     ]) {
-      const mock = sequence([pullResponse(), commitResponse({ parents })]);
-      await expect(resolveCanonicalTestedMerge(authority, {
+      const mock = sequence([pullResponse(), refResponse(), commitResponse({ parents })]);
+      await expect(resolveCanonicalPullRequest(authority, {
         repositoryId: preparation.repositoryId,
         prNumber: preparation.prNumber,
         headSha: preparation.headSha,
-        baseSha: preparation.baseSha,
         actor: preparation.actor,
       }, mock.fetch)).rejects.toThrow(/canonical tested merge/);
     }
   });
 
   it("rejects a commit response that does not identify the requested canonical SHA", async ({ expect }) => {
-    const mock = sequence([pullResponse(), commitResponse({ sha: "9".repeat(40) })]);
-    await expect(resolveCanonicalTestedMerge(authority, {
+    const mock = sequence([pullResponse(), refResponse(), commitResponse({ sha: "9".repeat(40) })]);
+    await expect(resolveCanonicalPullRequest(authority, {
       repositoryId: preparation.repositoryId,
       prNumber: preparation.prNumber,
       headSha: preparation.headSha,
-      baseSha: preparation.baseSha,
       actor: preparation.actor,
     }, mock.fetch)).rejects.toThrow("canonical tested merge commit is invalid");
   });
@@ -308,16 +327,51 @@ describe("idempotent GitHub Check preparation", () => {
     const mock = sequence([pullResponse({
       base: {
         sha: preparation.baseSha,
+        ref: "main",
         repo: { id: 999, full_name: "attacker/repository" },
       },
     })]);
-    await expect(resolveCanonicalTestedMerge(authority, {
+    await expect(resolveCanonicalPullRequest(authority, {
       repositoryId: preparation.repositoryId,
       prNumber: preparation.prNumber,
       headSha: preparation.headSha,
-      baseSha: preparation.baseSha,
       actor: preparation.actor,
     }, mock.fetch)).rejects.toThrow("current pull request tuple mismatch");
+  });
+
+  it("rejects a stale expected head before resolving base or merge commits", async ({ expect }) => {
+    const mock = sequence([pullResponse({ head: { sha: "9".repeat(40) } })]);
+    await expect(resolveCanonicalPullRequest(authority, {
+      repositoryId: preparation.repositoryId,
+      prNumber: preparation.prNumber,
+      headSha: preparation.headSha,
+      actor: preparation.actor,
+    }, mock.fetch)).rejects.toThrow("current pull request tuple mismatch");
+    expect(mock.calls).toHaveLength(1);
+  });
+
+  it("rejects unsafe or mismatched base branch refs", async ({ expect }) => {
+    const unsafe = sequence([pullResponse({
+      base: {
+        sha: preparation.baseSha,
+        ref: "../main",
+        repo: { id: 123456789, full_name: "example-owner/example-repository" },
+      },
+    })]);
+    await expect(resolveCanonicalPullRequest(authority, {
+      repositoryId: preparation.repositoryId,
+      prNumber: preparation.prNumber,
+      headSha: preparation.headSha,
+      actor: preparation.actor,
+    }, unsafe.fetch)).rejects.toThrow("current pull request tuple mismatch");
+
+    const mismatched = sequence([pullResponse(), refResponse({ ref: "refs/heads/attacker" })]);
+    await expect(resolveCanonicalPullRequest(authority, {
+      repositoryId: preparation.repositoryId,
+      prNumber: preparation.prNumber,
+      headSha: preparation.headSha,
+      actor: preparation.actor,
+    }, mismatched.fetch)).rejects.toThrow("canonical base ref is invalid");
   });
 
   it("binds an exact ambiguous marker before classifying a moved PR obsolete", async ({ expect }) => {
