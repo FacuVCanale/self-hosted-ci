@@ -7,6 +7,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / "templates" / "workflows"
+ACTIVE_WORKFLOWS = ROOT / ".github" / "workflows"
 
 
 def read(name: str) -> str:
@@ -132,6 +133,26 @@ class ReconcilerAndConsumerBoundaryTests(unittest.TestCase):
             )
         )
         self.assertNotRegex(combined, re.compile(r"statuses|commit status", re.IGNORECASE))
+
+
+class HostedReusableGateWorkflowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = (ACTIVE_WORKFLOWS / "ci-gate.yml").read_text(encoding="utf-8")
+
+    def test_merge_sha_is_server_canonical_and_not_a_caller_input(self) -> None:
+        inputs = self.text.split("jobs:", 1)[0]
+        self.assertNotIn("tested_merge_sha:", inputs)
+        acquire_payload = self.text.split("Prepare Check and acquire hosted gate generation atomically", 1)[1]
+        acquire_payload = acquire_payload.split("  quality:", 1)[0]
+        self.assertNotIn("--arg tested_merge_sha", acquire_payload)
+        self.assertIn("printf 'tested_merge_sha=%s", acquire_payload)
+
+    def test_quality_and_finalize_use_only_acquire_merge_output(self) -> None:
+        output = "${{ needs.acquire.outputs.tested_merge_sha }}"
+        self.assertIn(f"ref: {output}", self.text)
+        self.assertEqual(3, self.text.count(output))
+        self.assertNotIn("inputs.tested_merge_sha", self.text)
 
 
 if __name__ == "__main__":

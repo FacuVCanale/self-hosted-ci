@@ -4,6 +4,7 @@ import {
   deliverGitHubCheck,
   derivePreparationMarker,
   prepareGitHubCheck,
+  resolveCanonicalTestedMerge,
   type CheckDeliveryEnv,
   type CheckPreparationEvent,
 } from "../src/github-checks";
@@ -114,8 +115,16 @@ function pullResponse(overrides: Record<string, unknown> = {}): Response {
   });
 }
 
+function commitResponse(overrides: Record<string, unknown> = {}): Response {
+  return json({
+    sha: preparation.testedMergeSha,
+    parents: [{ sha: preparation.baseSha }, { sha: preparation.headSha }],
+    ...overrides,
+  });
+}
+
 function preparationAuthorityResponses(): Array<Response | Error> {
-  return [...authorityResponses(), pullResponse()];
+  return [...authorityResponses(), pullResponse(), commitResponse()];
 }
 
 function sequence(responses: Array<Response | Error>): { fetch: typeof fetch; calls: Request[] } {
@@ -162,6 +171,24 @@ function preparedCheck(marker: string, overrides: Record<string, unknown> = {}):
 }
 
 describe("idempotent GitHub Check preparation", () => {
+  it("resolves the server-canonical merge only when its ordered parents are exact", async ({ expect }) => {
+    const recomputedMerge = "4".repeat(40);
+    const mock = sequence([
+      pullResponse({ merge_commit_sha: recomputedMerge }),
+      commitResponse({ sha: recomputedMerge }),
+    ]);
+    await expect(resolveCanonicalTestedMerge(authority, {
+      repositoryId: preparation.repositoryId,
+      prNumber: preparation.prNumber,
+      headSha: preparation.headSha,
+      baseSha: preparation.baseSha,
+      actor: preparation.actor,
+    }, mock.fetch)).resolves.toBe(recomputedMerge);
+    expect(mock.calls.map((call) => new URL(call.url).pathname)).toEqual([
+      "/repos/example-owner/example-repository/pulls/7",
+      `/repos/example-owner/example-repository/commits/${recomputedMerge}`,
+    ]);
+  });
   it("derives one idempotent marker per exact run owner", async ({ expect }) => {
     const first = await derivePreparationMarker(preparation);
     const rerun = await derivePreparationMarker({
@@ -218,7 +245,7 @@ describe("idempotent GitHub Check preparation", () => {
   it("never adopts terminal evidence heuristically without a durable intent binding", async ({ expect }) => {
     const marker = await preparationMarker();
     const mock = sequence([
-      ...preparationAuthorityResponses(),
+      ...authorityResponses(),
       json({
         total_count: 1,
         check_runs: [preparedCheck(marker, {
@@ -237,12 +264,60 @@ describe("idempotent GitHub Check preparation", () => {
   it("rejects stale PR tuples before listing or creating a Check", async ({ expect }) => {
     const responses = authorityResponses();
     responses.push(pullResponse({ merge_commit_sha: "4".repeat(40) }));
+    responses.push(commitResponse({
+      sha: "4".repeat(40),
+      parents: [{ sha: preparation.baseSha }, { sha: preparation.headSha }],
+    }));
     const mock = sequence(responses);
     await expect(prepareGitHubCheck(authority, preparation, mock.fetch, now)).resolves.toMatchObject({
       state: "blocked",
       error: "current pull request tuple mismatch",
     });
     expect(mock.calls.some((call) => call.url.includes("/check-runs"))).toBe(false);
+  });
+
+  it("rejects canonical merge commits with wrong, reordered, or extra parents", async ({ expect }) => {
+    for (const parents of [
+      [{ sha: "9".repeat(40) }, { sha: preparation.headSha }],
+      [{ sha: preparation.headSha }, { sha: preparation.baseSha }],
+      [{ sha: preparation.baseSha }, { sha: preparation.headSha }, { sha: "9".repeat(40) }],
+    ]) {
+      const mock = sequence([pullResponse(), commitResponse({ parents })]);
+      await expect(resolveCanonicalTestedMerge(authority, {
+        repositoryId: preparation.repositoryId,
+        prNumber: preparation.prNumber,
+        headSha: preparation.headSha,
+        baseSha: preparation.baseSha,
+        actor: preparation.actor,
+      }, mock.fetch)).rejects.toThrow(/canonical tested merge/);
+    }
+  });
+
+  it("rejects a commit response that does not identify the requested canonical SHA", async ({ expect }) => {
+    const mock = sequence([pullResponse(), commitResponse({ sha: "9".repeat(40) })]);
+    await expect(resolveCanonicalTestedMerge(authority, {
+      repositoryId: preparation.repositoryId,
+      prNumber: preparation.prNumber,
+      headSha: preparation.headSha,
+      baseSha: preparation.baseSha,
+      actor: preparation.actor,
+    }, mock.fetch)).rejects.toThrow("canonical tested merge commit is invalid");
+  });
+
+  it("rejects a PR whose base repository is not the configured immutable repository", async ({ expect }) => {
+    const mock = sequence([pullResponse({
+      base: {
+        sha: preparation.baseSha,
+        repo: { id: 999, full_name: "attacker/repository" },
+      },
+    })]);
+    await expect(resolveCanonicalTestedMerge(authority, {
+      repositoryId: preparation.repositoryId,
+      prNumber: preparation.prNumber,
+      headSha: preparation.headSha,
+      baseSha: preparation.baseSha,
+      actor: preparation.actor,
+    }, mock.fetch)).rejects.toThrow("current pull request tuple mismatch");
   });
 
   it("binds an exact ambiguous marker before classifying a moved PR obsolete", async ({ expect }) => {

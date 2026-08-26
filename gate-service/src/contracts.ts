@@ -12,7 +12,6 @@ export const acquireGateSchema = z.strictObject({
   pr_number: positiveInteger,
   head_sha: sha,
   base_sha: sha,
-  tested_merge_sha: sha,
 });
 
 export interface PreparedCheck {
@@ -55,6 +54,7 @@ export interface GateSnapshot {
   runner_pool_id: string;
   owner: string;
   check_run_id: number;
+  tested_merge_sha: string;
   evidence_digest: string | null;
 }
 

@@ -56,7 +56,6 @@ describe("HTTP surface", () => {
           pr_number: 7,
           head_sha: "1".repeat(40),
           base_sha: "2".repeat(40),
-          tested_merge_sha: "3".repeat(40),
         }),
       },
     ));
