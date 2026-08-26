@@ -18,6 +18,7 @@ export interface OidcTrust {
   repositoryId: string;
   workflowRef: string;
   jobWorkflowRef: string;
+  eventName: string;
 }
 
 export class AuthenticationError extends Error {
@@ -67,7 +68,7 @@ export async function verifyGitHubOidc(
     if (protectedHeader.alg !== "RS256") {
       throw new AuthenticationError("unexpected OIDC algorithm");
     }
-    exactStringClaim(payload, "event_name", "workflow_call");
+    exactStringClaim(payload, "event_name", trust.eventName);
     exactStringClaim(payload, "runner_environment", "github-hosted");
     return {
       repository: exactStringClaim(payload, "repository", trust.repository),

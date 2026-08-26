@@ -44,4 +44,23 @@ describe("HTTP surface", () => {
     ));
     expect(crossAuth.status).toBe(401);
   });
+
+  it("does not expose the removed split Check preparation endpoint", async ({ expect }) => {
+    const response = await exports.default.fetch(new Request(
+      "https://gate.example/v1/pools/pool-a/checks/prepare",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          repository_id: "123456789",
+          pr_number: 7,
+          head_sha: "1".repeat(40),
+          base_sha: "2".repeat(40),
+          tested_merge_sha: "3".repeat(40),
+        }),
+      },
+    ));
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toMatchObject({ error: "not_found" });
+  });
 });

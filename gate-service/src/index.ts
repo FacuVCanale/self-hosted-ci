@@ -97,14 +97,16 @@ export async function handleRequest(request: Request, env: Cloudflare.Env): Prom
       if (matched === null) return json({ error: "not_found", request_id: requestId }, 404);
       const body = await boundedBody(request);
       const payload = parseJson(body);
-      const stub = env.RUNNER_POOLS.getByName(matched.poolId);
+      const stub = env.RUNNER_POOLS.getByName(`repository:${env.GITHUB_REPOSITORY_ID}`);
       const actor = await verifyGitHubOidc(bearer(request), {
         audience: env.OIDC_AUDIENCE,
         repository: env.OIDC_REPOSITORY,
         repositoryId: env.OIDC_REPOSITORY_ID,
         workflowRef: env.OIDC_WORKFLOW_REF,
         jobWorkflowRef: env.OIDC_JOB_WORKFLOW_REF,
+        eventName: env.OIDC_EVENT_NAME,
       });
+      if (matched.poolId !== env.RUNNER_POOL_ID) throw new GateConflict("runner pool is not authorized");
       const result = matched.operation === "gates"
         ? await stub.acquire(matched.poolId, payload, actor)
         : matched.operation === "gates/transition"

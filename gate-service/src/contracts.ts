@@ -13,8 +13,12 @@ export const acquireGateSchema = z.strictObject({
   head_sha: sha,
   base_sha: sha,
   tested_merge_sha: sha,
-  check_run_id: positiveInteger,
 });
+
+export interface PreparedCheck {
+  check_run_id: number;
+  check_target_sha: string;
+}
 
 export const transitionGateSchema = z.strictObject({
   logical_key: z.string().min(1).max(256),

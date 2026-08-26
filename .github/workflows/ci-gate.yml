@@ -1,0 +1,170 @@
+name: reusable ci gate coordinator
+
+on:
+  workflow_call:
+    inputs:
+      gate_service_url: { required: true, type: string }
+      oidc_audience: { required: true, type: string }
+      runner_pool_id: { required: true, type: string }
+      repository_id: { required: true, type: string }
+      pr_number: { required: true, type: number }
+      head_sha: { required: true, type: string }
+      base_sha: { required: true, type: string }
+      tested_merge_sha:
+        description: Exact synthetic merge SHA to check out, test, and target with ci-gate
+        required: true
+        type: string
+      trusted_command:
+        description: Fixed trusted-workflow literal; never interpolate PR-controlled data
+        required: true
+        type: string
+
+jobs:
+  acquire:
+    name: acquire hosted ci gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    outputs:
+      logical_key: ${{ steps.acquire.outputs.logical_key }}
+      generation: ${{ steps.acquire.outputs.generation }}
+      version: ${{ steps.acquire.outputs.version }}
+      state: ${{ steps.acquire.outputs.state }}
+    steps:
+      - name: Mint short-lived Gate Service identity
+        id: oidc
+        shell: bash
+        env:
+          OIDC_AUDIENCE: ${{ inputs.oidc_audience }}
+        run: |
+          set -euo pipefail
+          audience="$(jq -rn --arg value "$OIDC_AUDIENCE" '$value|@uri')"
+          response="$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${audience}")"
+          token="$(jq -er 'if keys == ["value"] and (.value|type == "string" and length > 0) then .value else error("invalid OIDC response") end' <<<"$response")"
+          echo "::add-mask::$token"
+          printf 'token=%s\n' "$token" >>"$GITHUB_OUTPUT"
+
+      - name: Prepare Check and acquire hosted gate generation atomically
+        id: acquire
+        shell: bash
+        env:
+          URL: ${{ inputs.gate_service_url }}
+          POOL: ${{ inputs.runner_pool_id }}
+          REPOSITORY_ID: ${{ inputs.repository_id }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          MERGE_SHA: ${{ inputs.tested_merge_sha }}
+          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+        run: |
+          set -euo pipefail
+          payload="$(jq -cn --arg repository_id "$REPOSITORY_ID" --argjson pr_number "$PR_NUMBER" --arg head_sha "$HEAD_SHA" --arg base_sha "$BASE_SHA" --arg tested_merge_sha "$MERGE_SHA" '{repository_id:$repository_id,pr_number:$pr_number,head_sha:$head_sha,base_sha:$base_sha,tested_merge_sha:$tested_merge_sha}')"
+          response="$(curl -fsS -X POST -H "Authorization: Bearer $OIDC_TOKEN" -H 'Content-Type: application/json' --data "$payload" "${URL%/}/v1/pools/${POOL}/gates")"
+          jq -e '(.logical_key|type == "string" and length > 0) and (.generation|type == "number" and . > 0) and (.version|type == "number" and . > 0) and (.state == "hosted_selected" or .state == "hosted_success" or .state == "hosted_failure") and (.check_run_id|type == "number" and . > 0)' <<<"$response" >/dev/null
+          printf 'logical_key=%s\n' "$(jq -r '.logical_key' <<<"$response")" >>"$GITHUB_OUTPUT"
+          printf 'generation=%s\n' "$(jq -r '.generation' <<<"$response")" >>"$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$(jq -r '.version' <<<"$response")" >>"$GITHUB_OUTPUT"
+          printf 'state=%s\n' "$(jq -r '.state' <<<"$response")" >>"$GITHUB_OUTPUT"
+
+  quality:
+    name: hosted quality attempt
+    if: needs.acquire.outputs.state == 'hosted_selected'
+    needs: acquire
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      conclusion: ${{ steps.result.outputs.conclusion }}
+    steps:
+      - name: Check out exact synthetic merge
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.tested_merge_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify exact checked-out revision
+        id: verify
+        shell: bash
+        env:
+          MERGE_SHA: ${{ inputs.tested_merge_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$MERGE_SHA"
+      - name: Execute trusted CI command
+        id: execute
+        continue-on-error: true
+        shell: bash
+        env:
+          CI_GATE_TRUSTED_COMMAND: ${{ inputs.trusted_command }}
+        run: |
+          set -euo pipefail
+          bash --noprofile --norc -euo pipefail -c "$CI_GATE_TRUSTED_COMMAND"
+      - name: Report quality result
+        id: result
+        if: always()
+        shell: bash
+        env:
+          CHECKOUT: ${{ steps.checkout.outcome }}
+          VERIFY: ${{ steps.verify.outcome }}
+          EXECUTE: ${{ steps.execute.outcome }}
+        run: |
+          set -euo pipefail
+          conclusion=failure
+          if [[ "$CHECKOUT" == success && "$VERIFY" == success && "$EXECUTE" == success ]]; then conclusion=success; fi
+          printf 'conclusion=%s\n' "$conclusion" >>"$GITHUB_OUTPUT"
+          test "$conclusion" = success
+
+  finalize:
+    name: finalize hosted ci gate
+    if: always() && needs.acquire.result == 'success'
+    needs: [acquire, quality]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      id-token: write
+    steps:
+      - name: Mint fresh transition identity
+        if: needs.acquire.outputs.state == 'hosted_selected'
+        id: oidc
+        shell: bash
+        env:
+          OIDC_AUDIENCE: ${{ inputs.oidc_audience }}
+        run: |
+          set -euo pipefail
+          audience="$(jq -rn --arg value "$OIDC_AUDIENCE" '$value|@uri')"
+          response="$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${audience}")"
+          token="$(jq -er 'if keys == ["value"] and (.value|type == "string" and length > 0) then .value else error("invalid OIDC response") end' <<<"$response")"
+          echo "::add-mask::$token"
+          printf 'token=%s\n' "$token" >>"$GITHUB_OUTPUT"
+      - name: Commit terminal gate evidence
+        if: needs.acquire.outputs.state == 'hosted_selected'
+        shell: bash
+        env:
+          URL: ${{ inputs.gate_service_url }}
+          POOL: ${{ inputs.runner_pool_id }}
+          LOGICAL_KEY: ${{ needs.acquire.outputs.logical_key }}
+          GENERATION: ${{ needs.acquire.outputs.generation }}
+          VERSION: ${{ needs.acquire.outputs.version }}
+          MERGE_SHA: ${{ inputs.tested_merge_sha }}
+          TRUSTED_COMMAND: ${{ inputs.trusted_command }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          QUALITY_CONCLUSION: ${{ needs.quality.outputs.conclusion }}
+          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+        run: |
+          set -euo pipefail
+          conclusion=failure; to_state=hosted_failure
+          if [[ "$QUALITY_RESULT" == success && "$QUALITY_CONCLUSION" == success ]]; then conclusion=success; to_state=hosted_success; fi
+          command_digest="$(printf '%s' "$TRUSTED_COMMAND" | sha256sum | cut -d' ' -f1)"
+          evidence_digest="$(printf '%s\n' ci-gate-hosted-evidence-v1 "$LOGICAL_KEY" "$GENERATION" "$MERGE_SHA" "$command_digest" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$conclusion" | sha256sum | cut -d' ' -f1)"
+          payload="$(jq -cn --arg logical_key "$LOGICAL_KEY" --argjson generation "$GENERATION" --argjson expected_version "$VERSION" --arg to_state "$to_state" --arg evidence_digest "$evidence_digest" '{logical_key:$logical_key,generation:$generation,expected_version:$expected_version,from_state:"hosted_selected",to_state:$to_state,evidence_digest:$evidence_digest}')"
+          curl -fsS -X POST -H "Authorization: Bearer $OIDC_TOKEN" -H 'Content-Type: application/json' --data "$payload" "${URL%/}/v1/pools/${POOL}/gates/transition" >/dev/null
+          test "$conclusion" = success
+      - name: Reconcile previously terminal gate
+        if: needs.acquire.outputs.state != 'hosted_selected'
+        shell: bash
+        env:
+          TERMINAL_STATE: ${{ needs.acquire.outputs.state }}
+        run: test "$TERMINAL_STATE" = hosted_success
