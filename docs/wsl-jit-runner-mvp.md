@@ -17,6 +17,48 @@ The personal Windows account/distro, Windows drives, WSL interop, Docker
 Desktop, Incus API, host sockets, SSH agents, deploy keys, reviewer keys, and
 control-plane credentials are outside the workload boundary.
 
+## Preservative Windows-account migration
+
+The checked-in migration helper imports the pinned export as
+`Ubuntu-24.04-CI` under the dedicated local account `selfhosted-ci-svc`. It is
+plan-only by default and must be started by the operator from an elevated,
+interactive local PowerShell console. It never unregisters the personal
+`Ubuntu-24.04` source distro and never deletes or rewrites its export.
+
+First run the read-only plan. It hashes the complete export, reports its exact
+byte length and the service account SID, checks that the account is local,
+enabled and non-admin, confirms the source distro is still registered, and
+checks conservative free-space headroom:
+
+```powershell
+Set-Location C:\path\to\self-hosted-ci
+.\scripts\host\migrate-ci-wsl.ps1
+```
+
+Review the JSON, then bind Apply to the reported size and SID:
+
+```powershell
+.\scripts\host\migrate-ci-wsl.ps1 `
+  -Apply `
+  -ExpectedExportBytes <exact-export-bytes-from-plan> `
+  -ExpectedServiceAccountSid '<exact-service-account-sid-from-plan>' `
+  -AcknowledgeSourceAndExportWillBePreserved `
+  -AcknowledgeImportRunsAsServiceIdentity
+```
+
+Apply protects the export, destination and task artifacts with explicit ACLs,
+then runs a one-time passwordless S4U scheduled task as the non-admin account.
+That worker either imports the distro once or verifies an existing import. It
+checks the worker SID and the service identity's own HKCU WSL registration,
+including the exact distribution name, `BasePath`, and WSL version 2. The
+operator process rechecks the source distro and the export's hash and size,
+then removes the one-time task while preserving its logs under
+`C:\ProgramData\self-hosted-ci\migration`.
+
+Any identity, path, ACL, hash, size, disk, task, registry, or preservation
+mismatch stops the migration. Re-running Apply is idempotent only when the
+existing service-account registration points to the exact pinned destination.
+
 ## Allocation protocol
 
 `github_automation.runner_jit` provides:
