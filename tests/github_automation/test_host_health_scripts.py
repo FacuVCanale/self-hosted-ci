@@ -139,13 +139,29 @@ class HostHealthScriptTests(unittest.TestCase):
             "TASK_RUNLEVEL_LUA", "SecureStringToBSTR", "ZeroFreeBSTR", "payload_sha256",
             'persistent supervisor must not exist; bootstrap must run first', "two-heartbeat postcondition failed",
             "Unregister-ScheduledTask", "stored_task_credential_invalidated=$true",
-            '[ValidateSet("none", "worker-before-wsl", "payload-after-install", "payload-evidence-failure")]',
+            '[ValidateSet("none", "host-after-reader", "worker-before-wsl", "payload-after-install", "payload-evidence-failure")]',
         ):
             self.assertIn(token, source)
         self.assertLess(source.index("if (-not $Apply) { return }"), source.index("New-LocalUser -Name $ReaderAccount"))
         self.assertLess(source.index("Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false; $registered = $false"), source.index("$finalPassword = New-RandomPassword"))
         for token in ("Test-GroupContainsSid", "cannot resolve nested administrator group", "preexisting health reader must be disabled and have exact managed provenance", "reader profile path is not canonical", "Assert-NoReparsePath", "Assert-NoReparseDescendants", "reparse descendant is forbidden", "one-shot task reappeared before completion evidence"):
             self.assertIn(token, source)
+        for token in (
+            'FailureInjection -eq "host-after-reader"', "Remove-ExactManagedReaderProfile",
+            "Assert-ExactManagedReaderProfile", "unexpected reader profile artifact blocks rollback",
+            "New-AdminOnlyAcl", "worker.stdout.log", "worker.stderr.log", "worker-error.json",
+            "Save-FailureEvidence", "last_task_result", "task-summary.json", "Evidence: $evidence",
+            "RedirectStandardInput", "RedirectStandardOutput", "RedirectStandardError",
+            "recover-orphan-create-disabled", "orphan health reader authorized key is not exact",
+        ):
+            self.assertIn(token, source)
+        orphan_delete = source.index('if ($orphanReaderProfile) { Remove-ExactManagedReaderProfile')
+        self.assertLess(orphan_delete, source.index("New-LocalUser -Name $ReaderAccount"))
+        self.assertLess(source.index('FailureInjection -eq "host-after-reader"'), source.index('New-Item -ItemType Directory -Path $Root'))
+        evidence_save = source.index("Save-FailureEvidence $original")
+        self.assertLess(evidence_save, source.index("Remove-Item -LiteralPath $Root -Recurse -Force", evidence_save))
+        profile_cleanup = source.index("function Remove-ExactManagedReaderProfile")
+        self.assertLess(source.index("Set-Acl -LiteralPath $entry[0]", profile_cleanup), source.index("Remove-Item -LiteralPath $Profile -Recurse -Force", profile_cleanup))
         for token in ('health bootstrap staging root is not canonical', 'Assert-NoReparsePath "C:\\ProgramData"', 'Assert-NoReparsePath (Split-Path -Parent $Root) $true'):
             self.assertIn(token, source)
         self.assertLess(source.index('Assert-NoReparsePath $Root $true'), source.index('New-Item -ItemType Directory -Path $Root'))
