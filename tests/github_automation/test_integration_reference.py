@@ -234,6 +234,9 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
             "check_outbox_idempotency_key": None,
             "claim_deadline": utc(NOW + timedelta(minutes=10)),
             "execution_deadline": utc(NOW + timedelta(minutes=40)),
+            "allocation_id": "12345678-1234-4123-8123-123456789abc",
+            "allocation_nonce": "A" * 43,
+            "runner_label": "wsl-jit-" + "1" * 32,
         }
         return ProtocolPackage.from_mapping(values)
 

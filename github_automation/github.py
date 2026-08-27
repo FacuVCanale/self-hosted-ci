@@ -36,6 +36,8 @@ FORBIDDEN_APP_PERMISSIONS = frozenset(
 _REPOSITORY = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+_NONCE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _ACCOUNT = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 
 
@@ -203,6 +205,62 @@ class DispatchRequest:
             raise ProtocolFailure("GitHub API version is not pinned")
 
 
+@dataclass(frozen=True)
+class ObservedWorkflowJob:
+    run_id: int
+    run_attempt: int
+    job_id: int
+    job_name: str
+    dispatch_sha: str
+
+
+class WorkflowJobPending(ProtocolFailure):
+    """The exact dispatched job has not appeared in GitHub's run view yet."""
+
+
+def parse_observed_workflow_job(
+    run_id: int,
+    runner_label: str,
+    run: Mapping[str, Any],
+    jobs: Mapping[str, Any],
+    *,
+    expected_job_name: str = "local-quality",
+) -> ObservedWorkflowJob:
+    _positive_int(run_id, "workflow_run_id", ProtocolFailure)
+    if not isinstance(runner_label, str) or not re.fullmatch(r"wsl-jit-[0-9a-f]{32}", runner_label):
+        raise ProtocolFailure("runner label is not an allocation-unique label")
+    if not isinstance(expected_job_name, str) or not expected_job_name:
+        raise ProtocolFailure("expected workflow job name is absent")
+    if set(jobs) != {"total_count", "jobs"} or not isinstance(jobs["total_count"], int) or not isinstance(jobs["jobs"], list):
+        raise ProtocolFailure("workflow jobs response schema is invalid")
+    if jobs["total_count"] != len(jobs["jobs"]):
+        raise ProtocolFailure("workflow jobs response is incomplete")
+    if not isinstance(run, Mapping) or run.get("id") != run_id:
+        raise ProtocolFailure("observed workflow job crossed the dispatch run")
+    dispatch_sha = run.get("head_sha")
+    if not isinstance(dispatch_sha, str) or not _SHA.fullmatch(dispatch_sha):
+        raise ProtocolFailure("dispatch run head SHA is invalid")
+    matches = [
+        job for job in jobs["jobs"]
+        if isinstance(job, Mapping)
+        and job.get("run_id") == run_id
+        and job.get("name") == expected_job_name
+        and isinstance(job.get("labels"), list)
+        and runner_label in job["labels"]
+    ]
+    if not matches:
+        raise WorkflowJobPending("exact local workflow job is not visible yet")
+    if len(matches) != 1:
+        raise ProtocolFailure("dispatch exposed multiple jobs with the exact local identity")
+    job = matches[0]
+    attempt = run.get("run_attempt")
+    job_id, job_name = job.get("id"), job.get("name")
+    _positive_int(attempt, "run_attempt", ProtocolFailure); _positive_int(job_id, "workflow_job_id", ProtocolFailure)
+    if job_name != expected_job_name:
+        raise ProtocolFailure("workflow job name crossed the trusted job identity")
+    return ObservedWorkflowJob(run_id, attempt, job_id, job_name, dispatch_sha)
+
+
 def parse_dispatch_response(request: DispatchRequest, status: int, body: Mapping[str, Any]) -> int:
     """Consume the exact returned run ID.  Run-list correlation is not an API."""
     if status != 200:
@@ -238,6 +296,7 @@ _PROTOCOL_FIELDS = frozenset(
         "local_child_job_id", "started_test_marker_digest", "canonical_command_digest", "terminal_at",
         "ci_gate_check_run_id", "check_outbox_idempotency_key", "claim_deadline",
         "execution_deadline",
+        "allocation_id", "allocation_nonce", "runner_label",
     }
 )
 _ATTESTATION_FIELDS = frozenset(
@@ -294,6 +353,12 @@ class ProtocolPackage:
             _parse_time(data[field], field)
         backend = data["backend"]
         if backend == "local":
+            if not isinstance(data["allocation_id"], str) or not _UUID.fullmatch(data["allocation_id"]):
+                raise ProtocolFailure("local backend requires a reserved allocation identity")
+            if not isinstance(data["allocation_nonce"], str) or not _NONCE.fullmatch(data["allocation_nonce"]):
+                raise ProtocolFailure("local backend requires the reserved allocation nonce")
+            if not isinstance(data["runner_label"], str) or not re.fullmatch(r"wsl-jit-[0-9a-f]{32}", data["runner_label"]):
+                raise ProtocolFailure("local backend requires the unique reserved runner label")
             if data["execution_trust_mode"] != "exact-sha-attestation":
                 raise ProtocolFailure("local backend requires exact-sha-attestation")
             if any(data[field] is None for field in _ATTESTATION_FIELDS):
@@ -306,6 +371,8 @@ class ProtocolPackage:
             if data["inventory_guard_status"] == "unavailable":
                 raise ProtocolFailure("local backend rejects unavailable inventory")
         elif backend == "github":
+            if any(data[field] is not None for field in ("allocation_id", "allocation_nonce", "runner_label")):
+                raise ProtocolFailure("hosted dispatch cannot carry local allocation authority")
             if data["execution_trust_mode"] != "github-hosted":
                 raise ProtocolFailure("github backend requires github-hosted trust mode")
             if any(data[field] is not None for field in _ATTESTATION_FIELDS):

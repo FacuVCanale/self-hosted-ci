@@ -11,6 +11,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 import re
 import sqlite3
 import threading
@@ -31,11 +32,64 @@ _SHA1 = re.compile(r"^[0-9a-f]{40}$")
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _WORKFLOW_REF = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/[A-Za-z0-9_.-]+@refs/heads/[A-Za-z0-9._/-]+$")
 _LABEL = re.compile(r"^[A-Za-z0-9_.-]{1,63}$")
+_RUNNER_GROUP = re.compile(r"^[^*\r\n]{1,100}$")
 _NONCE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_JOB_NAME = re.compile(r"^[A-Za-z0-9_. -]{1,100}$")
+_TRANSIENT_LABEL = re.compile(r"^wsl-jit-[0-9a-f]{32}$")
 
 
 class RunnerJitError(ValueError):
     """A signed allocation or lifecycle transition violates the contract."""
+
+
+def allocation_scale_set_name(payload: Mapping[str, Any]) -> str:
+    """Return the sole GitHub label for this allocation.
+
+    The label is content-derived from the two single-use allocation identifiers,
+    so a caller cannot select a shared/persistent pool by choosing a friendly
+    label.  The full signed payload still binds the repository, workflow, run,
+    job, image, and expiry.
+    """
+
+    allocation_id = _validate_uuid(payload.get("allocation_id"), "allocation_id")
+    nonce = payload.get("nonce")
+    if not isinstance(nonce, str) or not _NONCE.fullmatch(nonce):
+        raise RunnerJitError("nonce must be 32 bytes encoded as unpadded base64url")
+    digest = hashlib.sha256(
+        canonicalize_jcs({"allocation_id": allocation_id, "nonce": nonce})
+    ).hexdigest()
+    return f"wsl-jit-{digest[:32]}"
+
+
+RESERVATION_FIELDS = frozenset({
+    "allocation_reservation_version", "allocation_id", "repository_id", "repository",
+    "head_sha", "workflow_ref", "job_name", "authority_kind", "runner_group",
+    "scale_set_name", "labels", "image_fingerprint", "nonce", "issued_at", "expires_at",
+    "max_jobs", "ephemeral",
+})
+
+
+def validate_allocation_reservation(reservation: Mapping[str, Any], *, now: datetime) -> None:
+    if not isinstance(reservation, Mapping) or set(reservation) != RESERVATION_FIELDS:
+        raise RunnerJitError("allocation reservation requires exact v1 fields")
+    synthetic = dict(reservation)
+    synthetic.pop("allocation_reservation_version")
+    synthetic.update({
+        "runner_allocation_version": 1, "run_id": "1", "run_attempt": 1, "job_id": "1",
+        "dispatch_sha": synthetic["head_sha"], "tested_sha": synthetic["head_sha"],
+    })
+    validate_allocation_payload(synthetic, now=now)
+    if reservation["allocation_reservation_version"] != 1:
+        raise RunnerJitError("allocation_reservation_version must be 1")
+
+
+def reservation_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
+    projected = {
+        key: value for key, value in payload.items()
+        if key not in {"runner_allocation_version", "run_id", "run_attempt", "job_id", "dispatch_sha", "tested_sha"}
+    }
+    projected["allocation_reservation_version"] = 1
+    return projected
 
 
 def _parse_time(value: Any, field: str) -> datetime:
@@ -65,7 +119,8 @@ def _validate_uuid(value: Any, field: str) -> str:
 def validate_allocation_payload(payload: Mapping[str, Any], *, now: datetime) -> None:
     required = {
         "runner_allocation_version", "allocation_id", "repository_id", "repository",
-        "head_sha", "workflow_ref", "runner_group", "labels", "image_fingerprint",
+        "head_sha", "tested_sha", "dispatch_sha", "workflow_ref", "run_id", "run_attempt", "job_id", "job_name",
+        "authority_kind", "runner_group", "scale_set_name", "labels", "image_fingerprint",
         "nonce", "issued_at", "expires_at", "max_jobs", "ephemeral",
     }
     if not isinstance(payload, Mapping) or set(payload) != required:
@@ -79,18 +134,45 @@ def validate_allocation_payload(payload: Mapping[str, Any], *, now: datetime) ->
         raise RunnerJitError("repository is invalid")
     if not isinstance(payload["head_sha"], str) or not _SHA1.fullmatch(payload["head_sha"]):
         raise RunnerJitError("head_sha must be lowercase full SHA-1")
+    for field in ("tested_sha", "dispatch_sha"):
+        if not isinstance(payload[field], str) or not _SHA1.fullmatch(payload[field]):
+            raise RunnerJitError(f"{field} must be lowercase full SHA-1")
     if not isinstance(payload["workflow_ref"], str) or not _WORKFLOW_REF.fullmatch(payload["workflow_ref"]):
         raise RunnerJitError("workflow_ref must identify a default-branch workflow")
-    if payload["runner_group"] != "self-hosted-ci-jit":
-        raise RunnerJitError("runner_group is not the dedicated JIT group")
-    labels = payload["labels"]
-    required_labels = {"self-hosted", "linux", "x64", "wsl-jit"}
+    for field in ("run_id", "job_id"):
+        if not isinstance(payload[field], str) or not re.fullmatch(r"[1-9][0-9]*", payload[field]):
+            raise RunnerJitError(f"{field} must be a canonical positive integer string")
+    if not isinstance(payload["run_attempt"], int) or isinstance(payload["run_attempt"], bool) or payload["run_attempt"] < 1:
+        raise RunnerJitError("run_attempt must be a positive integer")
     if (
-        not isinstance(labels, list) or not labels or labels != sorted(set(labels))
-        or not all(isinstance(label, str) and _LABEL.fullmatch(label) for label in labels)
-        or not required_labels.issubset(labels)
+        not isinstance(payload["job_name"], str)
+        or payload["job_name"] != payload["job_name"].strip()
+        or not _JOB_NAME.fullmatch(payload["job_name"])
     ):
-        raise RunnerJitError("labels must be sorted, unique, valid, and include the JIT boundary labels")
+        raise RunnerJitError("job_name is invalid")
+    authority_kind = payload["authority_kind"]
+    runner_group = payload["runner_group"]
+    if authority_kind == "personal-repository":
+        if runner_group is not None:
+            raise RunnerJitError("personal repository allocations cannot use a runner group")
+    elif authority_kind == "organization-runner-group":
+        if (
+            not isinstance(runner_group, str)
+            or runner_group != runner_group.strip()
+            or not _RUNNER_GROUP.fullmatch(runner_group)
+        ):
+            raise RunnerJitError("organization allocations require an exact selected runner group")
+    else:
+        raise RunnerJitError("authority_kind is invalid")
+    labels = payload["labels"]
+    expected_scale_set_name = allocation_scale_set_name(payload)
+    if (
+        payload["scale_set_name"] != expected_scale_set_name
+        or not _TRANSIENT_LABEL.fullmatch(payload["scale_set_name"])
+        or labels != [expected_scale_set_name]
+        or not all(isinstance(label, str) and _LABEL.fullmatch(label) for label in labels)
+    ):
+        raise RunnerJitError("labels must select exactly the allocation-derived transient scale set")
     if not isinstance(payload["image_fingerprint"], str) or not _SHA256.fullmatch(payload["image_fingerprint"]):
         raise RunnerJitError("image_fingerprint must be lowercase SHA-256")
     if not isinstance(payload["nonce"], str) or not _NONCE.fullmatch(payload["nonce"]):
@@ -187,6 +269,10 @@ class SqliteAllocationLedger:
                 ("cleanup_pending", "INTEGER NOT NULL DEFAULT 0"),
                 ("cleanup_idempotency_key", "TEXT"),
                 ("cleanup_evidence_digest", "TEXT"),
+                ("payload_json", "TEXT"),
+                ("scale_set_name", "TEXT"),
+                ("garm_scale_set_id", "TEXT"),
+                ("reservation_json", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE runner_allocations ADD COLUMN {name} {declaration}")
@@ -240,14 +326,158 @@ class SqliteAllocationLedger:
             connection.execute(
                 """INSERT INTO runner_allocations(
                 allocation_id,binding_digest,payload_digest,state,issued_at,expires_at
-                ) VALUES(?,?,?,?,?,?)""",
+                ,payload_json,scale_set_name
+                ) VALUES(?,?,?,?,?,?,?,?)""",
                 (
                     payload["allocation_id"], binding_digest, payload_digest, "issued",
                     payload["issued_at"], payload["expires_at"],
+                    canonicalize_jcs(payload).decode("utf-8"), payload["scale_set_name"],
                 ),
             )
             connection.commit()
             return "issued"
+
+    def reserve(self, reservation: Mapping[str, Any], *, now: datetime) -> str:
+        validate_allocation_reservation(reservation, now=now)
+        binding_digest, reservation_digest = self._digests(reservation)
+        body = canonicalize_jcs(reservation).decode("utf-8")
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT binding_digest,reservation_json FROM runner_allocations WHERE allocation_id=?",
+                (reservation["allocation_id"],),
+            ).fetchone()
+            if row:
+                connection.rollback()
+                if row == (binding_digest, body):
+                    return "idempotent"
+                raise RunnerJitError("allocation reservation replayed with different content")
+            if connection.execute(
+                "SELECT 1 FROM runner_allocations WHERE binding_digest=?", (binding_digest,)
+            ).fetchone():
+                connection.rollback()
+                raise RunnerJitError("allocation reservation nonce replay detected")
+            connection.execute(
+                """INSERT INTO runner_allocations(
+                allocation_id,binding_digest,payload_digest,state,issued_at,expires_at,
+                scale_set_name,reservation_json
+                ) VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    reservation["allocation_id"], binding_digest, reservation_digest, "reserved",
+                    reservation["issued_at"], reservation["expires_at"],
+                    reservation["scale_set_name"], body,
+                ),
+            )
+            connection.commit()
+            return "reserved"
+
+    def finalize(
+        self,
+        envelope: Mapping[str, Any],
+        public_key: ed25519.Ed25519PublicKey,
+        *,
+        pinned_fingerprint: str,
+        now: datetime,
+    ) -> str:
+        payload = verify_allocation(
+            envelope, public_key, pinned_fingerprint=pinned_fingerprint, now=now
+        )
+        body = canonicalize_jcs(payload).decode("utf-8")
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state,reservation_json,payload_json FROM runner_allocations WHERE allocation_id=?",
+                (payload["allocation_id"],),
+            ).fetchone()
+            if not row:
+                connection.rollback()
+                raise RunnerJitError("signed allocation has no prior reservation")
+            if row[2] is not None:
+                connection.rollback()
+                if row[2] == body:
+                    return "idempotent"
+                raise RunnerJitError("allocation was finalized with different content")
+            reservation = json.loads(row[1]) if row[1] else None
+            if row[0] != "reserved" or reservation_projection(payload) != reservation:
+                connection.rollback()
+                raise RunnerJitError("signed allocation crossed its immutable reservation")
+            connection.execute(
+                "UPDATE runner_allocations SET payload_digest=?,payload_json=?,state='issued' WHERE allocation_id=?",
+                (digest, body, payload["allocation_id"]),
+            )
+            connection.commit()
+            return "issued"
+
+    def payload(self, allocation_id: str) -> Mapping[str, Any]:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM runner_allocations WHERE allocation_id=?",
+                (allocation_id,),
+            ).fetchone()
+        if not row or not row[0]:
+            raise RunnerJitError("allocation payload is absent")
+        value = json.loads(row[0])
+        if not isinstance(value, Mapping):
+            raise RunnerJitError("allocation payload is invalid")
+        return value
+
+    def reservation(self, allocation_id: str) -> Mapping[str, Any]:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT reservation_json FROM runner_allocations WHERE allocation_id=?",
+                (allocation_id,),
+            ).fetchone()
+        if not row or not row[0]:
+            raise RunnerJitError("allocation reservation is absent")
+        value = json.loads(row[0])
+        if not isinstance(value, Mapping):
+            raise RunnerJitError("allocation reservation is invalid")
+        return value
+
+    def bind_scale_set(self, allocation_id: str, scale_set_id: str, scale_set_name: str) -> str:
+        if not isinstance(scale_set_id, str) or not re.fullmatch(r"[1-9][0-9]*", scale_set_id):
+            raise RunnerJitError("GARM scale-set ID must be a canonical positive integer string")
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT scale_set_name,garm_scale_set_id FROM runner_allocations WHERE allocation_id=?",
+                (allocation_id,),
+            ).fetchone()
+            if not row:
+                connection.rollback()
+                raise RunnerJitError("unknown allocation")
+            if row[0] != scale_set_name:
+                connection.rollback()
+                raise RunnerJitError("scale-set name crossed allocation binding")
+            if row[1] is not None:
+                connection.rollback()
+                if row[1] == scale_set_id:
+                    return "idempotent"
+                raise RunnerJitError("allocation is already bound to a different scale set")
+            connection.execute(
+                "UPDATE runner_allocations SET garm_scale_set_id=? WHERE allocation_id=?",
+                (scale_set_id, allocation_id),
+            )
+            connection.commit()
+            return "bound"
+
+    def scale_set_binding(self, allocation_id: str) -> tuple[str, str]:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT scale_set_name,garm_scale_set_id FROM runner_allocations WHERE allocation_id=?",
+                (allocation_id,),
+            ).fetchone()
+        if not row or not row[0] or not row[1]:
+            raise RunnerJitError("allocation has no durable scale-set binding")
+        return row[0], row[1]
+
+    def recoverable_allocation_ids(self) -> list[str]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT allocation_id FROM runner_allocations WHERE cleanup_complete=0 ORDER BY allocation_id"
+            ).fetchall()
+        return [row[0] for row in rows]
 
     def transition(
         self,
@@ -309,7 +539,7 @@ class SqliteAllocationLedger:
                     bool(recovery_required), bool(cleanup_pending), stored_cleanup_key,
                     stored_evidence_digest,
                 )
-            elif action == "recover" and state in {"issued", "claimed", "running"} and jobs in {0, 1}:
+            elif action == "recover" and state in {"reserved", "issued", "claimed", "running"} and jobs in {0, 1}:
                 state, stored_outcome = "recovery_required", "reboot"
                 recovery_required, cleanup_pending = 1, 1
                 stored_cleanup_key = hashlib.sha256(canonicalize_jcs({

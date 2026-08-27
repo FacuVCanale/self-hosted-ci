@@ -1,17 +1,51 @@
-# INERT TEMPLATE. Do not rename to config.toml until runner-boundary-v2 verifies.
-[database]
-backend = "sqlite3"
-passphrase = "REPLACE_FROM_ROOT_ONLY_SECRET_STORE"
-db_file = "/var/lib/self-hosted-ci/garm/garm.db"
+# INERT GARM 0.2.1 TEMPLATE. configure-garm-jit.sh renders both placeholders
+# from root-only secret files before activation and validates the separately
+# installed Incus provider configuration.
+[default]
+enable_webhook_management = false
 
-[controller]
-webserver = "127.0.0.1"
+[logging]
+enable_log_streamer = false
+log_format = "json"
+log_level = "info"
+log_source = false
+
+[metrics]
+enable = false
+disable_auth = false
+
+[apiserver]
+bind = "127.0.0.1"
 port = 9997
-minimum_job_age_backoff = 30
+use_tls = false
+cors_origins = []
+
+[apiserver.webui]
+enable = false
 
 [jwt_auth]
-secret = "REPLACE_FROM_ROOT_ONLY_SECRET_STORE"
-time_to_live = "5m"
+secret = "REPLACE_ME_WITH_32_CHARS________"
+time_to_live = "24h"
 
-# Provider/pool declarations are rendered only after a pinned GARM/Incus
-# compatibility test. Never put GitHub App keys or runner tokens in this repo.
+[database]
+backend = "sqlite3"
+passphrase = "REPLACE_ME_WITH_32_CHARS________"
+
+[database.sqlite3]
+db_file = "/var/lib/self-hosted-ci/garm/garm.db"
+busy_timeout_seconds = 5
+
+[[provider]]
+name = "incus_ci_jit"
+provider_type = "external"
+description = "Pinned local Incus provider"
+disable_jit_config = false
+
+[provider.external]
+provider_executable = "/usr/local/libexec/garm/garm-provider-incus"
+config_file = "/etc/self-hosted-ci/garm/garm-provider-incus.toml"
+environment_variables = []
+exec_timeout_seconds = 120
+
+# GitHub credentials, provider TLS keys, endpoints, scalesets and runner tokens
+# are rendered only after their independent activation gates pass.

@@ -32,10 +32,19 @@ def main() -> int:
                 errors.append(f"{path.relative_to(ROOT)} references missing {action}")
             if sha != PLACEHOLDER_SHA:
                 errors.append(f"{path.relative_to(ROOT)} source template must retain the render placeholder")
-    if {action for action, _ in references} != {"actions/ci-control"}:
-        errors.append("CI workflow templates do not reference the public control Action exactly")
-    if len(references) != 6:
-        errors.append(f"expected 6 pinned control Action call sites, found {len(references)}")
+    expected_action_counts = {
+        "actions/ci-control": 6,
+        "actions/jit-pilot-validate": 1,
+    }
+    observed_action_counts = {
+        action: sum(1 for observed, _ in references if observed == action)
+        for action in {action for action, _ in references}
+    }
+    if observed_action_counts != expected_action_counts:
+        errors.append(
+            "CI workflow templates do not reference the exact public Action set: "
+            f"expected {expected_action_counts}, found {observed_action_counts}"
+        )
     for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
         if PLACEHOLDER_SHA in path.read_text(encoding="utf-8"):
             errors.append(f"active workflow contains an unresolved SHA: {path.relative_to(ROOT)}")

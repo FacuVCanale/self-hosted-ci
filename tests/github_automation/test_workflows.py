@@ -87,10 +87,13 @@ class ChildWorkflowTests(unittest.TestCase):
         self.assertIn("needs.validate-package.outputs.backend == 'github'", self.text)
         self.assertIn("needs.validate-package.outputs.backend == 'local'", self.text)
         self.assertIn("vars.CI_GATE_LOCAL_AUTHORITY_ENABLED == 'true'", self.text)
-        self.assertIn("runs-on: [linux, self-hosted, wsl-jit, x64]", self.text)
+        self.assertIn("runs-on: ${{ needs.validate-package.outputs.runner_label }}", self.text)
+        self.assertIn("name: local-quality", self.text)
+        self.assertIn("CI_GATE_TRUSTED_TESTED_SHA: ${{ needs.validate-package.outputs.tested_sha }}", self.text)
+        self.assertNotRegex(self.text, r"runs-on:\s*(?:wsl-jit|\[[^\]]*wsl-jit)")
 
     def test_s53_marker_precedes_project_dependent_command(self) -> None:
-        marker = self.text.index("/opt/github-automation/bin/ci-gate-start --admit-and-mark")
+        marker = self.text.index("ACTIONS_RUNNER_HOOK_JOB_STARTED")
         command = self.text.rindex("run: make test")
         self.assertLess(marker, command)
 
@@ -117,6 +120,7 @@ class ReconcilerAndConsumerBoundaryTests(unittest.TestCase):
             "ci-gate-child.yml",
             "ci-gate-coordinator.yml",
             "ci-gate-reconciler.yml",
+            "ci-jit-pilot-child.yml",
         }, names)
         combined = "\n".join(read(name) for name in sorted(names))
         self.assertNotIn("deploy-production", combined)

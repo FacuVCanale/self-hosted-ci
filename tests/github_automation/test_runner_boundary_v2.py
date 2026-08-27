@@ -45,7 +45,7 @@ def host_evidence() -> dict:
     return {
         "host_security_schema_version": 1,
         "platform": "wsl2",
-        "distro_name": "self-hosted-ci",
+        "distro_name": "Ubuntu-24.04-CI",
         "personal_distro_names": ["Ubuntu-24.04"],
         "wsl_conf": "[automount]\nenabled=false\nmountFsTab=false\n[interop]\nenabled=false\nappendWindowsPath=false\n",
         "checks": [
@@ -275,6 +275,9 @@ class RunnerBoundaryV2Tests(unittest.TestCase):
         self.assertIn('"${TARGET_ROOT}/boundary-reviewer-key.sha256"', source)
         self.assertIn('self-hosted-ci-network-policy.service', source)
         self.assertIn('self-hosted-ci-egress-proxy.service', source)
+        self.assertIn('install-runner-network-runtime.sh', source)
+        self.assertIn('activate-garm-jit.sh', source)
+        self.assertIn('deactivate-garm-jit.sh', source)
         self.assertIn('rm -f "${TARGET_ROOT}/ACTIVATION_APPROVED"', source)
         self.assertIn("systemctl enable --now self-hosted-ci-health-heartbeat.timer", source)
         self.assertNotIn('systemctl enable --now "${SERVICE_NAME}"', source)
@@ -300,7 +303,8 @@ class RunnerBoundaryV2Tests(unittest.TestCase):
             "self-hosted-ci-egress-proxy.service",
         ):
             unit_source = (ROOT / "packaging/systemd" / unit).read_text()
-            self.assertIn("ExecStart=/usr/bin/false", unit_source)
+            self.assertNotIn("ExecStart=/usr/bin/false", unit_source)
+            self.assertIn("ExecStart=/usr/local/lib/self-hosted-ci/", unit_source)
             self.assertIn("ConditionPathExists=/etc/self-hosted-ci/ACTIVATION_APPROVED", unit_source)
         self.assertIn("ConditionPathExists=/etc/self-hosted-ci/ACTIVATION_APPROVED", service)
         self.assertNotIn("Environment=GITHUB_TOKEN", service)

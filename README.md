@@ -25,15 +25,24 @@ execute untrusted repository code in an isolated ephemeral runner. The reviewer
 consumes bounded pull-request data and must not share the CI App identity,
 runner, or credentials.
 
-The public Actions currently expose the validated protocol surface, but the
-production GitHub/GateStore adapter is not implemented in this release. Control
-commands therefore fail closed instead of pretending to coordinate a live
-deployment.
+The repository includes an operational, explicitly approved, outbound-only JIT
+pilot for one selected repository. That pilot is observational and non-gating:
+it uses GitHub's native job conclusion, creates one ephemeral runner allocation,
+and requires exact cleanup evidence. It does not publish or satisfy the required
+`ci-gate` check.
+
+The full required-check GitHub/GateStore transaction adapter is not implemented
+in this release. Its control commands therefore remain inert and fail closed
+instead of pretending to coordinate a live deployment.
 
 Production activation remains fail-closed until an operator implements and
 reviews that adapter and provisions their
 own GitHub App, exact repository allowlist, runner group/JIT authority, signing
 keys, and isolated host.
+
+See [`docs/jit-pilot.md`](docs/jit-pilot.md) and
+[`docs/runbook-local-approval.md`](docs/runbook-local-approval.md) for the
+non-gating pilot boundary and its operator workflow.
 
 The control plane is deliberately limited to GitHub and the dedicated local
 host. Cloudflare runtime code, deployment configuration, credentials, bindings,

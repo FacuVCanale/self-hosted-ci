@@ -1,0 +1,18 @@
+# Managed by install-incus-garm-tls.sh. This endpoint is loopback-only and the
+# client certificate is restricted by Incus to the ci-jit project.
+project_name = "ci-jit"
+include_default_profile = false
+url = "https://127.0.0.1:8443"
+client_certificate = "/etc/self-hosted-ci/garm/incus-client.crt"
+client_key = "/etc/self-hosted-ci/garm/incus-client.key"
+tls_server_certificate = "/etc/self-hosted-ci/garm/incus-server.crt"
+secure_boot = false
+instance_type = "container"
+
+# v0.1.5 refuses to initialize with an empty remote map. Managed scale sets
+# still use a locally pinned no-colon alias verified by exact fingerprint.
+[image_remotes.images]
+addr = "https://images.linuxcontainers.org"
+public = true
+protocol = "simplestreams"
+skip_verify = false

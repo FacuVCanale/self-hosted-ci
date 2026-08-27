@@ -11,8 +11,10 @@ from github_automation.crypto import spki_fingerprint
 from github_automation.runner_jit import (
     RunnerJitError,
     SqliteAllocationLedger,
+    allocation_scale_set_name,
     sign_allocation,
     validate_allocation_payload,
+    validate_allocation_reservation,
     verify_allocation,
 )
 
@@ -21,15 +23,23 @@ NOW = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
 
 
 def payload(*, allocation_id: str = "0198ef24-f800-7000-8000-000000000001", nonce: str = "A" * 43) -> dict:
-    return {
+    value = {
         "runner_allocation_version": 1,
         "allocation_id": allocation_id,
         "repository_id": "1347574115",
         "repository": "FacuVCanale/self-hosted-ci-sandbox",
         "head_sha": "a" * 40,
+        "tested_sha": "c" * 40,
+        "dispatch_sha": "f" * 40,
         "workflow_ref": "FacuVCanale/self-hosted-ci-sandbox/.github/workflows/ci-gate.yml@refs/heads/main",
-        "runner_group": "self-hosted-ci-jit",
-        "labels": ["linux", "self-hosted", "wsl-jit", "x64"],
+        "run_id": "8001",
+        "run_attempt": 1,
+        "job_id": "8002",
+        "job_name": "local-quality",
+        "authority_kind": "personal-repository",
+        "runner_group": None,
+        "scale_set_name": "",
+        "labels": [],
         "image_fingerprint": "b" * 64,
         "nonce": nonce,
         "issued_at": "2026-08-27T12:00:00Z",
@@ -37,6 +47,17 @@ def payload(*, allocation_id: str = "0198ef24-f800-7000-8000-000000000001", nonc
         "max_jobs": 1,
         "ephemeral": True,
     }
+    value["scale_set_name"] = allocation_scale_set_name(value)
+    value["labels"] = [value["scale_set_name"]]
+    return value
+
+
+def reservation(**kwargs) -> dict:
+    value = payload(**kwargs)
+    for field in ("runner_allocation_version", "run_id", "run_attempt", "job_id", "dispatch_sha", "tested_sha"):
+        value.pop(field)
+    value["allocation_reservation_version"] = 1
+    return value
 
 
 class RunnerAllocationTests(unittest.TestCase):
@@ -57,12 +78,75 @@ class RunnerAllocationTests(unittest.TestCase):
         cases = []
         value = payload(); value["extra"] = True; cases.append(value)
         value = payload(); value["expires_at"] = "2026-08-27T12:05:01Z"; cases.append(value)
-        value = payload(); value["labels"] = list(reversed(value["labels"])); cases.append(value)
+        value = payload(); value["labels"] = ["wsl-jit"]; cases.append(value)
         for value in cases:
             with self.subTest(value=value), self.assertRaises(RunnerJitError):
                 validate_allocation_payload(value, now=NOW)
         with self.assertRaises(RunnerJitError):
             validate_allocation_payload(payload(), now=NOW + timedelta(minutes=5))
+
+    def test_personal_authority_is_exact_repository_scoped_without_group(self) -> None:
+        value = payload()
+        validate_allocation_payload(value, now=NOW)
+        value["runner_group"] = "self-hosted-ci-jit"
+        with self.assertRaisesRegex(RunnerJitError, "personal repository"):
+            validate_allocation_payload(value, now=NOW)
+
+    def test_organization_authority_requires_exact_selected_runner_group(self) -> None:
+        value = payload()
+        value["authority_kind"] = "organization-runner-group"
+        value["runner_group"] = "selected-self-hosted-ci-jit"
+        validate_allocation_payload(value, now=NOW)
+        for runner_group in (None, "", " selected-group", "selected-group ", "*"):
+            invalid = dict(value, runner_group=runner_group)
+            with self.subTest(runner_group=runner_group), self.assertRaisesRegex(
+                RunnerJitError, "exact selected runner group"
+            ):
+                validate_allocation_payload(invalid, now=NOW)
+
+    def test_authority_kind_is_required_and_discriminated(self) -> None:
+        missing = payload()
+        missing.pop("authority_kind")
+        with self.assertRaisesRegex(RunnerJitError, "exact v1 fields"):
+            validate_allocation_payload(missing, now=NOW)
+        invalid = payload()
+        invalid["authority_kind"] = "repository-or-group"
+        with self.assertRaisesRegex(RunnerJitError, "authority_kind is invalid"):
+            validate_allocation_payload(invalid, now=NOW)
+
+    def test_label_is_cryptographically_unique_and_not_caller_selected(self) -> None:
+        first = payload()
+        second = payload(
+            allocation_id="0198ef24-f800-7000-8000-000000000002", nonce="B" * 43
+        )
+        self.assertNotEqual(first["scale_set_name"], second["scale_set_name"])
+        self.assertRegex(first["scale_set_name"], r"^wsl-jit-[0-9a-f]{32}$")
+        first["scale_set_name"] = "wsl-jit-" + "0" * 32
+        first["labels"] = [first["scale_set_name"]]
+        with self.assertRaisesRegex(RunnerJitError, "allocation-derived"):
+            validate_allocation_payload(first, now=NOW)
+
+    def test_reservation_excludes_unknown_run_and_job_ids(self) -> None:
+        value = reservation()
+        validate_allocation_reservation(value, now=NOW)
+        value["job_id"] = "8002"
+        with self.assertRaisesRegex(RunnerJitError, "reservation requires exact"):
+            validate_allocation_reservation(value, now=NOW)
+
+    def test_signed_finalization_must_match_prior_reservation(self) -> None:
+        private = ed25519.Ed25519PrivateKey.generate()
+        fingerprint = spki_fingerprint(private.public_key())
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = SqliteAllocationLedger(Path(directory) / "ledger.sqlite3")
+            value = payload()
+            ledger.reserve(reservation(), now=NOW)
+            self.assertEqual(
+                "issued", ledger.finalize(
+                    sign_allocation(value, private, now=NOW), private.public_key(),
+                    pinned_fingerprint=fingerprint, now=NOW,
+                ),
+            )
+            self.assertEqual("issued", ledger.get(value["allocation_id"]).state)
 
 
 class RunnerLedgerTests(unittest.TestCase):

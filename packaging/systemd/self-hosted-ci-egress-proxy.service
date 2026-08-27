@@ -1,15 +1,36 @@
 [Unit]
-Description=INERT template for self-hosted-ci GitHub Actions egress proxy
+Description=self-hosted-ci allowlisted egress and GARM callback proxies
 Requires=self-hosted-ci-network-policy.service
 After=self-hosted-ci-network-policy.service
 Before=self-hosted-ci-garm.service
 ConditionPathExists=/etc/self-hosted-ci/ACTIVATION_APPROVED
+ConditionPathExists=/etc/self-hosted-ci/network/squid.conf
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-# Fail closed until an audited host-specific proxy launcher replaces this unit.
-ExecStart=/usr/bin/false
+Type=simple
+User=proxy
+Group=proxy
+ExecStartPre=+/usr/local/lib/self-hosted-ci/verify-live-artifact-contract.py --evidence /etc/self-hosted-ci/runner-boundary-v2.json --measurement-root /etc/self-hosted-ci/host-evidence --reviewer-public-key /etc/self-hosted-ci/boundary-reviewer-public-key.pem --pinned-fingerprint-file /etc/self-hosted-ci/boundary-reviewer-key.sha256
+ExecStartPre=/usr/local/lib/self-hosted-ci/run-egress-proxies.sh check
+ExecStart=/usr/local/lib/self-hosted-ci/run-egress-proxies.sh run
+Restart=on-failure
+RestartSec=2s
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+UMask=0077
+LogsDirectory=self-hosted-ci
+LogsDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

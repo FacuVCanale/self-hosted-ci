@@ -23,6 +23,10 @@ $PayloadTemplate = Join-Path $PSScriptRoot "install-jit-prerequisites-wsl-payloa
 $PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $ExpectedGarmVersion = "0.2.1"
 $ExpectedGarmSha256 = "11176acb8a725f914b9b947891b4837d374fb616195562cc0ad45a7be8b6c746"
+$ExpectedGarmCliVersion = "0.2.1"
+$ExpectedGarmCliSha256 = "983fa54557f3f5ce3aa1eeb2387499f5f823d14512a0559ba888667bc3b3e88e"
+$ExpectedGarmProviderIncusVersion = "0.1.5"
+$ExpectedGarmProviderIncusSha256 = "1489b5f9b3f01528e338c604c13dabe8321ed6f1bc6de77c7344119d7731c43f"
 $ExpectedIncusVersion = "6.0.0-1ubuntu0.3"
 
 function Test-IsAdministrator {
@@ -142,6 +146,8 @@ $payloadSha256 = ([Security.Cryptography.SHA256]::Create().ComputeHash($payloadB
     mode = $(if ($Apply) { "apply" } else { "plan" }); apply_requested = [bool]$Apply; task_name = $TaskName
     service_sid = $service.SID.Value; distro = $DistroName; incus_version = $IncusVersion
     garm_version = $ExpectedGarmVersion; garm_sha256 = $ExpectedGarmSha256
+    garm_cli_version = $ExpectedGarmCliVersion; garm_cli_sha256 = $ExpectedGarmCliSha256
+    garm_provider_incus_version = $ExpectedGarmProviderIncusVersion; garm_provider_incus_sha256 = $ExpectedGarmProviderIncusSha256
     payload_sha256 = $payloadSha256; garm_enabled = $false
     runner_registration = "not_performed"; no_host_changes = (-not [bool]$Apply)
 } | ConvertTo-Json -Compress
@@ -249,7 +255,16 @@ if (`$result.status -ne 'installed' -or `$result.garm_enabled -ne `$false -or `$
     } while (-not $complete -and -not $failed -and (Get-Date) -lt $deadline)
     if (-not $complete -or [uint32]$info.LastTaskResult -ne 0) { throw "one-shot task failed or timed out" }
     $result = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json
-    if ($result.garm_version -ne $ExpectedGarmVersion -or $result.garm_sha256 -ne $ExpectedGarmSha256 -or $result.incus_version -ne $IncusVersion) { throw "installed version postcondition failed" }
+    if ($result.garm_version -ne $ExpectedGarmVersion -or $result.garm_sha256 -ne $ExpectedGarmSha256 -or
+        $result.garm_cli_version -ne $ExpectedGarmCliVersion -or $result.garm_cli_sha256 -ne $ExpectedGarmCliSha256 -or
+        $result.garm_provider_incus_version -ne $ExpectedGarmProviderIncusVersion -or $result.garm_provider_incus_sha256 -ne $ExpectedGarmProviderIncusSha256 -or
+        $result.garm_manager_incus_admin -ne $false -or $result.incus_version -ne $IncusVersion -or
+        $result.dnsmasq_base_installed -ne $true -or $result.dnsmasq_service_absent -ne $true -or
+        $result.nftables_installed -ne $true -or $result.squid_installed -ne $true -or
+        $result.distribution_network_services_disabled -ne $true -or
+        $result.garm_enabled -ne $false -or $result.runner_registration_performed -ne $false) {
+        throw "installed prerequisite postcondition failed"
+    }
     $finalPassword = New-CryptographicAccountPassword
     try { Set-LocalUser -Name $service.Name -Password $finalPassword -ErrorAction Stop }
     finally { $finalPassword.Dispose() }
@@ -258,7 +273,7 @@ if (`$result.status -ne 'installed' -or `$result.garm_enabled -ne `$false -or `$
     $registered = $false
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task remains after unregister" }
     Remove-Item -LiteralPath $Root -Recurse -Force
-    [ordered]@{ status="installed"; incus_version=$IncusVersion; garm_version=$ExpectedGarmVersion; garm_enabled=$false; runner_registration_performed=$false; one_shot_task_absent=$true; stored_task_credential_invalidated=$true } | ConvertTo-Json -Compress
+    [ordered]@{ status="installed"; incus_version=$IncusVersion; garm_version=$ExpectedGarmVersion; garm_cli_version=$ExpectedGarmCliVersion; garm_provider_incus_version=$ExpectedGarmProviderIncusVersion; dnsmasq_base_installed=$true; dnsmasq_service_absent=$true; nftables_installed=$true; squid_installed=$true; distribution_network_services_disabled=$true; garm_manager_incus_admin=$false; garm_enabled=$false; runner_registration_performed=$false; one_shot_task_absent=$true; stored_task_credential_invalidated=$true } | ConvertTo-Json -Compress
 }
 catch {
     $original = $_.Exception.Message; $cleanup = [Collections.Generic.List[string]]::new()

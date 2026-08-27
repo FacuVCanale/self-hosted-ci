@@ -228,7 +228,7 @@ def evaluate_runner_boundary(
     blockers.extend(f"component-missing:{item}" for item in sorted(REQUIRED_COMPONENTS - seen))
     host = evaluate_host_security(value["host_security"])
     blockers.extend(f"host:{item}" for item in host.blockers)
-    if value["host_security"].get("distro_name") != "self-hosted-ci":
+    if value["host_security"].get("distro_name") != "Ubuntu-24.04-CI":
         blockers.append("host:unexpected-dedicated-distro-name")
     network = value["network_policy"]
     network_required = {"network_policy_version", "enabled", "default_egress", "blocked_cidrs", "blocked_endpoints", "allowed_destinations", "dns_private_or_rebound_resolution", "must_load_before_runner_registration", "must_survive_reboot", "on_install_or_verification_failure"}

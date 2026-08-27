@@ -17,6 +17,9 @@ outputs:
   generation:
     description: Validated execution generation.
     value: ${{ steps.runtime.outputs.generation }}
+  runner_label:
+    description: Allocation-unique runner label; empty for GitHub-hosted execution.
+    value: ${{ steps.runtime.outputs.runner_label }}
 runs:
   using: composite
   steps:

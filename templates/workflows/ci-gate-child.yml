@@ -29,6 +29,7 @@ jobs:
       tested_sha: ${{ steps.validate.outputs.tested_sha }}
       logical_key: ${{ steps.validate.outputs.logical_key }}
       generation: ${{ steps.validate.outputs.generation }}
+      runner_label: ${{ steps.validate.outputs.runner_label }}
     env:
       CI_GATE_PROTOCOL_PACKAGE: ${{ inputs.protocol_package }}
       CI_GATE_EVENT_PATH: ${{ github.event_path }}
@@ -86,7 +87,9 @@ jobs:
           command: child-complete-hosted
 
   local-quality:
-    name: ci-gate local attempt
+    # Keep the API job name identical to GITHUB_JOB.  The allocation claim uses
+    # this stable YAML identifier instead of a mutable display label.
+    name: local-quality
     needs: validate-package
     # Both the signed package and independently provisioned authority are
     # mandatory. The repository ships with this variable absent, so local is
@@ -94,8 +97,13 @@ jobs:
     if: >-
       needs.validate-package.outputs.backend == 'local' &&
       vars.CI_GATE_LOCAL_AUTHORITY_ENABLED == 'true'
-    runs-on: [linux, self-hosted, wsl-jit, x64]
+    # The trusted package exposes the sole label of a per-allocation transient
+    # scale set reserved by the outbound local coordinator before dispatch.
+    # There is deliberately no shared/persistent `wsl-jit` label.
+    runs-on: ${{ needs.validate-package.outputs.runner_label }}
     timeout-minutes: 40
+    env:
+      CI_GATE_TRUSTED_TESTED_SHA: ${{ needs.validate-package.outputs.tested_sha }}
     steps:
       - name: Revalidate claim authority before checkout
         # Equivalent runtime command: python -m github_automation.coordinator child --claim
@@ -114,12 +122,9 @@ jobs:
           EXPECTED_TESTED_SHA: ${{ needs.validate-package.outputs.tested_sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_TESTED_SHA"
 
-      - name: Atomically admit and persist start marker
-        # The trusted wrapper is outside and unwritable from the PR workspace.
-        # It must finish before make can resolve/install/read project tooling.
-        run: /opt/github-automation/bin/ci-gate-start --admit-and-mark
-
       - name: Run canonical quality gate
+        # ACTIONS_RUNNER_HOOK_JOB_STARTED runs outside the workspace and must
+        # obtain a 204 from the local allocation broker before this first step.
         run: make test
 
       - name: Persist local terminal evidence

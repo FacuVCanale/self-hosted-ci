@@ -3,12 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import subprocess
+import tomllib
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "scripts/host/install-jit-prerequisites.ps1"
 PAYLOAD = ROOT / "scripts/host/install-jit-prerequisites-wsl-payload.sh.in"
+GARM_CONFIG = ROOT / "templates/garm/config.toml.example"
 
 
 class JitPrerequisiteInstallerTests(unittest.TestCase):
@@ -46,8 +48,14 @@ class JitPrerequisiteInstallerTests(unittest.TestCase):
         for token in (
             "Ubuntu-24.04-CI", "@@INCUS_VERSION@@", 'garm_version=\'0.2.1\'',
             "11176acb8a725f914b9b947891b4837d374fb616195562cc0ad45a7be8b6c746",
-            '"incus=${incus_version}"', "apt-mark hold incus", "sha256sum --check --status",
-            "useradd --system", "garm-manager", "passwd --lock garm-manager",
+            "garm_cli_version='0.2.1'", "983fa54557f3f5ce3aa1eeb2387499f5f823d14512a0559ba888667bc3b3e88e",
+            "garm-cli-linux-amd64.tgz", 'tar -tzf "${tx}/garm-cli.tgz"', "garm-cli version", "root:root:755",
+            "garm_provider_incus_version='0.1.5'", "1489b5f9b3f01528e338c604c13dabe8321ed6f1bc6de77c7344119d7731c43f",
+            "garm-provider-incus-linux-amd64.tgz", 'tar -tzf "${tx}/garm-provider-incus.tgz"', "/usr/local/libexec/garm/garm-provider-incus",
+            '"incus=${incus_version}"', "dnsmasq-base", "dpkg-query -W -f='${Status}' dnsmasq-base", "apt-get remove -y dnsmasq", "command -v dnsmasq", "dnsmasq --version", "dnsmasq.service", "e2fsprogs", "util-linux", "command -v mkfs.ext4", "command -v losetup", "command -v tune2fs", "command -v findmnt", "command -v mountpoint", "command -v systemd-escape", "command -v blockdev", "command -v blkid", "grep -qw ext4 /proc/filesystems", "loop devices", "apt-mark hold incus", "sha256sum --check --status",
+            "nftables", "squid", "systemctl disable --now squid.service nftables.service",
+            '"dnsmasq_base_installed":true', '"dnsmasq_service_absent":true', '"nftables_installed":true', '"squid_installed":true', '"distribution_network_services_disabled":true', '"ext4_tools_installed":true', '"ext4_kernel_supported":true', '"loop_devices_supported":true',
+            "useradd --system", "garm-manager", "passwd --lock garm-manager", "gpasswd --delete garm-manager incus-admin", "garm-manager retains forbidden incus-admin membership", '"garm_manager_incus_admin":false',
             "/usr/local/bin/garm --version",
             "pgrep -x garm", "an enabled GARM-related unit remains",
             "systemctl disable --now garm.service self-hosted-ci-garm.service",
@@ -56,6 +64,26 @@ class JitPrerequisiteInstallerTests(unittest.TestCase):
             self.assertIn(token, source)
         for forbidden in ("config.sh", "--url", "--token", "runner register"):
             self.assertNotIn(forbidden, source)
+
+    def test_garm_021_config_template_uses_current_schema_and_placeholders(self) -> None:
+        source = GARM_CONFIG.read_text(encoding="utf-8")
+        parsed = tomllib.loads(source)
+        for token in (
+            "[default]", "enable_webhook_management = false", "[logging]", "[metrics]",
+            "[apiserver]", 'bind = "127.0.0.1"', "[apiserver.webui]",
+            "[database]", 'backend = "sqlite3"', "[database.sqlite3]",
+            'db_file = "/var/lib/self-hosted-ci/garm/garm.db"', "[[provider]]", 'provider_type = "external"',
+            '[provider.external]', 'provider_executable = "/usr/local/libexec/garm/garm-provider-incus"',
+            'config_file = "/etc/self-hosted-ci/garm/garm-provider-incus.toml"', 'time_to_live = "24h"',
+        ):
+            self.assertIn(token, source)
+        self.assertNotIn("[controller]", source)
+        self.assertNotIn("time_to_live = \"5m\"", source)
+        self.assertEqual(2, source.count('"REPLACE_ME_WITH_32_CHARS________"'))
+        self.assertEqual(32, len("REPLACE_ME_WITH_32_CHARS________"))
+        self.assertEqual("sqlite3", parsed["database"]["backend"])
+        self.assertEqual("/var/lib/self-hosted-ci/garm/garm.db", parsed["database"]["sqlite3"]["db_file"])
+        self.assertEqual("external", parsed["provider"][0]["provider_type"])
 
     def test_worker_is_exact_service_identity_and_bounded(self) -> None:
         source = INSTALLER.read_text(encoding="utf-8")
@@ -70,10 +98,23 @@ class JitPrerequisiteInstallerTests(unittest.TestCase):
             "payload sha256 mismatch", '["/bin/bash", "-n", path]',
         ):
             self.assertIn(token, source)
+        for postcondition in (
+            "$result.dnsmasq_base_installed -ne $true",
+            "$result.dnsmasq_service_absent -ne $true",
+            "$result.nftables_installed -ne $true",
+            "$result.squid_installed -ne $true",
+            "$result.distribution_network_services_disabled -ne $true",
+            "$result.garm_enabled -ne $false",
+            "$result.runner_registration_performed -ne $false",
+        ):
+            self.assertIn(postcondition, source)
 
     def test_versions_and_deadlines_are_policy_pinned(self) -> None:
         source = INSTALLER.read_text(encoding="utf-8")
         self.assertIn('$ExpectedIncusVersion = "6.0.0-1ubuntu0.3"', source)
+        self.assertIn('$ExpectedGarmCliSha256 = "983fa54557f3f5ce3aa1eeb2387499f5f823d14512a0559ba888667bc3b3e88e"', source)
+        self.assertIn('$ExpectedGarmProviderIncusSha256 = "1489b5f9b3f01528e338c604c13dabe8321ed6f1bc6de77c7344119d7731c43f"', source)
+        self.assertIn('$result.garm_manager_incus_admin -ne $false', source)
         self.assertIn('if ($IncusVersion -ne $ExpectedIncusVersion)', source)
         self.assertIn('if ($TimeoutSeconds -ne 600)', source)
         self.assertIn('$failed = [string]$task.State -ne "Running"', source)

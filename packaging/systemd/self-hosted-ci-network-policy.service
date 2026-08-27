@@ -1,13 +1,30 @@
 [Unit]
-Description=INERT template for self-hosted-ci default-deny network policy
+Description=self-hosted-ci fail-closed runner network policy
 Before=self-hosted-ci-egress-proxy.service self-hosted-ci-garm.service
 ConditionPathExists=/etc/self-hosted-ci/ACTIVATION_APPROVED
+ConditionPathExists=/sys/class/net/ci-jit-isolated
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Fail closed until an audited host-specific policy loader replaces this unit.
-ExecStart=/usr/bin/false
+ExecStartPre=/usr/local/lib/self-hosted-ci/verify-live-artifact-contract.py --evidence /etc/self-hosted-ci/runner-boundary-v2.json --measurement-root /etc/self-hosted-ci/host-evidence --reviewer-public-key /etc/self-hosted-ci/boundary-reviewer-public-key.pem --pinned-fingerprint-file /etc/self-hosted-ci/boundary-reviewer-key.sha256
+ExecStart=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh apply
+ExecStartPost=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh verify
+ExecReload=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh apply
+ExecStop=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh quarantine
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

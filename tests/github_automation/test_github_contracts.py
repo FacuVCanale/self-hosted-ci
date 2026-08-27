@@ -16,6 +16,7 @@ from github_automation.github import (
     RuntimeIdentity,
     hosted_conclusion_allowed,
     parse_dispatch_response,
+    parse_observed_workflow_job,
     validate_ci_gate_source,
     validate_formal_claim,
 )
@@ -127,6 +128,9 @@ def protocol(backend: str = "local") -> dict:
         "check_outbox_idempotency_key": None,
         "claim_deadline": "2026-08-26T12:10:00Z",
         "execution_deadline": "2026-08-26T12:45:00Z",
+        "allocation_id": "12345678-1234-4123-8123-123456789abc" if local else None,
+        "allocation_nonce": "A" * 43 if local else None,
+        "runner_label": "wsl-jit-" + "1" * 32 if local else None,
     }
     return data
 
@@ -191,6 +195,22 @@ class AppAuthorityTests(unittest.TestCase):
 
 
 class DispatchAndProtocolTests(unittest.TestCase):
+    def test_two_phase_observation_requires_exact_run_job_and_reserved_label(self) -> None:
+        label = "wsl-jit-" + "1" * 32
+        observed = parse_observed_workflow_job(777, label, {"id": 777, "run_attempt": 2, "head_sha": "f" * 40}, {"total_count": 2, "jobs": [
+            {"id": 887, "run_id": 777, "name": "validate trusted dispatch package", "labels": ["ubuntu-24.04"]},
+            {"id": 888, "run_id": 777, "name": "local-quality", "labels": ["self-hosted", label]},
+        ]})
+        self.assertEqual((777, 2, 888), (observed.run_id, observed.run_attempt, observed.job_id))
+        invalid = (
+            {"total_count": 0, "jobs": []},
+            {"total_count": 1, "jobs": [{"id": 888, "run_id": 778, "name": "local-quality", "labels": [label]}]},
+            {"total_count": 1, "jobs": [{"id": 888, "run_id": 777, "name": "local-quality", "labels": ["self-hosted"]}]},
+        )
+        for jobs in invalid:
+            with self.assertRaises(ProtocolFailure):
+                parse_observed_workflow_job(777, label, {"id": 777, "run_attempt": 2, "head_sha": "f" * 40}, jobs)
+
     def test_s45_dispatch_is_pinned_and_consumes_exact_http_200_run_id(self) -> None:
         request = DispatchRequest(REPOSITORY, "child.yml", "main", "main")
         receipt = {

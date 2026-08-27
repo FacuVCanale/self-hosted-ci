@@ -18,7 +18,9 @@ concurrency:
 jobs:
   coordinate:
     name: ci-gate coordinator (not the required gate)
-    # Inert until the reviewed control-plane package and authority are installed.
+    # This GitHub-hosted job never receives broker ingress or allocation signing
+    # authority. Local routing is performed by the outbound host worker; when it
+    # is unavailable the control plane emits a GitHub-hosted package instead.
     if: vars.CI_GATE_COORDINATOR_ENABLED == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10

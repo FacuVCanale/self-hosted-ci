@@ -11,12 +11,13 @@ import re
 
 TOP_LEVEL = {"schema_version", "install_nonce", "generated_at", "expires_at", "producer", "host", "distro", "runner", "services", "heartbeat", "boundary", "eligibility", "probe_error"}
 SID = re.compile(r"^S-1-[0-9]+(?:-[0-9]+)+$")
-SERVICES = {"incus.service", "self-hosted-ci-boundary-verify.service", "self-hosted-ci-egress-proxy.service", "self-hosted-ci-garm.service", "self-hosted-ci-health-heartbeat.timer", "self-hosted-ci-network-policy.service"}
+SERVICES = {"incus.service", "self-hosted-ci-allocation-broker.service", "self-hosted-ci-boundary-verify.service", "self-hosted-ci-egress-proxy.service", "self-hosted-ci-garm.service", "self-hosted-ci-health-heartbeat.timer", "self-hosted-ci-network-policy.service"}
 HOST_SERVICES = {"sshd", "wsl", "lxss_manager"}
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 ENABLED_STATES = {
     "incus.service": {"enabled"},
     "self-hosted-ci-boundary-verify.service": {"enabled", "static"},
+    "self-hosted-ci-allocation-broker.service": {"enabled"},
     "self-hosted-ci-egress-proxy.service": {"enabled", "static"},
     "self-hosted-ci-garm.service": {"enabled"},
     "self-hosted-ci-health-heartbeat.timer": {"enabled"},
@@ -47,12 +48,32 @@ def validate(payload: object, expected_sid: str, expected_distro: str, now: date
             if state["status"] not in {"running", "stopped", "paused", "absent"}: raise ValueError()
             if state["installed"] != (state["status"] != "absent"): raise ValueError()
         if not isinstance(distro, dict) or set(distro) != {"name", "platform", "os_id", "os_version"} or distro.get("name") != expected_distro: raise ValueError()
-        if not isinstance(runner, dict) or set(runner) != {"installed", "registered", "labels"} or runner.get("labels") != ["linux", "self-hosted", "wsl-jit", "x64"]: raise ValueError()
-        if runner.get("registered") not in (True, False, None) or runner.get("installed") not in (True, False, None): raise ValueError()
+        legacy_probe_runner = {"installed", "registered", "labels"}
+        jit_runner = {"mode", "manager", "provider", "image", "broker", "transient_inventories_clean", "persistent_registration", "idle_instances"}
+        if not isinstance(runner, dict) or set(runner) not in (legacy_probe_runner, jit_runner): raise ValueError()
+        if set(runner) == legacy_probe_runner:
+            if payload["probe_error"] is None or runner.get("labels") != ["linux", "self-hosted", "wsl-jit", "x64"]: raise ValueError()
+            if runner.get("registered") is not None or runner.get("installed") is not None: raise ValueError()
+        else:
+            if runner["mode"] != "garm-jit": raise ValueError()
+            if not isinstance(runner["manager"], dict) or set(runner["manager"]) != {"configured", "state"}: raise ValueError()
+            if runner["manager"]["configured"] is not None and type(runner["manager"]["configured"]) is not bool: raise ValueError()
+            if runner["manager"]["state"] not in {"active", "inactive", "failed", "unknown"}: raise ValueError()
+            for key in ("provider", "image"):
+                if not isinstance(runner[key], dict) or set(runner[key]) != {"configured"}: raise ValueError()
+                if runner[key]["configured"] is not None and type(runner[key]["configured"]) is not bool: raise ValueError()
+            if not isinstance(runner["broker"], dict) or set(runner["broker"]) != {"configured", "state"}: raise ValueError()
+            if runner["broker"]["configured"] is not None and type(runner["broker"]["configured"]) is not bool: raise ValueError()
+            if runner["broker"]["state"] not in {"active", "inactive", "failed", "unknown"}: raise ValueError()
+            if runner["transient_inventories_clean"] is not None and type(runner["transient_inventories_clean"]) is not bool: raise ValueError()
+            if runner["persistent_registration"] is not None and type(runner["persistent_registration"]) is not bool: raise ValueError()
+            if runner["idle_instances"] is not None and (not isinstance(runner["idle_instances"], int) or isinstance(runner["idle_instances"], bool) or runner["idle_instances"] < 0): raise ValueError()
         if not isinstance(services, dict) or set(services) != SERVICES: raise ValueError()
         for name, state in services.items():
             if not isinstance(state, dict) or set(state) != {"active", "enabled"} or not all(isinstance(state[key], str) for key in state): raise ValueError()
             if state["active"] not in {"active", "inactive", "failed", "unknown"} or state["enabled"] not in {"enabled", "disabled", "static", "masked", "unknown"}: raise ValueError()
+        if set(runner) == jit_runner and runner["manager"]["state"] != services["self-hosted-ci-garm.service"]["active"]: raise ValueError()
+        if set(runner) == jit_runner and runner["broker"]["state"] != services["self-hosted-ci-allocation-broker.service"]["active"]: raise ValueError()
         if not isinstance(heartbeat, dict) or set(heartbeat) != {"status", "observed_at", "age_seconds", "max_age_seconds"}: raise ValueError()
         if heartbeat["status"] not in {"fresh", "stale", "absent", "invalid", "not_observable"}: raise ValueError()
         if not isinstance(heartbeat["max_age_seconds"], int) or heartbeat["max_age_seconds"] < 1: raise ValueError()
@@ -79,8 +100,14 @@ def validate(payload: object, expected_sid: str, expected_distro: str, now: date
         else:
             expected_blockers: set[str] = set()
             if distro["platform"] != "wsl2" or distro["os_id"] != "ubuntu" or distro["os_version"] != "24.04": expected_blockers.add("platform_not_verified")
-            if runner["installed"] is not True: expected_blockers.add("runner_not_installed")
-            if runner["registered"] is not False: expected_blockers.add("runner_registration_not_clean")
+            if runner["manager"]["configured"] is not True: expected_blockers.add("garm_manager_not_configured")
+            if runner["provider"]["configured"] is not True: expected_blockers.add("garm_provider_not_configured")
+            if runner["image"]["configured"] is not True: expected_blockers.add("runner_image_not_configured")
+            if runner["broker"]["configured"] is not True: expected_blockers.add("allocation_broker_not_configured")
+            if runner["transient_inventories_clean"] is not True: expected_blockers.add("transient_scale_sets_not_clean")
+            if runner["persistent_registration"] is not False: expected_blockers.add("persistent_runner_registration_not_clean")
+            if runner["idle_instances"] is None: expected_blockers.add("jit_instances_not_observable")
+            elif runner["idle_instances"] != 0: expected_blockers.add("idle_jit_instances_present")
             if heartbeat["status"] != "fresh": expected_blockers.add("heartbeat_not_fresh")
             if boundary["activation_approved"] is not True: expected_blockers.add("activation_not_approved")
             if boundary["network_policy_enabled"] is not True: expected_blockers.add("network_policy_not_enabled")
@@ -101,8 +128,13 @@ def validate(payload: object, expected_sid: str, expected_distro: str, now: date
         or distro["platform"] != "wsl2"
         or distro["os_id"] != "ubuntu"
         or distro["os_version"] != "24.04"
-        or runner["installed"] is not True
-        or runner["registered"] is not False
+        or runner["manager"] != {"configured": True, "state": "active"}
+        or runner["provider"] != {"configured": True}
+        or runner["image"] != {"configured": True}
+        or runner["broker"] != {"configured": True, "state": "active"}
+        or runner["transient_inventories_clean"] is not True
+        or runner["persistent_registration"] is not False
+        or runner["idle_instances"] != 0
         or boundary != {"activation_approved": True, "network_policy_enabled": True}
     ):
         return 5, "eligible_snapshot_has_blockers"

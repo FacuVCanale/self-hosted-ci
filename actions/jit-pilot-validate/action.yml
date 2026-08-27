@@ -1,0 +1,30 @@
+name: Validate non-gating JIT pilot
+description: Revalidate one minimal pilot package against the exact live GitHub repository and pull request.
+inputs:
+  pilot-package:
+    required: true
+    description: Exact jit-pilot-package-v1 JSON.
+outputs:
+  backend:
+    value: ${{ steps.validate.outputs.backend }}
+  repository:
+    value: ${{ steps.validate.outputs.repository }}
+  pr_number:
+    value: ${{ steps.validate.outputs.pr_number }}
+  base_sha:
+    value: ${{ steps.validate.outputs.base_sha }}
+  head_sha:
+    value: ${{ steps.validate.outputs.head_sha }}
+  tested_merge_sha:
+    value: ${{ steps.validate.outputs.tested_merge_sha }}
+  runner_label:
+    value: ${{ steps.validate.outputs.runner_label }}
+runs:
+  using: composite
+  steps:
+    - id: validate
+      shell: bash
+      env:
+        JIT_PILOT_PACKAGE: ${{ inputs.pilot-package }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: python3 "$GITHUB_ACTION_PATH/run.py"

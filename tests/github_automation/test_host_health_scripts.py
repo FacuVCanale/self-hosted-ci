@@ -36,8 +36,14 @@ def snapshot(now: datetime, *, eligible: bool = True) -> dict[str, object]:
         "producer": {"windows_sid": SID, "account": "selfhosted-ci-svc", "distro": "Ubuntu-24.04-CI"},
         "host": {"service_identity_verified": True, "services": {"sshd": {"installed": True, "status": "running"}, "wsl": {"installed": True, "status": "running"}, "lxss_manager": {"installed": False, "status": "absent"}}},
         "distro": {"name": "Ubuntu-24.04-CI", "platform": "wsl2", "os_id": "ubuntu", "os_version": "24.04"},
-        "runner": {"installed": True, "registered": False, "labels": ["linux", "self-hosted", "wsl-jit", "x64"]},
-        "services": {name: {"active": "active", "enabled": "enabled"} for name in ("incus.service", "self-hosted-ci-boundary-verify.service", "self-hosted-ci-egress-proxy.service", "self-hosted-ci-garm.service", "self-hosted-ci-health-heartbeat.timer", "self-hosted-ci-network-policy.service")},
+        "runner": {
+            "mode": "garm-jit", "manager": {"configured": True, "state": "active"},
+            "provider": {"configured": True}, "image": {"configured": True},
+            "broker": {"configured": True, "state": "active"},
+            "transient_inventories_clean": True,
+            "persistent_registration": False, "idle_instances": 0,
+        },
+        "services": {name: {"active": "active", "enabled": "enabled"} for name in ("incus.service", "self-hosted-ci-allocation-broker.service", "self-hosted-ci-boundary-verify.service", "self-hosted-ci-egress-proxy.service", "self-hosted-ci-garm.service", "self-hosted-ci-health-heartbeat.timer", "self-hosted-ci-network-policy.service")},
         "heartbeat": {"status": "fresh", "observed_at": stamp(now), "age_seconds": 0, "max_age_seconds": 180},
         "boundary": {"activation_approved": eligible, "network_policy_enabled": eligible},
         "eligibility": {"eligible_for_local_ci": eligible, "blocking_reasons": [] if eligible else ["activation_not_approved", "network_policy_not_enabled"]},
@@ -102,6 +108,44 @@ class HostHealthScriptTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertEqual(expected, MODULE.validate(payload, SID, "Ubuntu-24.04-CI", now)[1])
 
+    def test_validator_fails_closed_on_each_garm_jit_boundary(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        cases = (
+            ("manager", "configured", False, "garm_manager_not_configured"),
+            ("provider", "configured", False, "garm_provider_not_configured"),
+            ("image", "configured", False, "runner_image_not_configured"),
+            ("broker", "configured", False, "allocation_broker_not_configured"),
+        )
+        for section, key, value, blocker in cases:
+            with self.subTest(blocker=blocker):
+                payload = snapshot(now)
+                payload["runner"][section][key] = value
+                payload["eligibility"] = {"eligible_for_local_ci": False, "blocking_reasons": [blocker]}
+                self.assertEqual((3, "local_ci_ineligible"), MODULE.validate(payload, SID, "Ubuntu-24.04-CI", now))
+        payload = snapshot(now); payload["runner"]["transient_inventories_clean"] = False
+        payload["eligibility"] = {"eligible_for_local_ci": False, "blocking_reasons": ["transient_scale_sets_not_clean"]}
+        self.assertEqual((3, "local_ci_ineligible"), MODULE.validate(payload, SID, "Ubuntu-24.04-CI", now))
+        for key, value, blocker in (
+            ("persistent_registration", True, "persistent_runner_registration_not_clean"),
+            ("persistent_registration", None, "persistent_runner_registration_not_clean"),
+            ("idle_instances", 1, "idle_jit_instances_present"),
+            ("idle_instances", None, "jit_instances_not_observable"),
+        ):
+            with self.subTest(blocker=blocker):
+                payload = snapshot(now); payload["runner"][key] = value
+                payload["eligibility"] = {"eligible_for_local_ci": False, "blocking_reasons": [blocker]}
+                self.assertEqual((3, "local_ci_ineligible"), MODULE.validate(payload, SID, "Ubuntu-24.04-CI", now))
+
+    def test_validator_accepts_only_legacy_runner_shape_for_supervisor_probe_failure(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        payload = snapshot(now)
+        payload["runner"] = {"installed": None, "registered": None, "labels": ["linux", "self-hosted", "wsl-jit", "x64"]}
+        payload["probe_error"] = "bounded probe failure"
+        payload["eligibility"] = {"eligible_for_local_ci": False, "blocking_reasons": ["supervisor_probe_failed"]}
+        self.assertEqual((3, "local_ci_ineligible"), MODULE.validate(payload, SID, "Ubuntu-24.04-CI", now))
+        payload["probe_error"] = None
+        self.assertEqual((5, "invalid_snapshot_contract"), MODULE.validate(payload, SID, "Ubuntu-24.04-CI", now))
+
     def test_collector_systemd_state_executes_without_unbound_local_and_observe_deduplicates(self) -> None:
         collector_path = HOST / "collect-health-snapshot.py"
         spec = importlib.util.spec_from_file_location("health_collector", collector_path)
@@ -110,6 +154,53 @@ class HostHealthScriptTests(unittest.TestCase):
         responses = [subprocess.CompletedProcess([], 0, "active\n", ""), subprocess.CompletedProcess([], 0, "enabled\n", "")]
         with mock.patch.object(collector.subprocess, "run", side_effect=responses):
             self.assertEqual({"active": "active", "enabled": "enabled"}, collector.systemd_state("incus.service"))
+
+    def test_collector_garm_state_is_schema_closed_root_owned_and_credential_free(self) -> None:
+        collector_path = HOST / "collect-health-snapshot.py"
+        spec = importlib.util.spec_from_file_location("health_collector_garm", collector_path)
+        assert spec and spec.loader
+        collector = importlib.util.module_from_spec(spec); spec.loader.exec_module(collector)
+        target = {"authority_kind": "personal-repository", "entity_flag": "--repo", "entity_id": "12345678-1234-4123-8123-123456789abc", "entity_name": "FacuVCanale/example", "runner_group": None}
+        state = {"schema_version": 3, "manager_configured": True, "provider_configured": True,
+            "image_configured": True, "broker_configured": True, "zero_scale_sets": True,
+            "garm_cli_home": "/run/self-hosted-ci/garm-cli", "image": {"alias": "runner-pinned", "fingerprint": "a" * 64}, "targets": {"123": target}}
+        broker = {"allocation_signer_fingerprint": "b" * 64, "garm_cli_home": "/run/self-hosted-ci/garm-cli", "provider_name": "incus_ci_jit", "image_alias": "runner-pinned", "image_fingerprint": "a" * 64, "live_job_verifier": str(collector.LIVE_JOB_VERIFIER), "targets": {"123": target}}
+        original_read_text = Path.read_text
+        def read_state(path: Path, *args: object, **kwargs: object) -> str:
+            if path == collector.GARM_HEALTH_STATE:
+                return json.dumps(state)
+            if path == collector.BROKER_CONFIG:
+                return json.dumps(broker)
+            return original_read_text(path, *args, **kwargs)
+        responses = [
+            {"callback_url": "http://10.254.0.1:8080/api/v1/callbacks", "metadata_url": "http://10.254.0.1:8080/api/v1/metadata"},
+            [{"name": "incus_ci_jit", "type": "external", "description": "pinned"}], [],
+            {"fingerprint": "a" * 64, "aliases": [{"name": "runner-pinned"}]},
+        ]
+        completed = [subprocess.CompletedProcess([], 0, json.dumps(value), "") for value in responses]
+        with mock.patch.object(collector, "regular_root_file", return_value=True), mock.patch.object(collector, "root_secret_file", return_value=True), mock.patch.object(Path, "read_text", read_state), mock.patch.object(collector.subprocess, "run", side_effect=completed) as run:
+            self.assertEqual({"manager_configured": True, "provider_configured": True, "image_configured": True, "broker_configured": True, "zero_scale_sets": True}, collector.garm_configuration_state())
+            self.assertEqual(4, run.call_count)
+            self.assertTrue(all(call.args[0][:3] == [str(collector.GARM_SESSION_HELPER), "run", "--"] for call in run.call_args_list[:3]))
+        drifted_responses = [responses[0], responses[1], [{"id": 9}], responses[3]]
+        with mock.patch.object(collector, "regular_root_file", return_value=True), mock.patch.object(collector, "root_secret_file", return_value=True), mock.patch.object(Path, "read_text", read_state), mock.patch.object(collector.subprocess, "run", side_effect=[subprocess.CompletedProcess([], 0, json.dumps(value), "") for value in drifted_responses]):
+            self.assertTrue(all(value is None for value in collector.garm_configuration_state().values()))
+        state["token"] = "must-not-be-observable"
+        with mock.patch.object(collector, "regular_root_file", return_value=True), mock.patch.object(collector, "root_secret_file", return_value=True), mock.patch.object(Path, "read_text", read_state):
+            self.assertTrue(all(value is None for value in collector.garm_configuration_state().values()))
+        source = collector_path.read_text(encoding="utf-8")
+        for forbidden in ("github_token", "installation_token", "passphrase"):
+            self.assertNotIn(forbidden, source.lower())
+
+    def test_collector_observes_zero_idle_instances_and_rejects_unobservable_inventory(self) -> None:
+        collector_path = HOST / "collect-health-snapshot.py"
+        spec = importlib.util.spec_from_file_location("health_collector_instances", collector_path)
+        assert spec and spec.loader
+        collector = importlib.util.module_from_spec(spec); spec.loader.exec_module(collector)
+        with mock.patch.object(collector.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "[]", "")):
+            self.assertEqual(0, collector.idle_instance_count())
+        with mock.patch.object(collector.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "denied")):
+            self.assertIsNone(collector.idle_instance_count())
 
     def test_mac_checker_uses_only_fixed_sftp_get_and_preserves_validator_status(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

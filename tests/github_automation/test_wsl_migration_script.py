@@ -31,11 +31,10 @@ class WslMigrationScriptTests(unittest.TestCase):
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('$ExpectedSourceDistro = "Ubuntu-24.04"', source)
         self.assertIn('$ExpectedImportedDistro = "Ubuntu-24.04-CI"', source)
-        self.assertIn(
-            '$ExpectedExport = "C:\\ProgramData\\self-hosted-ci\\exports\\Ubuntu-24.04-20260827.tar"', source
-        )
+        self.assertIn('[Parameter(Mandatory = $true)][string]$ExportPath', source)
+        self.assertIn('[Parameter(Mandatory = $true)][string]$ExpectedExportSha256', source)
+        self.assertIn('ExportPath must be an explicit file below', source)
         self.assertIn('$ExpectedDestination = "C:\\ProgramData\\self-hosted-ci\\wsl"', source)
-        self.assertIn("ad9e329eadc4211182c32d71a2830b6a492efedb2dc94735f3dd5287925ca0e9", source)
         self.assertIn("Get-FileHash -LiteralPath $ExportPath -Algorithm SHA256", source)
         self.assertIn("WSL export size mismatch", source)
         self.assertIn("Insufficient free disk space", source)

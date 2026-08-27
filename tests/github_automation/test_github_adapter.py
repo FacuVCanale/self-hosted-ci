@@ -281,6 +281,48 @@ class GitHubAppAuthenticationTests(unittest.TestCase):
 
 
 class DispatchTransportTests(unittest.TestCase):
+    def test_observe_exact_job_polls_until_unique_named_labeled_job_exists(self) -> None:
+        run = response(200, {"id": 777, "run_attempt": 2, "head_sha": "f" * 40})
+        pending = response(200, {"total_count": 1, "jobs": [
+            {"id": 1, "run_id": 777, "name": "validate trusted dispatch package", "labels": ["ubuntu-24.04"]},
+        ]})
+        ready = response(200, {"total_count": 2, "jobs": [
+            {"id": 1, "run_id": 777, "name": "validate trusted dispatch package", "labels": ["ubuntu-24.04"]},
+            {"id": 888, "run_id": 777, "name": "local-quality", "labels": ["self-hosted", "wsl-jit-" + "1" * 32]},
+        ]})
+        sleeps: list[float] = []
+        http = FakeHTTP(run, pending, run, ready)
+        adapter = ActionsDispatchTransport(
+            actions_token(), identity(), http, observation_timeout_seconds=5,
+            observation_poll_seconds=.25, monotonic=lambda: 0, sleeper=sleeps.append,
+        )
+        observed = adapter.observe_exact_job(
+            DispatchRequest(REPOSITORY, "child.yml", "main", "main"),
+            777, "wsl-jit-" + "1" * 32,
+        )
+        self.assertEqual((777, 2, 888, "local-quality"), (
+            observed.run_id, observed.run_attempt, observed.job_id, observed.job_name,
+        ))
+        self.assertEqual([.25], sleeps)
+        self.assertTrue(http.requests[-1][1].endswith("/jobs?filter=latest&per_page=100"))
+
+    def test_observe_exact_job_has_a_hard_timeout(self) -> None:
+        http = FakeHTTP(
+            response(200, {"id": 777, "run_attempt": 1, "head_sha": "f" * 40}),
+            response(200, {"total_count": 0, "jobs": []}),
+        )
+        clock = iter((0.0, 2.0))
+        adapter = ActionsDispatchTransport(
+            actions_token(), identity(), http, observation_timeout_seconds=1,
+            monotonic=lambda: next(clock), sleeper=lambda _seconds: None,
+        )
+        with self.assertRaisesRegex(ControlFailure, "timed out"):
+            adapter.observe_exact_job(
+                DispatchRequest(REPOSITORY, "child.yml", "main", "main"),
+                777, "wsl-jit-" + "1" * 32,
+            )
+        self.assertEqual(2, len(http.requests))
+
     def test_dispatch_uses_only_actions_token_and_consumes_exact_run_id(self) -> None:
         http = FakeHTTP(response(200, {
             "workflow_run_id": 777,

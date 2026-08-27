@@ -10,10 +10,12 @@ ConditionPathExists=/etc/self-hosted-ci/garm/config.toml
 Type=simple
 User=garm-manager
 Group=garm-manager
-SupplementaryGroups=incus-admin
+# The external provider connects through project-scoped Incus TLS credentials.
+# GARM must never inherit the host-wide incus-admin Unix socket capability.
 # Root is required to observe root-owned evidence metadata. The + prefix only
 # elevates this preflight; GARM itself remains the unprivileged service user.
 ExecStartPre=+/usr/local/lib/self-hosted-ci/verify-wsl-jit-readiness.py --evidence /etc/self-hosted-ci/runner-boundary-v2.json --measurement-root /etc/self-hosted-ci/host-evidence --reviewer-public-key /etc/self-hosted-ci/boundary-reviewer-public-key.pem --pinned-fingerprint-file /etc/self-hosted-ci/boundary-reviewer-key.sha256
+ExecStartPre=+/usr/local/lib/self-hosted-ci/verify-live-artifact-contract.py --evidence /etc/self-hosted-ci/runner-boundary-v2.json --measurement-root /etc/self-hosted-ci/host-evidence --reviewer-public-key /etc/self-hosted-ci/boundary-reviewer-public-key.pem --pinned-fingerprint-file /etc/self-hosted-ci/boundary-reviewer-key.sha256
 ExecStart=/usr/local/bin/garm --config /etc/self-hosted-ci/garm/config.toml
 Restart=on-failure
 RestartSec=5s

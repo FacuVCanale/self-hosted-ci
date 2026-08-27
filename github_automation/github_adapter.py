@@ -14,6 +14,7 @@ import http.client
 import json
 import os
 import subprocess
+import time
 from typing import Any, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -30,6 +31,9 @@ from .github import (
     ProtocolFailure,
     RuntimeIdentity,
     parse_dispatch_response,
+    parse_observed_workflow_job,
+    ObservedWorkflowJob,
+    WorkflowJobPending,
 )
 
 
@@ -365,6 +369,10 @@ class ActionsDispatchTransport:
         http: HTTPTransport,
         *,
         api_url: str = GITHUB_API,
+        observation_timeout_seconds: float = 30.0,
+        observation_poll_seconds: float = 1.0,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self._api_url = _exact_api_url(api_url)
         if not isinstance(token, GitHubActionsToken):
@@ -378,6 +386,12 @@ class ActionsDispatchTransport:
             raise ControlFailure("Actions transport runtime identity mismatch")
         self._token = token
         self._http = http
+        if observation_timeout_seconds <= 0 or observation_poll_seconds <= 0:
+            raise ValueError("job observation timing must be positive")
+        self._observation_timeout = observation_timeout_seconds
+        self._observation_poll = observation_poll_seconds
+        self._monotonic = monotonic
+        self._sleeper = sleeper
 
     def dispatch(self, request: DispatchRequest, inputs: Mapping[str, str]) -> int:
         if not isinstance(request, DispatchRequest):
@@ -403,6 +417,30 @@ class ActionsDispatchTransport:
             raise ProtocolFailure("dispatch must return HTTP 200")
         body = _json_mapping(response.body)
         return parse_dispatch_response(request, response.status, body)
+
+    def observe_exact_job(self, request: DispatchRequest, run_id: int, runner_label: str) -> ObservedWorkflowJob:
+        """Poll the exact dispatch for a bounded interval and fail closed."""
+        if request.repository != self._token.repository:
+            raise ControlFailure("job observation repository is outside GITHUB_TOKEN authority")
+        headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {self._token.value}", "X-GitHub-Api-Version": request.api_version}
+        base = f"{self._api_url}/repos/{request.repository}/actions/runs/{run_id}"
+        deadline = self._monotonic() + self._observation_timeout
+        while True:
+            run_response = self._http.request("GET", base, headers=headers)
+            jobs_response = self._http.request("GET", f"{base}/jobs?filter=latest&per_page=100", headers=headers)
+            if run_response.status == 200 and jobs_response.status == 200:
+                try:
+                    return parse_observed_workflow_job(
+                        run_id, runner_label, _json_mapping(run_response.body),
+                        _json_mapping(jobs_response.body), expected_job_name="local-quality",
+                    )
+                except WorkflowJobPending:
+                    pass
+            elif run_response.status not in {200, 404, 409, 422} or jobs_response.status not in {200, 404, 409, 422}:
+                raise ControlFailure("exact workflow run/job observation is unavailable")
+            if self._monotonic() >= deadline:
+                raise ControlFailure("exact workflow job observation timed out")
+            self._sleeper(self._observation_poll)
 
 
 class GitHubCheckTransport:
