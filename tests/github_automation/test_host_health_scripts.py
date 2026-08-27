@@ -159,6 +159,11 @@ class HostHealthScriptTests(unittest.TestCase):
             "exact WSL distro remained invisible after bounded preflight", "AllowDemandStart",
             "DisallowStartIfOnBatteries", "StopIfGoingOnBatteries", "TASK_INSTANCES_IGNORE_NEW",
             "one-shot task settings postcondition failed",
+            "registration_validated", "selected_distribution_id", "WSL registration key is not a canonical GUID",
+            "HKCU and exact-SID WSL registration GUIDs differ", "WSL registration name is not exact",
+            "WSL registration version is not 2", "WSL registration BasePath is not exact",
+            "exact WSL registry validation failed", "--distribution-id ", "ExpectedDistroBasePath",
+            ".Replace([char]0, '')", "StringComparer]::Ordinal.Equals",
         ):
             self.assertIn(token, source)
         orphan_delete = source.index('if ($orphanReaderProfile) { Remove-ExactManagedReaderProfile')
@@ -174,6 +179,12 @@ class HostHealthScriptTests(unittest.TestCase):
         self.assertIn("for (`$attempt = 1; `$attempt -le 10; `$attempt++)", source)
         self.assertIn("if (`$attempt -lt 10) { Start-Sleep -Seconds 2 }", source)
         self.assertNotIn("--import-in-place", source)
+        self.assertNotIn("--distribution \"$DistroName\"", source)
+        registry_validation = source.index("if (-not `$registrationValidated)")
+        guid_launch = source.index("`$psi.Arguments = '--distribution-id '")
+        self.assertLess(registry_validation, guid_launch)
+        self.assertLess(source.index("HKCU and exact-SID WSL registration GUIDs differ"), guid_launch)
+        self.assertLess(source.index("WSL registration BasePath is not exact"), guid_launch)
         profile_cleanup = source.index("function Remove-ExactManagedReaderProfile")
         self.assertLess(source.index("Set-Acl -LiteralPath $entry[0]", profile_cleanup), source.index("Remove-Item -LiteralPath $Profile -Recurse -Force", profile_cleanup))
         for token in ('health bootstrap staging root is not canonical', 'Assert-NoReparsePath "C:\\ProgramData"', 'Assert-NoReparsePath (Split-Path -Parent $Root) $true'):
