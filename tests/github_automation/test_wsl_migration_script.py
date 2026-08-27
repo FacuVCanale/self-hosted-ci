@@ -21,6 +21,8 @@ class WslMigrationScriptTests(unittest.TestCase):
         self.assertIn("[switch]$AcknowledgeImportRunsAsServiceIdentity", source)
         self.assertIn("[switch]$AcknowledgeGrantBatchLogonRight", source)
         self.assertIn("Apply requires -AcknowledgeGrantBatchLogonRight", source)
+        self.assertIn("[switch]$AcknowledgeOneTimePasswordRotation", source)
+        self.assertIn("Apply requires -AcknowledgeOneTimePasswordRotation", source)
         self.assertIn("Apply requires the exact non-zero -ExpectedExportBytes", source)
         self.assertIn("Apply requires -ExpectedServiceAccountSid", source)
 
@@ -48,33 +50,62 @@ class WslMigrationScriptTests(unittest.TestCase):
         self.assertIn("Unexpected ACL identity", source)
         self.assertIn("Assert-NotReparsePoint", source)
 
-    def test_script_imports_once_via_s4u_and_verifies_service_hkcu_registration(self) -> None:
+    def test_script_imports_once_via_password_task_and_verifies_service_hkcu_registration(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("function Register-S4UImportTask", source)
+        self.assertIn("function Register-PasswordImportTask", source)
         self.assertIn('$scheduler = New-Object -ComObject "Schedule.Service"', source)
-        self.assertIn("$definition.Principal.LogonType = $taskLogonS4U", source)
+        self.assertIn("$definition.Principal.LogonType = $taskLogonPassword", source)
         self.assertIn("$definition.Principal.RunLevel = $taskRunLevelLua", source)
         self.assertIn("$folder.RegisterTaskDefinition(", source)
-        self.assertIn("Task Scheduler rejected the local-account S4U task before WSL was started", source)
+        self.assertIn("Task Scheduler rejected the one-time password task before WSL was started", source)
         self.assertIn('"--import", $DistroName, $destination, $ExportPath, "--version", "2"', source)
         self.assertIn('"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss"', source)
         self.assertIn("Worker identity SID mismatch", source)
         self.assertIn("Imported distro BasePath mismatch", source)
         self.assertIn("Imported distro is not WSL2", source)
-        self.assertIn("Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false", source)
+        self.assertIn("$folder.DeleteTask($TaskName, 0)", source)
 
     def test_task_registration_is_fail_fast_and_has_exact_postconditions(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
-        register = source.index("$registeredTask = Register-S4UImportTask")
+        register = source.index("$registeredTask = Register-PasswordImportTask")
         marked_registered = source.index("$registered = $true", register)
         postcondition = source.index("Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop", marked_registered)
         start = source.index("Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop", postcondition)
         self.assertLess(register, marked_registered)
         self.assertLess(marked_registered, postcondition)
         self.assertLess(postcondition, start)
-        self.assertIn('Principal.LogonType -ne "S4U"', source)
+        self.assertIn('Principal.LogonType -ne "Password"', source)
         self.assertIn('Principal.RunLevel -ne "Limited"', source)
         self.assertIn("Principal.UserId", source)
+
+    def test_password_material_is_random_memory_only_and_bstr_is_zeroed(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("function New-CryptographicAccountPassword", source)
+        self.assertIn("RandomNumberGenerator", source)
+        self.assertIn("New-Object byte[] 48", source)
+        self.assertIn("SecureStringToBSTR", source)
+        self.assertIn("ZeroFreeBSTR", source)
+        self.assertIn("Set-LocalUser -Name $account.Name -Password $temporaryPassword", source)
+        self.assertNotIn("Read-Host", source)
+        self.assertNotIn("Export-Clixml", source)
+
+    def test_finally_rotates_again_before_task_cleanup_and_reports_only_safe_evidence(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        finally_block = source[source.index("finally {", source.index("$completionEvidence = $null")) :]
+        rotate = finally_block.index("Set-LocalUser -Name $account.Name -Password $finalPassword")
+        delete = finally_block.index("$folder.DeleteTask($TaskName, 0)")
+        self.assertLess(rotate, delete)
+        self.assertIn("stored_task_credential_invalidated = $finalPasswordRotated", finally_block)
+        self.assertIn("password_material_logged_or_persisted = $false", finally_block)
+        self.assertIn("Fail-closed cleanup error", finally_block)
+        self.assertIn("bounded cleanup stop", finally_block)
+
+    def test_external_wsl_import_has_an_independent_kill_timeout(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("[int]$ImportTimeoutSeconds", source)
+        self.assertIn("$process.WaitForExit($ImportTimeoutSeconds * 1000)", source)
+        self.assertIn("$process.Kill()", source)
+        self.assertIn("exceeded its $ImportTimeoutSeconds second timeout", source)
 
     def test_apply_grants_only_batch_logon_through_lsa_and_fails_on_direct_deny(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")

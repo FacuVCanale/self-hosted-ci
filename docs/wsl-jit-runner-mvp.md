@@ -44,12 +44,20 @@ Review the JSON, then bind Apply to the reported size and SID:
   -ExpectedServiceAccountSid '<exact-service-account-sid-from-plan>' `
   -AcknowledgeSourceAndExportWillBePreserved `
   -AcknowledgeImportRunsAsServiceIdentity `
-  -AcknowledgeGrantBatchLogonRight
+  -AcknowledgeGrantBatchLogonRight `
+  -AcknowledgeOneTimePasswordRotation
 ```
 
-Apply protects the export, destination and task artifacts with explicit ACLs,
-then uses the native Task Scheduler 2.0 API to run a one-time passwordless S4U
-scheduled task as the non-admin account. The account must have the local
+Apply protects the export, destination and task artifacts with explicit ACLs.
+Because the elevated operator and target local account are different
+identities, Task Scheduler requires a password-backed registration. Apply
+therefore requires a separate rotation acknowledgement, generates a
+cryptographically random password only in memory, rotates the service account,
+and registers a one-time `Password` task at LUA (`Limited`) run level. The
+plaintext exists only for the COM registration call; its source BSTR is zeroed,
+and password material is never written, logged, returned, or accepted as input.
+
+The account must have the local
 `Log on as a batch job` right and its SID must not have a direct
 `Deny log on as a batch job` assignment. Apply requires a separate acknowledgement,
 then uses the Windows LSA API to add only `SeBatchLogonRight`. It enumerates
@@ -57,6 +65,13 @@ the SID's rights before and after and continues only if the resulting set is
 exactly the original set plus that single right. It never invokes `secedit`,
 never removes or overrides a deny, and never rewrites the broader user-rights
 policy. A registration rejection is terminal and WSL is not started.
+
+In `finally`, after success or failure, the script first rotates the account to
+a second independently generated unknown password and only then deletes the
+one-time task. If task deletion fails, the stored credential is already
+invalid. Any failure to perform the final rotation or delete the task is
+reported as a fail-closed cleanup error containing only booleans, timestamps,
+and the account SID. The final password is not retained anywhere.
 That worker either imports the distro once or verifies an existing import. It
 checks the worker SID and the service identity's own HKCU WSL registration,
 including the exact distribution name, `BasePath`, and WSL version 2. The

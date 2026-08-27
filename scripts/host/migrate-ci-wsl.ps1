@@ -12,7 +12,8 @@ param(
     [switch]$Apply,
     [switch]$AcknowledgeSourceAndExportWillBePreserved,
     [switch]$AcknowledgeImportRunsAsServiceIdentity,
-    [switch]$AcknowledgeGrantBatchLogonRight
+    [switch]$AcknowledgeGrantBatchLogonRight,
+    [switch]$AcknowledgeOneTimePasswordRotation
 )
 
 $ErrorActionPreference = "Stop"
@@ -344,30 +345,49 @@ function Grant-ExactBatchLogonRight([string]$SidValue) {
     }
 }
 
-function Register-S4UImportTask(
+function New-CryptographicAccountPassword {
+    $randomBytes = New-Object byte[] 48
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($randomBytes)
+        $passwordText = "Aa1!" + [Convert]::ToBase64String($randomBytes)
+        return ConvertTo-SecureString $passwordText -AsPlainText -Force
+    }
+    finally {
+        [Array]::Clear($randomBytes, 0, $randomBytes.Length)
+        $passwordText = $null
+        $rng.Dispose()
+    }
+}
+
+function Register-PasswordImportTask(
     [string]$Name,
     [string]$UserId,
     [string]$Executable,
     [string]$Arguments,
-    [int]$ExecutionTimeoutSeconds
+    [int]$ExecutionTimeoutSeconds,
+    [Security.SecureString]$AccountPassword
 ) {
-    # Use the Task Scheduler 2.0 API directly. TASK_LOGON_S4U is the supported
-    # passwordless logon for a local account and TASK_RUNLEVEL_LUA keeps the
-    # non-admin worker token limited.
+    # Registering for a different local identity requires credentials. Keep the
+    # plaintext lifetime bounded to this COM call and zero the source BSTR.
     $taskCreateOrUpdate = 6
-    $taskLogonS4U = 2
+    $taskLogonPassword = 1
     $taskRunLevelLua = 0
     $taskActionExec = 0
     $taskInstancesIgnoreNew = 2
+    $passwordBstr = [IntPtr]::Zero
+    $passwordForCom = $null
 
     try {
+        $passwordBstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($AccountPassword)
+        $passwordForCom = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordBstr)
         $scheduler = New-Object -ComObject "Schedule.Service"
         $scheduler.Connect()
         $folder = $scheduler.GetFolder("\")
         $definition = $scheduler.NewTask(0)
         $definition.RegistrationInfo.Description = "One-time preservative self-hosted-ci WSL import"
         $definition.Principal.UserId = $UserId
-        $definition.Principal.LogonType = $taskLogonS4U
+        $definition.Principal.LogonType = $taskLogonPassword
         $definition.Principal.RunLevel = $taskRunLevelLua
         $definition.Settings.Enabled = $true
         $definition.Settings.AllowDemandStart = $true
@@ -384,8 +404,8 @@ function Register-S4UImportTask(
             $definition,
             $taskCreateOrUpdate,
             $UserId,
-            $null,
-            $taskLogonS4U,
+            $passwordForCom,
+            $taskLogonPassword,
             $null
         )
         if ($null -eq $registeredTask) {
@@ -394,9 +414,13 @@ function Register-S4UImportTask(
         return $registeredTask
     }
     catch {
-        throw "Task Scheduler rejected the local-account S4U task before WSL was started. " +
-            "Confirm this is an elevated local console and that $UserId has 'Log on as a batch job' " +
-            "and is absent from 'Deny log on as a batch job'. Original error: $($_.Exception.Message)"
+        throw "Task Scheduler rejected the one-time password task before WSL was started. Original error: $($_.Exception.Message)"
+    }
+    finally {
+        $passwordForCom = $null
+        if ($passwordBstr -ne [IntPtr]::Zero) {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordBstr)
+        }
     }
 }
 
@@ -428,13 +452,14 @@ function Write-Plan(
         acknowledgements_required_for_apply = @(
             "AcknowledgeSourceAndExportWillBePreserved",
             "AcknowledgeImportRunsAsServiceIdentity",
-            "AcknowledgeGrantBatchLogonRight"
+            "AcknowledgeGrantBatchLogonRight",
+            "AcknowledgeOneTimePasswordRotation"
         )
         operations = @(
             "protect export ACL for SYSTEM, Administrators, and read-only service identity",
             "protect destination/task ACLs for SYSTEM, Administrators, and service identity",
             "fail if the service SID has SeDenyBatchLogonRight; add only SeBatchLogonRight through LSA and verify the exact rights set",
-            "register and start a passwordless S4U task as the non-admin service identity",
+            "rotate the service account to an in-memory random password, register a one-time Password/LUA task, then rotate immediately to a second unknown random password during cleanup",
             "import or verify the exact WSL2 distro under that identity",
             "verify HKCU WSL registration, exact BasePath, version, SID, and task result",
             "remove the one-time scheduled task; preserve logs, source distro, export, and destination"
@@ -446,7 +471,7 @@ function Write-Plan(
 
 Assert-Windows
 
-foreach ($command in @("wsl.exe", "Get-LocalUser", "Get-LocalGroup", "Get-LocalGroupMember", "Get-ScheduledTask")) {
+foreach ($command in @("wsl.exe", "Get-LocalUser", "Set-LocalUser", "Get-LocalGroup", "Get-LocalGroupMember", "Get-ScheduledTask")) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         throw "Required Windows command is unavailable: $command"
     }
@@ -521,7 +546,10 @@ if (-not $AcknowledgeImportRunsAsServiceIdentity) {
     throw "Apply requires -AcknowledgeImportRunsAsServiceIdentity."
 }
 if (-not $AcknowledgeGrantBatchLogonRight) {
-    throw "Apply requires -AcknowledgeGrantBatchLogonRight because S4U needs SeBatchLogonRight."
+    throw "Apply requires -AcknowledgeGrantBatchLogonRight because password tasks need SeBatchLogonRight."
+}
+if (-not $AcknowledgeOneTimePasswordRotation) {
+    throw "Apply requires -AcknowledgeOneTimePasswordRotation for the temporary and final service-account password rotations."
 }
 if ($ExpectedExportBytes -le 0) {
     throw "Apply requires the exact non-zero -ExpectedExportBytes reported by plan mode."
@@ -567,7 +595,8 @@ param(
     [Parameter(Mandatory = $true)][string]$ExpectedSid,
     [Parameter(Mandatory = $true)][string]$ResultPath,
     [Parameter(Mandatory = $true)][string]$StdoutPath,
-    [Parameter(Mandatory = $true)][string]$StderrPath
+    [Parameter(Mandatory = $true)][string]$StderrPath,
+    [Parameter(Mandatory = $true)][int]$ImportTimeoutSeconds
 )
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -590,7 +619,13 @@ try {
         }
         $process = Start-Process -FilePath "wsl.exe" -ArgumentList @(
             "--import", $DistroName, $destination, $ExportPath, "--version", "2"
-        ) -NoNewWindow -Wait -PassThru -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
+        ) -NoNewWindow -PassThru -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
+        if (-not $process.WaitForExit($ImportTimeoutSeconds * 1000)) {
+            try { $process.Kill() } catch { }
+            $process.WaitForExit()
+            throw "wsl.exe --import exceeded its $ImportTimeoutSeconds second timeout and was terminated."
+        }
+        $process.WaitForExit()
         if ($process.ExitCode -ne 0) { throw "wsl.exe --import failed with exit code $($process.ExitCode)." }
         $operation = "imported"
         $distros = @(Get-Distros)
@@ -653,20 +688,36 @@ $quotedArguments = @(
     '-ExpectedSid', ('"{0}"' -f $serviceSid.Value),
     '-ResultPath', ('"{0}"' -f $ResultPath),
     '-StdoutPath', ('"{0}"' -f $StdoutPath),
-    '-StderrPath', ('"{0}"' -f $StderrPath)
+    '-StderrPath', ('"{0}"' -f $StderrPath),
+    '-ImportTimeoutSeconds', ([Math]::Max(30, $TimeoutSeconds - 30).ToString())
 ) -join ' '
 $registered = $false
+$temporaryPasswordApplied = $false
+$temporaryPassword = $null
+$passwordRotationStartedAt = $null
+$passwordRotationCompletedAt = $null
+$finalPasswordRotatedAt = $null
+$completionEvidence = $null
 try {
-    $registeredTask = Register-S4UImportTask `
+    $temporaryPassword = New-CryptographicAccountPassword
+    $passwordRotationStartedAt = [DateTimeOffset]::UtcNow
+    Set-LocalUser -Name $account.Name -Password $temporaryPassword -ErrorAction Stop
+    $temporaryPasswordApplied = $true
+    $passwordRotationCompletedAt = [DateTimeOffset]::UtcNow
+
+    $registeredTask = Register-PasswordImportTask `
         -Name $TaskName `
         -UserId $accountId `
         -Executable $powerShellExe `
         -Arguments $quotedArguments `
-        -ExecutionTimeoutSeconds $TimeoutSeconds
+        -ExecutionTimeoutSeconds $TimeoutSeconds `
+        -AccountPassword $temporaryPassword
     $registered = $true
+    $temporaryPassword.Dispose()
+    $temporaryPassword = $null
     $taskPostcondition = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-    if ($taskPostcondition.Principal.LogonType -ne "S4U") {
-        throw "Registered task failed the S4U logon-type postcondition."
+    if ($taskPostcondition.Principal.LogonType -ne "Password") {
+        throw "Registered task failed the Password logon-type postcondition."
     }
     if ($taskPostcondition.Principal.RunLevel -ne "Limited") {
         throw "Registered task failed the limited run-level postcondition."
@@ -688,24 +739,24 @@ try {
 
     if (-not $completed) {
         Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-        throw "Timed out waiting for S4U import task after $TimeoutSeconds seconds."
+        throw "Timed out waiting for one-time import task after $TimeoutSeconds seconds."
     }
     if ($taskInfo.LastTaskResult -ne 0) {
         $workerFailure = if (Test-Path -LiteralPath $ResultPath) { Get-Content -LiteralPath $ResultPath -Raw } else { "no result file" }
-        throw "S4U import task failed with result $($taskInfo.LastTaskResult): $workerFailure"
+        throw "One-time import task failed with result $($taskInfo.LastTaskResult): $workerFailure"
     }
     if (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) {
-        throw "S4U import task reported success without a result file."
+        throw "One-time import task reported success without a result file."
     }
     $result = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json
     if ($result.status -ne "verified" -or $result.identity_sid -ne $serviceSid.Value) {
-        throw "S4U result did not verify the expected service identity."
+        throw "Worker result did not verify the expected service identity."
     }
     if ($result.distro_name -ne $ImportedDistroName -or [int]$result.version -ne 2) {
-        throw "S4U result did not verify the expected WSL2 distro."
+        throw "Worker result did not verify the expected WSL2 distro."
     }
     if ((Get-NormalizedPath ([string]$result.base_path)) -ne (Get-NormalizedPath $DestinationPath)) {
-        throw "S4U result did not verify the exact destination path."
+        throw "Worker result did not verify the exact destination path."
     }
 
     $distrosAfter = @(Get-WslDistros)
@@ -721,7 +772,7 @@ try {
         throw "Export changed during migration; preservation invariant failed."
     }
 
-    [ordered]@{
+    $completionEvidence = [ordered]@{
         status = "complete"
         imported_distro = $ImportedDistroName
         service_account_sid = $serviceSid.Value
@@ -732,10 +783,76 @@ try {
         export_sha256 = $hashAfter
         export_bytes = $sizeAfter
         worker_result = $result
-    } | ConvertTo-Json -Depth 6
-}
-finally {
-    if ($registered -and (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
     }
 }
+finally {
+    $cleanupFailures = @()
+    $finalPasswordRotated = $false
+    $taskDeleted = $false
+    if ($temporaryPasswordApplied) {
+        $finalPassword = $null
+        try {
+            $finalPassword = New-CryptographicAccountPassword
+            Set-LocalUser -Name $account.Name -Password $finalPassword -ErrorAction Stop
+            $finalPasswordRotated = $true
+            $finalPasswordRotatedAt = [DateTimeOffset]::UtcNow
+        }
+        catch {
+            $cleanupFailures += "Final service-account password rotation failed: $($_.Exception.Message)"
+        }
+        finally {
+            if ($null -ne $finalPassword) { $finalPassword.Dispose() }
+        }
+    }
+    if ($null -ne $temporaryPassword) { $temporaryPassword.Dispose() }
+    if ($registered) {
+        try {
+            $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+            if ([string]$existingTask.State -eq "Running") {
+                Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+                $stopDeadline = (Get-Date).AddSeconds(30)
+                do {
+                    Start-Sleep -Milliseconds 500
+                    $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+                } while ([string]$existingTask.State -eq "Running" -and (Get-Date) -lt $stopDeadline)
+                if ([string]$existingTask.State -eq "Running") {
+                    throw "Task remained running after the bounded cleanup stop."
+                }
+            }
+            $scheduler = New-Object -ComObject "Schedule.Service"
+            $scheduler.Connect()
+            $folder = $scheduler.GetFolder("\")
+            $folder.DeleteTask($TaskName, 0)
+            if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+                throw "Task still exists after DeleteTask."
+            }
+            $taskDeleted = $true
+        }
+        catch {
+            $cleanupFailures += "One-time task deletion failed: $($_.Exception.Message)"
+        }
+    }
+    else {
+        $taskDeleted = $true
+    }
+
+    $passwordCleanupEvidence = [ordered]@{
+        service_account_sid = $serviceSid.Value
+        temporary_rotation_started_at = if ($null -ne $passwordRotationStartedAt) { $passwordRotationStartedAt.ToString("o") } else { $null }
+        temporary_rotation_completed = $temporaryPasswordApplied
+        temporary_rotation_completed_at = if ($null -ne $passwordRotationCompletedAt) { $passwordRotationCompletedAt.ToString("o") } else { $null }
+        final_rotation_completed = $finalPasswordRotated
+        final_rotation_completed_at = if ($null -ne $finalPasswordRotatedAt) { $finalPasswordRotatedAt.ToString("o") } else { $null }
+        one_time_task_deleted = $taskDeleted
+        stored_task_credential_invalidated = $finalPasswordRotated
+        password_material_logged_or_persisted = $false
+    }
+    if ($null -ne $completionEvidence) {
+        $completionEvidence.account_password_rotation = $passwordCleanupEvidence
+    }
+    if ($cleanupFailures.Count -ne 0) {
+        throw "Fail-closed cleanup error. Password/task evidence: $($passwordCleanupEvidence | ConvertTo-Json -Compress). Errors: $($cleanupFailures -join '; ')"
+    }
+}
+
+$completionEvidence | ConvertTo-Json -Depth 8
