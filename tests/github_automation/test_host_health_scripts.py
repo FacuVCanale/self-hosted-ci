@@ -56,6 +56,21 @@ class HostHealthScriptTests(unittest.TestCase):
                 result = subprocess.run([powershell, "-NoProfile", "-Command", command], text=True, capture_output=True)
                 self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_reader_mutation_mask_does_not_overlap_read_and_detects_write_and_modify_when_powershell_is_available(self) -> None:
+        powershell = next((name for name in ("pwsh", "powershell") if subprocess.run(["bash", "-lc", f"command -v {name}"], capture_output=True).returncode == 0), None)
+        if powershell is None:
+            self.skipTest("PowerShell is not installed")
+        command = (
+            "$r=[Security.AccessControl.FileSystemRights];"
+            "$m=$r::WriteData -bor $r::AppendData -bor $r::WriteExtendedAttributes -bor $r::WriteAttributes -bor "
+            "$r::DeleteSubdirectoriesAndFiles -bor $r::Delete -bor $r::ChangePermissions -bor $r::TakeOwnership;"
+            "if((([int]$r::ReadAndExecute)-band $m)-ne 0){exit 1};"
+            "if((([int]$r::Write)-band $m)-eq 0){exit 2};"
+            "if((([int]$r::Modify)-band $m)-eq 0){exit 3}"
+        )
+        result = subprocess.run([powershell, "-NoProfile", "-Command", command], text=True, capture_output=True)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_validator_exit_codes_are_strict(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)
         self.assertEqual((0, "healthy"), MODULE.validate(snapshot(now), SID, "Ubuntu-24.04-CI", now))
@@ -127,6 +142,11 @@ class HostHealthScriptTests(unittest.TestCase):
         source = INSTALLER.read_text(encoding="utf-8")
         for token in ("[switch]$Apply", "AcknowledgePersistentPasswordTask", "Get-DedicatedReader", "Get-LocalUser", "Test-GroupContainsSid", "New-CryptographicAccountPassword", "SecureStringToBSTR", "ZeroFreeBSTR", "TASK_LOGON_PASSWORD", "TASK_RUNLEVEL_LUA", "SetAccessRuleProtection($true, $false)", "GetOwner([Security.Principal.SecurityIdentifier])", "ACL inheritance protection is not exact", "ACL inherited-rule state is not exact", "ACL inheritance or propagation flags are not exact", "ReadAndExecute", "dedicated non-admin identity", "ForceCommand internal-sftp", "DisableForwarding yes", "effective sshd configuration is not SFTP-only", "Principal.LogonType -ne \"Password\"", "previous snapshot could not be fenced", "two distinct post-install snapshots", "SCHED_S_TASK_RUNNING", "producer.windows_sid", "WSL heartbeat timer postcondition failed"):
             self.assertIn(token, source)
+        for primitive in ("WriteData", "AppendData", "WriteExtendedAttributes", "WriteAttributes", "DeleteSubdirectoriesAndFiles", "Delete", "ChangePermissions", "TakeOwnership"):
+            self.assertIn(f"FileSystemRights]::{primitive}", source)
+        reader_check = source[source.index('if ($rule.IdentityReference.Value -eq $ReaderSid)'):source.index('elseif ($rule.FileSystemRights -ne', source.index('if ($rule.IdentityReference.Value -eq $ReaderSid)'))]
+        self.assertNotIn("FileSystemRights]::Modify", reader_check)
+        self.assertNotIn("FileSystemRights]::Write -bor", reader_check)
         self.assertLess(source.index("if (-not $Apply) { return }"), source.index("Set-LocalUser -Name $account.Name -Password $password"))
         self.assertNotIn("config.sh", source)
 

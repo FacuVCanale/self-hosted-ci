@@ -113,7 +113,17 @@ function Assert-ExactAcl(
             throw "ACL inheritance or propagation flags are not exact on $Path"
         }
         if ($rule.IdentityReference.Value -eq $ReaderSid) {
-            $forbidden = [Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Modify -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+            # Composite rights such as Modify also contain the read/execute bits,
+            # so they cannot be used as a forbidden bit mask. Check only the
+            # primitive rights that can mutate a file or directory.
+            $forbidden = [Security.AccessControl.FileSystemRights]::WriteData -bor
+                [Security.AccessControl.FileSystemRights]::AppendData -bor
+                [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+                [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+                [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+                [Security.AccessControl.FileSystemRights]::Delete -bor
+                [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                [Security.AccessControl.FileSystemRights]::TakeOwnership
             if (($rule.FileSystemRights -band $forbidden) -ne 0) { throw "reader has mutating access to health artifacts" }
             if ($rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::ReadAndExecute) { throw "reader ACL is not exactly ReadAndExecute" }
         }
