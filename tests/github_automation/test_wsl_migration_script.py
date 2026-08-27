@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import unittest
@@ -18,6 +19,8 @@ class WslMigrationScriptTests(unittest.TestCase):
         self.assertIn("no ACL, scheduled-task, WSL registration, or filesystem changes were made", source)
         self.assertIn("[switch]$AcknowledgeSourceAndExportWillBePreserved", source)
         self.assertIn("[switch]$AcknowledgeImportRunsAsServiceIdentity", source)
+        self.assertIn("[switch]$AcknowledgeGrantBatchLogonRight", source)
+        self.assertIn("Apply requires -AcknowledgeGrantBatchLogonRight", source)
         self.assertIn("Apply requires the exact non-zero -ExpectedExportBytes", source)
         self.assertIn("Apply requires -ExpectedServiceAccountSid", source)
 
@@ -72,6 +75,24 @@ class WslMigrationScriptTests(unittest.TestCase):
         self.assertIn('Principal.LogonType -ne "S4U"', source)
         self.assertIn('Principal.RunLevel -ne "Limited"', source)
         self.assertIn("Principal.UserId", source)
+
+    def test_apply_grants_only_batch_logon_through_lsa_and_fails_on_direct_deny(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("function Grant-ExactBatchLogonRight", source)
+        self.assertIn('private static extern uint LsaAddAccountRights(', source)
+        self.assertIn('private static extern uint LsaEnumerateAccountRights(', source)
+        self.assertIn('$batchRight = "SeBatchLogonRight"', source)
+        self.assertIn('$denyRight = "SeDenyBatchLogonRight"', source)
+        self.assertIn("refusing to weaken or override a deny assignment", source)
+        self.assertIn("Compare-Object -ReferenceObject $expectedAfter -DifferenceObject $after", source)
+        self.assertIn("changed beyond the single authorized SeBatchLogonRight addition", source)
+        self.assertIn("$batchLogonEvidence = Grant-ExactBatchLogonRight $serviceSid.Value", source)
+
+    def test_script_does_not_use_broad_security_policy_tools_or_remove_rights(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8").lower()
+        self.assertNotIn("secedit", source)
+        self.assertIsNone(re.search(r"(?im)^\s*(?:&\s*)?ntrights(?:\.exe)?\b", source))
+        self.assertNotIn("lsaremoveaccountrights", source)
 
     def test_script_contains_no_source_or_export_deletion_path(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")

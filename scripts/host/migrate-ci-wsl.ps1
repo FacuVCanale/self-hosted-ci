@@ -11,7 +11,8 @@ param(
     [int]$TimeoutSeconds = 900,
     [switch]$Apply,
     [switch]$AcknowledgeSourceAndExportWillBePreserved,
-    [switch]$AcknowledgeImportRunsAsServiceIdentity
+    [switch]$AcknowledgeImportRunsAsServiceIdentity,
+    [switch]$AcknowledgeGrantBatchLogonRight
 )
 
 $ErrorActionPreference = "Stop"
@@ -142,6 +143,207 @@ function Assert-ProtectedAcl([string]$LiteralPath, [string[]]$AllowedSidValues) 
     }
 }
 
+function Initialize-LsaRightsApi {
+    if ("SelfHostedCi.LsaRights" -as [type]) {
+        return
+    }
+
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+
+namespace SelfHostedCi
+{
+    public static class LsaRights
+    {
+        private const uint POLICY_CREATE_ACCOUNT = 0x00000010;
+        private const uint POLICY_LOOKUP_NAMES = 0x00000800;
+        private const uint STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LSA_OBJECT_ATTRIBUTES
+        {
+            public uint Length;
+            public IntPtr RootDirectory;
+            public IntPtr ObjectName;
+            public uint Attributes;
+            public IntPtr SecurityDescriptor;
+            public IntPtr SecurityQualityOfService;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LSA_UNICODE_STRING
+        {
+            public ushort Length;
+            public ushort MaximumLength;
+            public IntPtr Buffer;
+        }
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern uint LsaOpenPolicy(
+            IntPtr SystemName,
+            ref LSA_OBJECT_ATTRIBUTES ObjectAttributes,
+            uint DesiredAccess,
+            out IntPtr PolicyHandle);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaEnumerateAccountRights(
+            IntPtr PolicyHandle,
+            IntPtr AccountSid,
+            out IntPtr UserRights,
+            out uint CountOfRights);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaAddAccountRights(
+            IntPtr PolicyHandle,
+            IntPtr AccountSid,
+            [In] LSA_UNICODE_STRING[] UserRights,
+            uint CountOfRights);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaNtStatusToWinError(uint Status);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaFreeMemory(IntPtr Buffer);
+
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaClose(IntPtr ObjectHandle);
+
+        private static IntPtr OpenPolicy()
+        {
+            LSA_OBJECT_ATTRIBUTES attributes = new LSA_OBJECT_ATTRIBUTES();
+            attributes.Length = (uint)Marshal.SizeOf(typeof(LSA_OBJECT_ATTRIBUTES));
+            IntPtr handle;
+            uint status = LsaOpenPolicy(
+                IntPtr.Zero,
+                ref attributes,
+                POLICY_LOOKUP_NAMES | POLICY_CREATE_ACCOUNT,
+                out handle);
+            ThrowOnLsaError(status, "LsaOpenPolicy");
+            return handle;
+        }
+
+        private static IntPtr CopySid(string sidValue)
+        {
+            SecurityIdentifier sid = new SecurityIdentifier(sidValue);
+            byte[] bytes = new byte[sid.BinaryLength];
+            sid.GetBinaryForm(bytes, 0);
+            IntPtr pointer = Marshal.AllocHGlobal(bytes.Length);
+            Marshal.Copy(bytes, 0, pointer, bytes.Length);
+            return pointer;
+        }
+
+        private static void ThrowOnLsaError(uint status, string operation)
+        {
+            if (status == 0) return;
+            int win32 = unchecked((int)LsaNtStatusToWinError(status));
+            throw new Win32Exception(win32, operation + " failed");
+        }
+
+        public static string[] GetAccountRights(string sidValue)
+        {
+            IntPtr policy = IntPtr.Zero;
+            IntPtr sid = IntPtr.Zero;
+            IntPtr rightsBuffer = IntPtr.Zero;
+            try
+            {
+                policy = OpenPolicy();
+                sid = CopySid(sidValue);
+                uint count;
+                uint status = LsaEnumerateAccountRights(policy, sid, out rightsBuffer, out count);
+                if (status == STATUS_OBJECT_NAME_NOT_FOUND) return new string[0];
+                ThrowOnLsaError(status, "LsaEnumerateAccountRights");
+
+                List<string> rights = new List<string>();
+                int itemSize = Marshal.SizeOf(typeof(LSA_UNICODE_STRING));
+                for (uint index = 0; index < count; index++)
+                {
+                    IntPtr item = new IntPtr(rightsBuffer.ToInt64() + ((long)index * itemSize));
+                    LSA_UNICODE_STRING value = (LSA_UNICODE_STRING)Marshal.PtrToStructure(
+                        item, typeof(LSA_UNICODE_STRING));
+                    string right = Marshal.PtrToStringUni(value.Buffer, value.Length / 2);
+                    if (!String.IsNullOrEmpty(right)) rights.Add(right);
+                }
+                return rights.ToArray();
+            }
+            finally
+            {
+                if (rightsBuffer != IntPtr.Zero) LsaFreeMemory(rightsBuffer);
+                if (sid != IntPtr.Zero) Marshal.FreeHGlobal(sid);
+                if (policy != IntPtr.Zero) LsaClose(policy);
+            }
+        }
+
+        public static void AddAccountRight(string sidValue, string rightName)
+        {
+            IntPtr policy = IntPtr.Zero;
+            IntPtr sid = IntPtr.Zero;
+            IntPtr rightBuffer = IntPtr.Zero;
+            try
+            {
+                policy = OpenPolicy();
+                sid = CopySid(sidValue);
+                rightBuffer = Marshal.StringToHGlobalUni(rightName);
+                LSA_UNICODE_STRING right = new LSA_UNICODE_STRING();
+                right.Buffer = rightBuffer;
+                right.Length = checked((ushort)(rightName.Length * 2));
+                right.MaximumLength = checked((ushort)((rightName.Length + 1) * 2));
+                ThrowOnLsaError(
+                    LsaAddAccountRights(policy, sid, new LSA_UNICODE_STRING[] { right }, 1),
+                    "LsaAddAccountRights");
+            }
+            finally
+            {
+                if (rightBuffer != IntPtr.Zero) Marshal.FreeHGlobal(rightBuffer);
+                if (sid != IntPtr.Zero) Marshal.FreeHGlobal(sid);
+                if (policy != IntPtr.Zero) LsaClose(policy);
+            }
+        }
+    }
+}
+'@
+}
+
+function Grant-ExactBatchLogonRight([string]$SidValue) {
+    Initialize-LsaRightsApi
+    $batchRight = "SeBatchLogonRight"
+    $denyRight = "SeDenyBatchLogonRight"
+    $before = @([SelfHostedCi.LsaRights]::GetAccountRights($SidValue) | Sort-Object -Unique)
+    if ($before -contains $denyRight) {
+        throw "Service-account SID $SidValue has SeDenyBatchLogonRight; refusing to weaken or override a deny assignment."
+    }
+
+    $wasAssigned = $before -contains $batchRight
+    if (-not $wasAssigned) {
+        [SelfHostedCi.LsaRights]::AddAccountRight($SidValue, $batchRight)
+    }
+
+    $after = @([SelfHostedCi.LsaRights]::GetAccountRights($SidValue) | Sort-Object -Unique)
+    if ($after -contains $denyRight) {
+        throw "Service-account SID acquired SeDenyBatchLogonRight during Apply; refusing to continue."
+    }
+    if ($after -notcontains $batchRight) {
+        throw "LSA did not persist SeBatchLogonRight for service-account SID $SidValue."
+    }
+    $expectedAfter = @($before + $batchRight | Sort-Object -Unique)
+    $difference = @(Compare-Object -ReferenceObject $expectedAfter -DifferenceObject $after)
+    if ($difference.Count -ne 0) {
+        throw "LSA rights changed beyond the single authorized SeBatchLogonRight addition; refusing to continue."
+    }
+
+    return [ordered]@{
+        sid = $SidValue
+        right = $batchRight
+        already_assigned = $wasAssigned
+        rights_before = $before
+        rights_after = $after
+        exact_addition_verified = $true
+    }
+}
+
 function Register-S4UImportTask(
     [string]$Name,
     [string]$UserId,
@@ -223,9 +425,15 @@ function Write-Plan(
         available_free_bytes = $AvailableFreeBytes
         task_name = $TaskName
         task_log_directory = $TaskRoot
+        acknowledgements_required_for_apply = @(
+            "AcknowledgeSourceAndExportWillBePreserved",
+            "AcknowledgeImportRunsAsServiceIdentity",
+            "AcknowledgeGrantBatchLogonRight"
+        )
         operations = @(
             "protect export ACL for SYSTEM, Administrators, and read-only service identity",
             "protect destination/task ACLs for SYSTEM, Administrators, and service identity",
+            "fail if the service SID has SeDenyBatchLogonRight; add only SeBatchLogonRight through LSA and verify the exact rights set",
             "register and start a passwordless S4U task as the non-admin service identity",
             "import or verify the exact WSL2 distro under that identity",
             "verify HKCU WSL registration, exact BasePath, version, SID, and task result",
@@ -312,6 +520,9 @@ if (-not $AcknowledgeSourceAndExportWillBePreserved) {
 if (-not $AcknowledgeImportRunsAsServiceIdentity) {
     throw "Apply requires -AcknowledgeImportRunsAsServiceIdentity."
 }
+if (-not $AcknowledgeGrantBatchLogonRight) {
+    throw "Apply requires -AcknowledgeGrantBatchLogonRight because S4U needs SeBatchLogonRight."
+}
 if ($ExpectedExportBytes -le 0) {
     throw "Apply requires the exact non-zero -ExpectedExportBytes reported by plan mode."
 }
@@ -325,6 +536,7 @@ if ($account.SID.Value -ne $ExpectedServiceAccountSid) {
 $serviceSid = [Security.Principal.SecurityIdentifier]::new($account.SID.Value)
 $allowedSids = @("S-1-5-18", "S-1-5-32-544", $serviceSid.Value)
 $destinationExisted = Test-Path -LiteralPath $DestinationPath -PathType Container
+$batchLogonEvidence = Grant-ExactBatchLogonRight $serviceSid.Value
 
 foreach ($directory in @($DestinationPath, $TaskRoot)) {
     if (Test-Path -LiteralPath $directory) {
@@ -513,6 +725,7 @@ try {
         status = "complete"
         imported_distro = $ImportedDistroName
         service_account_sid = $serviceSid.Value
+        batch_logon_right = $batchLogonEvidence
         destination_path = $DestinationPath
         source_distro_preserved = $true
         export_preserved = $true
