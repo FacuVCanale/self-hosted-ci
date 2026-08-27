@@ -1,0 +1,12 @@
+[Unit]
+Description=Schedule self-hosted-ci WSL health heartbeat
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Persistent=true
+Unit=self-hosted-ci-health-heartbeat.service
+
+[Install]
+WantedBy=timers.target

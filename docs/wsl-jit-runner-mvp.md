@@ -83,19 +83,81 @@ Any identity, path, ACL, hash, size, disk, task, registry, or preservation
 mismatch stops the migration. Re-running Apply is idempotent only when the
 existing service-account registration points to the exact pinned destination.
 
-## Read-only health from macOS
+## Local health supervisor and read-only macOS watchdog
 
 The dedicated runtime distro is `Ubuntu-24.04-CI`. The only canonical runner
 labels are `linux`, `self-hosted`, `wsl-jit`, and `x64` (sorted in signed
 allocations). The personal `Ubuntu-24.04` distro is migration source material,
 not a CI target.
 
-From the Mac, the health wrapper streams the checked-in PowerShell probe over
-SSH stdin to `powershell.exe -Command -`. Windows PowerShell 5.1 consumes stdin
-one command at a time, so the wrapper Base64-encodes the UTF-8 probe locally,
-appends it to an in-memory PowerShell variable in bounded 2048-character
-chunks, then decodes and invokes it. It does not install the probe, place it on
-the Windows command line, write it to disk, or change the Windows host:
+The Windows supervisor is a persistent Scheduled Task running as
+`selfhosted-ci-svc`, with `TASK_LOGON_PASSWORD`, LUA/Limited run level, a boot
+trigger, bounded restart policy, and no administrative identity. Its installer
+is plan-only unless all password-task, account-rotation, and protected-ACL
+acknowledgements are supplied. It generates the account password
+cryptographically in memory, exposes plaintext only to the Task Scheduler COM
+registration call, zeroes the BSTR, and never logs or returns password
+material. Unlike the one-time migration task, this password remains current so
+the persistent task can restart; only Task Scheduler retains its protected
+credential. Uninstall deletes the task first and then rotates the account to a
+new unknown random password, invalidating that stored credential before it
+removes the exact health/control artifacts.
+
+Inside WSL, `self-hosted-ci-health-heartbeat.timer` invokes a sandboxed oneshot
+every 30 seconds. The writer fsyncs a mode-0600 temporary file and atomically
+replaces `/var/lib/self-hosted-ci/health/heartbeat.json`. The Windows supervisor
+invokes the installed read-only collector as the service identity, binds the
+result to that exact Windows SID and distro, and atomically replaces
+`C:\ProgramData\self-hosted-ci\health\current.json`. Probe failures still
+publish a short-lived, explicitly ineligible snapshot; they never preserve a
+previous healthy decision.
+
+The Windows health directory has protected ACL inheritance: SYSTEM,
+Administrators, and the service SID have full control; one explicit watchdog
+identity has read/execute only. The control directory excludes that reader.
+The Mac wrapper does not execute a remote shell command. It downloads exactly
+the fixed snapshot path with one batch-mode SFTP `get`, then performs strict
+local schema, SID, distro, timestamp, label, heartbeat, and eligibility
+validation:
+
+Plan the Windows installation from an elevated local console. `ReaderAccount`
+must already be a dedicated non-admin account with its SSH public key
+configured; administrator and service identities are rejected. Apply also
+requires the WSL health collector and timer previously installed through the
+verified `provision-wsl-jit-contract.sh` Apply path; a missing collector, stale
+heartbeat, inactive timer, or probe error rolls back the Windows task and
+invalidates its credential:
+
+```powershell
+.\scripts\host\install-health-supervisor.ps1 `
+  -ExpectedServiceAccountSid 'S-1-5-21-...' `
+  -ReaderAccount 'DESKTOP-NAME\selfhosted-ci-health'
+```
+
+The explicit Apply form requires all three acknowledgements:
+
+```powershell
+.\scripts\host\install-health-supervisor.ps1 `
+  -ExpectedServiceAccountSid 'S-1-5-21-...' `
+  -ReaderAccount 'DESKTOP-NAME\selfhosted-ci-health' `
+  -Apply `
+  -AcknowledgePersistentPasswordTask `
+  -AcknowledgeServiceAccountPasswordRotation `
+  -AcknowledgeProtectedHealthAcls
+```
+
+Removal is independently plan-only. Apply deletes the exact task, rotates the
+service account to invalidate its stored credential, and then removes only the
+health/control artifacts:
+
+```powershell
+.\scripts\host\uninstall-health-supervisor.ps1 `
+  -ExpectedServiceAccountSid 'S-1-5-21-...' `
+  -Apply `
+  -AcknowledgeTaskRemoval `
+  -AcknowledgeFinalPasswordRotation `
+  -AcknowledgeHealthArtifactRemoval
+```
 
 ```bash
 scripts/host/check-self-hosted-ci-health.sh \
@@ -103,24 +165,16 @@ scripts/host/check-self-hosted-ci-health.sh \
   --service-account-sid 'S-1-5-21-...'
 ```
 
-The command emits one stable JSON document. It reports SSH reachability,
-Windows service state, the dedicated distro, the runner installation and
-registration state, required systemd units, the workload heartbeat, and
-fail-closed local-CI eligibility. It never registers a runner, starts a
-service, creates a scheduled task, or writes a heartbeat.
+Exit codes are stable: `0` healthy and locally eligible; `1` transport/tool
+failure; `2` invalid invocation; `3` valid fresh snapshot but local CI is
+ineligible; `4` expired snapshot; `5` malformed, crossed-identity, future-dated,
+or internally inconsistent snapshot. SFTP, the validator, supervisor, and
+heartbeat never register a runner or contact GitHub. The Windows installer is
+the only mutating entry point and is not invoked by the checker.
 
-WSL registrations are scoped to a Windows user. Consequently, a probe reached
-through the personal Windows account normally reports the dedicated distro as
-`not_observable`, even when that distro exists under `selfhosted-ci-svc`. This
-is an expected fail-closed result, not permission to infer health from the old
-migration evidence. A future read-only probe endpoint running as the service
-identity may expose the same command; until then, the Mac check proves only
-that Windows and SSH answer.
-
-The workload heartbeat is the mtime of
-`/var/lib/self-hosted-ci/health/heartbeat`. Its producer belongs to the future
-coordinator/runtime and is deliberately absent from this inert layer. Missing,
-stale, or unobservable heartbeat state blocks `eligible_for_local_ci`.
+Checked-in source remains inert. Installing the heartbeat package and Windows
+task requires separate explicit Apply operations; no task, service, runner, or
+repository is activated merely by cloning this repository.
 
 ## Allocation protocol
 

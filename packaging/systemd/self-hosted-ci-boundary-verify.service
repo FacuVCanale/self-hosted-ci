@@ -4,6 +4,7 @@ Before=self-hosted-ci-garm.service
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
 User=root
 Group=root
 ExecStart=/usr/local/lib/self-hosted-ci/verify-wsl-jit-readiness.py --evidence /etc/self-hosted-ci/runner-boundary-v2.json --measurement-root /etc/self-hosted-ci/host-evidence --reviewer-public-key /etc/self-hosted-ci/boundary-reviewer-public-key.pem --pinned-fingerprint-file /etc/self-hosted-ci/boundary-reviewer-key.sha256

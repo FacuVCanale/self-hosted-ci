@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly EXPECTED_DISTRO="self-hosted-ci"
+readonly EXPECTED_DISTRO="Ubuntu-24.04-CI"
 readonly TARGET_ROOT="/etc/self-hosted-ci"
 readonly STATE_ROOT="/var/lib/self-hosted-ci"
 readonly SERVICE_NAME="self-hosted-ci-garm.service"
@@ -73,9 +73,12 @@ systemctl is-enabled --quiet "${SERVICE_NAME}" && die "${SERVICE_NAME} must be d
 
 install -d -o root -g root -m 0750 "${TARGET_ROOT}" "${TARGET_ROOT}/garm" "${TARGET_ROOT}/incus"
 install -d -o root -g root -m 0700 "${STATE_ROOT}"
+install -d -o root -g root -m 0700 "${STATE_ROOT}/health"
 install -d -o root -g root -m 0755 "/usr/local/lib/self-hosted-ci/github_automation"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/verify-wsl-jit-readiness.py" "/usr/local/lib/self-hosted-ci/verify-wsl-jit-readiness.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/collect-wsl-jit-measurements.py" "/usr/local/lib/self-hosted-ci/collect-wsl-jit-measurements.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/collect-health-snapshot.py" "/usr/local/lib/self-hosted-ci/collect-health-snapshot.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/update-health-heartbeat.py" "/usr/local/lib/self-hosted-ci/update-health-heartbeat.py"
 for module in __init__.py crypto.py host_security.py runner_boundary.py; do
   install -o root -g root -m 0644 "${repo_root}/github_automation/${module}" "/usr/local/lib/self-hosted-ci/github_automation/${module}"
 done
@@ -88,7 +91,10 @@ install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-b
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-garm.service" "/etc/systemd/system/${SERVICE_NAME}"
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-network-policy.service" "/etc/systemd/system/self-hosted-ci-network-policy.service"
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-egress-proxy.service" "/etc/systemd/system/self-hosted-ci-egress-proxy.service"
+install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-health-heartbeat.service" "/etc/systemd/system/self-hosted-ci-health-heartbeat.service"
+install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-health-heartbeat.timer" "/etc/systemd/system/self-hosted-ci-health-heartbeat.timer"
 systemctl daemon-reload
+systemctl enable --now self-hosted-ci-health-heartbeat.timer
 systemctl disable "${SERVICE_NAME}" >/dev/null 2>&1 || true
 rm -f "${TARGET_ROOT}/ACTIVATION_APPROVED"
 printf 'Contract templates installed. %s remains disabled; no runner was registered.\n' "${SERVICE_NAME}"
