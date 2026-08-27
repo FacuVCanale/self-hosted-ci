@@ -10,6 +10,9 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 PLACEHOLDER_SHA = "0" * 40
 ACTION_REF = re.compile(r"uses:\s+FacuVCanale/self-hosted-ci/(actions/[a-z0-9-]+)@([0-9a-f]{40})")
+WORKFLOW_REF = re.compile(
+    r"uses:\s+FacuVCanale/self-hosted-ci/(\.github/workflows/thermonuclear-review\.yml)@([0-9a-f]{40})"
+)
 
 
 def main() -> int:
@@ -29,21 +32,26 @@ def main() -> int:
                 errors.append(f"{path.relative_to(ROOT)} references missing {action}")
             if sha != PLACEHOLDER_SHA:
                 errors.append(f"{path.relative_to(ROOT)} source template must retain the render placeholder")
-    expected_actions = {"actions/ci-control", "actions/thermonuclear-review"}
-    if {action for action, _ in references} != expected_actions:
-        errors.append("workflow templates do not reference both public Actions")
-    if len(references) != 7:
-        errors.append(f"expected 7 pinned Action call sites, found {len(references)}")
+    if {action for action, _ in references} != {"actions/ci-control"}:
+        errors.append("CI workflow templates do not reference the public control Action exactly")
+    if len(references) != 6:
+        errors.append(f"expected 6 pinned control Action call sites, found {len(references)}")
     for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
         if PLACEHOLDER_SHA in path.read_text(encoding="utf-8"):
             errors.append(f"active workflow contains an unresolved SHA: {path.relative_to(ROOT)}")
     reviewer = (ROOT / "actions/thermonuclear-review/action.yml").read_text(encoding="utf-8")
     example = (ROOT / "examples/workflows/thermonuclear-review.yml").read_text(encoding="utf-8")
+    hosted = (ROOT / ".github/workflows/thermonuclear-review.yml").read_text(encoding="utf-8")
+    workflow_refs = WORKFLOW_REF.findall(example)
+    if workflow_refs != [(".github/workflows/thermonuclear-review.yml", PLACEHOLDER_SHA)]:
+        errors.append("thermonuclear example must pin exactly one reusable-workflow placeholder")
     for forbidden in ("pull-requests: write", "checks: write", "issues: write"):
         if forbidden in example:
             errors.append(f"thermonuclear bootstrap unexpectedly grants {forbidden}")
-    if 'default: "false"' not in reviewer or "THERMONUCLEAR_REVIEWER_ENABLED == 'true'" not in example:
+    if 'default: "false"' not in reviewer or "THERMONUCLEAR_REVIEWER_ENABLED == 'true'" not in hosted:
         errors.append("thermonuclear activation is not double-gated")
+    if "actions/checkout" in hosted or "job.workflow_sha" not in hosted or "job.workflow_repository" not in hosted:
+        errors.append("thermonuclear reusable workflow does not load its exact trusted source")
     if errors:
         raise SystemExit("\n".join(errors))
     print("public distribution boundaries: ok")

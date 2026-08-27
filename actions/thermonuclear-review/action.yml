@@ -1,28 +1,64 @@
-name: Thermonuclear PR review policy
-description: Expose the pinned informational review policy without executing PR code or a model provider.
+name: Thermonuclear PR review
+description: Run an informational, API-only maintainability review using a dedicated GitHub App.
 inputs:
-  mode:
-    description: Only informational is supported.
-    required: false
-    default: informational
-  activation-approved:
-    description: Must remain false until a separately reviewed provider adapter exists.
+  enabled:
+    description: Explicit opt-in. False performs no authenticated or model operation.
     required: false
     default: "false"
+  repository:
+    description: Exact owner/name repository selected for the App installation.
+    required: true
+  pr-number:
+    description: Pull request number from the trusted event envelope.
+    required: true
+  base-sha:
+    description: Expected canonical base SHA used for fencing.
+    required: true
+  head-sha:
+    description: Expected canonical head SHA used for fencing.
+    required: true
+  app-id:
+    description: Dedicated Thermonuclear GitHub App id.
+    required: true
+  expected-app-id:
+    description: Independently configured exact App id required to own the comment.
+    required: true
+  installation-id:
+    description: Selected-repository installation id for the dedicated App.
+    required: true
+  app-private-key:
+    description: PKCS#8 private key for the dedicated App.
+    required: true
+  openai-api-key:
+    description: Project-scoped OpenAI API key with an operator-enforced monthly budget.
+    required: true
+  model:
+    description: Exact supported model; other values fail closed.
+    required: false
+    default: gpt-5.6-terra
 outputs:
   status:
-    description: Current reviewer activation status.
-    value: ${{ steps.policy.outputs.status }}
-  policy_sha256:
-    description: SHA-256 of the bundled Thermonuclear policy.
-    value: ${{ steps.policy.outputs.policy_sha256 }}
+    description: disabled or commented.
+    value: ${{ steps.review.outputs.status }}
+  comment-id:
+    description: App-owned issue comment id when enabled.
+    value: ${{ steps.review.outputs.comment_id }}
 runs:
   using: composite
   steps:
-    - id: policy
-      name: Verify informational policy boundary
+    - id: review
+      name: Run bounded API-only informational review
       shell: bash
       env:
-        REVIEW_MODE: ${{ inputs.mode }}
-        ACTIVATION_APPROVED: ${{ inputs.activation-approved }}
+        THERMONUCLEAR_ENABLED: ${{ inputs.enabled }}
+        THERMONUCLEAR_REPOSITORY: ${{ inputs.repository }}
+        THERMONUCLEAR_PR_NUMBER: ${{ inputs.pr-number }}
+        THERMONUCLEAR_BASE_SHA: ${{ inputs.base-sha }}
+        THERMONUCLEAR_HEAD_SHA: ${{ inputs.head-sha }}
+        THERMONUCLEAR_APP_ID: ${{ inputs.app-id }}
+        THERMONUCLEAR_EXPECTED_APP_ID: ${{ inputs.expected-app-id }}
+        THERMONUCLEAR_INSTALLATION_ID: ${{ inputs.installation-id }}
+        THERMONUCLEAR_APP_PRIVATE_KEY: ${{ inputs.app-private-key }}
+        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        THERMONUCLEAR_MODEL: ${{ inputs.model }}
       run: python "$GITHUB_ACTION_PATH/run.py"

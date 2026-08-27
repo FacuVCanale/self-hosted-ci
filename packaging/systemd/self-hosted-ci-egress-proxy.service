@@ -1,0 +1,15 @@
+[Unit]
+Description=INERT template for self-hosted-ci GitHub Actions egress proxy
+Requires=self-hosted-ci-network-policy.service
+After=self-hosted-ci-network-policy.service
+Before=self-hosted-ci-garm.service
+ConditionPathExists=/etc/self-hosted-ci/ACTIVATION_APPROVED
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Fail closed until an audited host-specific proxy launcher replaces this unit.
+ExecStart=/usr/bin/false
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
