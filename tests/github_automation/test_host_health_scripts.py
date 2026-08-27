@@ -153,6 +153,12 @@ class HostHealthScriptTests(unittest.TestCase):
             "Save-FailureEvidence", "last_task_result", "task-summary.json", "Evidence: $evidence",
             "RedirectStandardInput", "RedirectStandardOutput", "RedirectStandardError",
             "recover-orphan-create-disabled", "orphan health reader authorized key is not exact",
+            "worker-context.json", "Get-ExactRegistration", "HKEY_CURRENT_USER",
+            "HKEY_USERS\\$ExpectedServiceAccountSid", "process_session_id", "user_profile_environment",
+            "exact_sid_hku_registration", "visibility_attempts", "exact_distro_visible",
+            "exact WSL distro remained invisible after bounded preflight", "AllowDemandStart",
+            "DisallowStartIfOnBatteries", "StopIfGoingOnBatteries", "TASK_INSTANCES_IGNORE_NEW",
+            "one-shot task settings postcondition failed",
         ):
             self.assertIn(token, source)
         orphan_delete = source.index('if ($orphanReaderProfile) { Remove-ExactManagedReaderProfile')
@@ -160,6 +166,14 @@ class HostHealthScriptTests(unittest.TestCase):
         self.assertLess(source.index('FailureInjection -eq "host-after-reader"'), source.index('New-Item -ItemType Directory -Path $Root'))
         evidence_save = source.index("Save-FailureEvidence $original")
         self.assertLess(evidence_save, source.index("Remove-Item -LiteralPath $Root -Recurse -Force", evidence_save))
+        context_write = source.index("[IO.File]::WriteAllText('$WorkerContextPath'")
+        visibility_failure = source.index("exact WSL distro remained invisible after bounded preflight")
+        payload_start = source.index("`$psi = [Diagnostics.ProcessStartInfo]::new()")
+        self.assertLess(context_write, visibility_failure)
+        self.assertLess(visibility_failure, payload_start)
+        self.assertIn("for (`$attempt = 1; `$attempt -le 10; `$attempt++)", source)
+        self.assertIn("if (`$attempt -lt 10) { Start-Sleep -Seconds 2 }", source)
+        self.assertNotIn("--import-in-place", source)
         profile_cleanup = source.index("function Remove-ExactManagedReaderProfile")
         self.assertLess(source.index("Set-Acl -LiteralPath $entry[0]", profile_cleanup), source.index("Remove-Item -LiteralPath $Profile -Recurse -Force", profile_cleanup))
         for token in ('health bootstrap staging root is not canonical', 'Assert-NoReparsePath "C:\\ProgramData"', 'Assert-NoReparsePath (Split-Path -Parent $Root) $true'):
