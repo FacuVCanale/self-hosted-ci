@@ -43,15 +43,20 @@ Review the JSON, then bind Apply to the reported size and SID:
   -ExpectedExportBytes <exact-export-bytes-from-plan> `
   -ExpectedServiceAccountSid '<exact-service-account-sid-from-plan>' `
   -AcknowledgeSourceAndExportWillBePreserved `
-  -AcknowledgeImportRunsAsServiceIdentity
+  -AcknowledgeImportRunsAsServiceIdentity `
+  -AcknowledgeGrantBatchLogonRight
 ```
 
 Apply protects the export, destination and task artifacts with explicit ACLs,
 then uses the native Task Scheduler 2.0 API to run a one-time passwordless S4U
 scheduled task as the non-admin account. The account must have the local
-`Log on as a batch job` right and must not be covered by
-`Deny log on as a batch job`; the script does not silently change either
-security policy. A registration rejection is terminal and WSL is not started.
+`Log on as a batch job` right and its SID must not have a direct
+`Deny log on as a batch job` assignment. Apply requires a separate acknowledgement,
+then uses the Windows LSA API to add only `SeBatchLogonRight`. It enumerates
+the SID's rights before and after and continues only if the resulting set is
+exactly the original set plus that single right. It never invokes `secedit`,
+never removes or overrides a deny, and never rewrites the broader user-rights
+policy. A registration rejection is terminal and WSL is not started.
 That worker either imports the distro once or verifies an existing import. It
 checks the worker SID and the service identity's own HKCU WSL registration,
 including the exact distribution name, `BasePath`, and WSL version 2. The
