@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 import re
 import shutil
@@ -58,7 +59,11 @@ class WslMigrationScriptTests(unittest.TestCase):
         self.assertIn("$definition.Principal.RunLevel = $taskRunLevelLua", source)
         self.assertIn("$folder.RegisterTaskDefinition(", source)
         self.assertIn("Task Scheduler rejected the one-time password task before WSL was started", source)
-        self.assertIn('"--import", $DistroName, $destination, $ExportPath, "--version", "2"', source)
+        self.assertIn(
+            '$startInfo.Arguments = "--import ${quote}${DistroName}${quote} '
+            '${quote}${destination}${quote} ${quote}${ExportPath}${quote} --version 2"',
+            source,
+        )
         self.assertIn('"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss"', source)
         self.assertIn("Worker identity SID mismatch", source)
         self.assertIn("Imported distro BasePath mismatch", source)
@@ -77,6 +82,23 @@ class WslMigrationScriptTests(unittest.TestCase):
         self.assertIn('Principal.LogonType -ne "Password"', source)
         self.assertIn('Principal.RunLevel -ne "Limited"', source)
         self.assertIn("Principal.UserId", source)
+
+    def test_completion_does_not_depend_on_truncated_task_scheduler_timestamp(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        started_at = datetime(2026, 8, 27, 12, 34, 56, 742000)
+        task_scheduler_last_run = started_at.replace(microsecond=0)
+        self.assertLess(task_scheduler_last_run, started_at)
+        self.assertNotIn("$taskInfo.LastRunTime -ge $startedAt", source)
+        self.assertIn('$completed = [string]$taskState -eq "Ready" -and', source)
+        self.assertIn("(Test-Path -LiteralPath $ResultPath -PathType Leaf)", source)
+        self.assertLess(
+            source.index("$completed = [string]$taskState"),
+            source.index("if ($taskInfo.LastTaskResult -ne 0)"),
+        )
+        self.assertLess(
+            source.index("if ($taskInfo.LastTaskResult -ne 0)"),
+            source.index("$result = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json"),
+        )
 
     def test_task_principal_identity_is_compared_semantically_by_sid(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
@@ -115,9 +137,23 @@ class WslMigrationScriptTests(unittest.TestCase):
     def test_external_wsl_import_has_an_independent_kill_timeout(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn("[int]$ImportTimeoutSeconds", source)
+        self.assertIn("New-Object System.Diagnostics.ProcessStartInfo", source)
+        self.assertIn("ReadToEndAsync()", source)
         self.assertIn("$process.WaitForExit($ImportTimeoutSeconds * 1000)", source)
         self.assertIn("$process.Kill()", source)
         self.assertIn("exceeded its $ImportTimeoutSeconds second timeout", source)
+
+    def test_import_uses_exact_distro_postcondition_when_exit_metadata_is_unavailable(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("$exitCodeAvailable = $false", source)
+        self.assertIn("$exitCode = $null", source)
+        self.assertIn("$exitCode = [int]$process.ExitCode", source)
+        self.assertIn("$importPostconditionPassed = $distros -contains $DistroName", source)
+        self.assertIn("if ($exitCodeAvailable -and $exitCode -ne 0)", source)
+        self.assertIn("if (-not $importPostconditionPassed)", source)
+        self.assertIn('"unavailable exit metadata"', source)
+        self.assertNotIn("La operación se completó correctamente", source)
+        self.assertNotIn("operation completed successfully", source.lower())
 
     def test_apply_grants_only_batch_logon_through_lsa_and_fails_on_direct_deny(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
