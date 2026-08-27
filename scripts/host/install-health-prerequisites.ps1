@@ -9,7 +9,7 @@ param(
     [switch]$Apply,
     [switch]$AcknowledgeCreateDisabledReader,
     [switch]$AcknowledgeOneTimePasswordRotation,
-    [ValidateSet("none", "worker-before-wsl", "payload-after-install", "payload-evidence-failure")][string]$FailureInjection = "none",
+    [ValidateSet("none", "host-after-reader", "worker-before-wsl", "payload-after-install", "payload-evidence-failure")][string]$FailureInjection = "none",
     [switch]$AcknowledgeFailureInjection
 )
 
@@ -20,6 +20,11 @@ $PersistentTaskName = "SelfHostedCI-Health-Supervisor"
 $Root = "C:\ProgramData\self-hosted-ci\health-bootstrap"
 $WorkerPath = Join-Path $Root "install-worker.ps1"
 $ResultPath = Join-Path $Root "install-result.json"
+$WorkerStdoutPath = Join-Path $Root "worker.stdout.log"
+$WorkerStderrPath = Join-Path $Root "worker.stderr.log"
+$WorkerErrorPath = Join-Path $Root "worker-error.json"
+$EvidenceRoot = "C:\ProgramData\self-hosted-ci\diagnostics\health-prerequisites"
+$AttemptId = [guid]::NewGuid().ToString("D")
 $PayloadTemplate = Join-Path $PSScriptRoot "install-health-wsl-payload.sh.in"
 $CollectorPath = Join-Path $PSScriptRoot "collect-health-snapshot.py"
 $WriterPath = Join-Path $PSScriptRoot "update-health-heartbeat.py"
@@ -98,6 +103,72 @@ function New-ProtectedAcl([Security.Principal.SecurityIdentifier]$ServiceSid) {
     return $acl
 }
 
+function New-AdminOnlyAcl([bool]$Directory) {
+    $acl = if ($Directory) { [Security.AccessControl.DirectorySecurity]::new() } else { [Security.AccessControl.FileSecurity]::new() }
+    $acl.SetAccessRuleProtection($true, $false)
+    $admins = [Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
+    $system = [Security.Principal.SecurityIdentifier]::new("S-1-5-18")
+    $acl.SetOwner($admins)
+    foreach ($sid in @($system, $admins)) {
+        if ($Directory) {
+            $inherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+            [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]::FullControl, $inherit, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow))
+        }
+        else { [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow)) }
+    }
+    return $acl
+}
+
+function Assert-ExactManagedReaderProfile([string]$Profile) {
+    $expected = [IO.Path]::GetFullPath("C:\Users\selfhosted-ci-health")
+    if ([IO.Path]::GetFullPath($Profile) -ne $expected) { throw "reader profile path is not canonical" }
+    Assert-NoReparsePath $Profile
+    Assert-NoReparseDescendants $Profile
+    $ssh = Join-Path $Profile ".ssh"; $key = Join-Path $ssh "authorized_keys"
+    foreach ($path in @($ssh, $key)) { if (-not (Test-Path -LiteralPath $path)) { throw "expected managed reader artifact is absent: $path" } }
+    $allowed = @([IO.Path]::GetFullPath($ssh), [IO.Path]::GetFullPath($key))
+    foreach ($item in @(Get-ChildItem -LiteralPath $Profile -Force -Recurse -ErrorAction Stop)) {
+        if ([IO.Path]::GetFullPath($item.FullName) -notin $allowed) { throw "unexpected reader profile artifact blocks rollback: $($item.FullName)" }
+    }
+}
+
+function Remove-ExactManagedReaderProfile([string]$Profile) {
+    Assert-ExactManagedReaderProfile $Profile
+    $ssh = Join-Path $Profile ".ssh"; $key = Join-Path $ssh "authorized_keys"
+    foreach ($entry in @(@($key, $false), @($ssh, $true), @($Profile, $true))) {
+        Set-Acl -LiteralPath $entry[0] -AclObject (New-AdminOnlyAcl ([bool]$entry[1]))
+    }
+    Remove-Item -LiteralPath $Profile -Recurse -Force
+    if (Test-Path -LiteralPath $Profile) { throw "reader profile remains after exact rollback" }
+}
+
+function Save-FailureEvidence([string]$OriginalMessage, [object]$Task, [object]$TaskInfo) {
+    Assert-NoReparsePath $EvidenceRoot $true
+    if (-not (Test-Path -LiteralPath $EvidenceRoot)) { [void](New-Item -ItemType Directory -Path $EvidenceRoot -Force) }
+    Set-Acl -LiteralPath $EvidenceRoot -AclObject (New-AdminOnlyAcl $true)
+    $attempt = Join-Path $EvidenceRoot $AttemptId
+    [void](New-Item -ItemType Directory -Path $attempt)
+    Set-Acl -LiteralPath $attempt -AclObject (New-AdminOnlyAcl $true)
+    foreach ($source in @($WorkerStdoutPath, $WorkerStderrPath, $WorkerErrorPath, $ResultPath)) {
+        if (Test-Path -LiteralPath $source -PathType Leaf) {
+            $destination = Join-Path $attempt ([IO.Path]::GetFileName($source))
+            Copy-Item -LiteralPath $source -Destination $destination
+            Set-Acl -LiteralPath $destination -AclObject (New-AdminOnlyAcl $false)
+        }
+    }
+    $summary = [ordered]@{
+        status = "failed"; attempt_id = $AttemptId; original_message = $OriginalMessage
+        task_state = $(if ($null -eq $Task) { $null } else { [string]$Task.State })
+        last_task_result = $(if ($null -eq $TaskInfo) { $null } else { [uint32]$TaskInfo.LastTaskResult })
+        last_run_time = $(if ($null -eq $TaskInfo) { $null } else { ([DateTimeOffset]$TaskInfo.LastRunTime).ToString("o") })
+        captured_files = @((Get-ChildItem -LiteralPath $attempt -File | Select-Object -ExpandProperty Name))
+    }
+    $summaryPath = Join-Path $attempt "task-summary.json"
+    [IO.File]::WriteAllText($summaryPath, ($summary | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
+    Set-Acl -LiteralPath $summaryPath -AclObject (New-AdminOnlyAcl $false)
+    return $attempt
+}
+
 function Set-ExactAuthorizedKey([object]$Reader, [string]$Key) {
     if ($Key -notmatch '^(ssh-ed25519|ecdsa-sha2-nistp256|sk-ssh-ed25519@openssh.com) [A-Za-z0-9+/]+={0,3}(?: [^\r\n]+)?$') { throw "authorized key must be one supported public key line" }
     $profile = Join-Path "C:\Users" $Reader.Name
@@ -164,6 +235,7 @@ $service = Get-LocalUser -Name $ServiceAccount -ErrorAction Stop
 if (-not $service.Enabled -or $service.SID.Value -ne $ExpectedServiceAccountSid) { throw "service identity mismatch" }
 Assert-NonAdmin $service "service account"
 $existingReader = Get-LocalUser -Name $ReaderAccount -ErrorAction SilentlyContinue
+$orphanReaderProfile = $false
 if ($null -ne $existingReader) {
     Assert-NonAdmin $existingReader "health reader"
     if ($existingReader.Enabled -or [string]$existingReader.Description -ne $ReaderDescription) { throw "preexisting health reader must be disabled and have exact managed provenance" }
@@ -174,10 +246,19 @@ if ($null -ne $existingReader) {
     Assert-NoReparsePath $existingKey
     if ((Get-Content -LiteralPath $existingKey -Raw).Trim() -ne $AuthorizedKey.Trim()) { throw "preexisting health reader authorized key is not exact" }
 }
+else {
+    $existingProfile = [IO.Path]::GetFullPath("C:\Users\selfhosted-ci-health")
+    if (Test-Path -LiteralPath $existingProfile) {
+        Assert-ExactManagedReaderProfile $existingProfile
+        $existingKey = Join-Path $existingProfile ".ssh\authorized_keys"
+        if ((Get-Content -LiteralPath $existingKey -Raw).Trim() -ne $AuthorizedKey.Trim()) { throw "orphan health reader authorized key is not exact" }
+        $orphanReaderProfile = $true
+    }
+}
 $payload = Render-Payload
 $payloadBytes = [Text.Encoding]::UTF8.GetBytes($payload)
 $payloadSha = ([Security.Cryptography.SHA256]::Create().ComputeHash($payloadBytes) | ForEach-Object { $_.ToString("x2") }) -join ""
-[ordered]@{ mode="plan"; apply_requested=[bool]$Apply; task_name=$TaskName; service_sid=$service.SID.Value; reader_action=$(if ($null -eq $existingReader) { "create-disabled" } else { "verify-disabled" }); distro=$DistroName; payload_sha256=$payloadSha; persistent_task_must_be_absent=$true; runner_registration="not_performed"; external_calls="not_performed" } | ConvertTo-Json -Compress
+[ordered]@{ mode="plan"; apply_requested=[bool]$Apply; task_name=$TaskName; service_sid=$service.SID.Value; reader_action=$(if ($orphanReaderProfile) { "recover-orphan-create-disabled" } elseif ($null -eq $existingReader) { "create-disabled" } else { "verify-disabled" }); distro=$DistroName; payload_sha256=$payloadSha; persistent_task_must_be_absent=$true; runner_registration="not_performed"; external_calls="not_performed" } | ConvertTo-Json -Compress
 if (-not $Apply) { return }
 if (-not $AcknowledgeCreateDisabledReader -or -not $AcknowledgeOneTimePasswordRotation) { throw "Apply requires both acknowledgements" }
 if ($FailureInjection -ne "none" -and -not $AcknowledgeFailureInjection) { throw "failure injection requires its explicit acknowledgement" }
@@ -192,6 +273,7 @@ Assert-NoReparsePath $Root $true
 $createdReader = $false; $registered = $false; $passwordApplied = $false; $password = $null
 try {
     if ($null -eq $existingReader) {
+        if ($orphanReaderProfile) { Remove-ExactManagedReaderProfile ([IO.Path]::GetFullPath("C:\Users\selfhosted-ci-health")) }
         $readerPassword = New-RandomPassword
         try { $existingReader = New-LocalUser -Name $ReaderAccount -Password $readerPassword -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -Description $ReaderDescription; $createdReader = $true }
         finally { $readerPassword.Dispose() }
@@ -199,6 +281,7 @@ try {
     Assert-NonAdmin $existingReader "health reader"
     Disable-LocalUser -Name $ReaderAccount
     Set-ExactAuthorizedKey $existingReader $AuthorizedKey
+    if ($FailureInjection -eq "host-after-reader") { throw "injected host failure after reader setup" }
     if (-not (Test-Path -LiteralPath $Root)) { [void](New-Item -ItemType Directory -Path $Root) }
     Assert-NoReparsePath $Root
     Assert-NoReparseDescendants $Root
@@ -206,14 +289,34 @@ try {
     $payloadB64 = [Convert]::ToBase64String($payloadBytes)
     $worker = @"
 `$ErrorActionPreference = 'Stop'
-`$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-if (`$sid -ne '$ExpectedServiceAccountSid') { throw 'worker service SID mismatch' }
-if ('$FailureInjection' -eq 'worker-before-wsl') { throw 'injected failure before WSL' }
-`$raw = @('$payloadB64') | & wsl.exe --distribution '$DistroName' --user root -- bash -lc "base64 --decode | bash" 2>&1
-if (`$LASTEXITCODE -ne 0) { throw "WSL health install failed: `$(`$raw -join ' ')" }
-`$document = (`$raw | Select-Object -Last 1) | ConvertFrom-Json
-if (`$document.status -ne 'installed' -or `$document.first_heartbeat -eq `$document.second_heartbeat) { throw 'WSL postcondition failed' }
-[IO.File]::WriteAllText('$ResultPath', (`$document | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new(`$false))
+try {
+    `$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    if (`$sid -ne '$ExpectedServiceAccountSid') { throw 'worker service SID mismatch' }
+    if ('$FailureInjection' -eq 'worker-before-wsl') { throw 'injected failure before WSL' }
+    `$psi = [Diagnostics.ProcessStartInfo]::new()
+    `$psi.FileName = "`$env:SystemRoot\System32\wsl.exe"
+    `$psi.Arguments = '--distribution "$DistroName" --user root -- bash -lc "base64 --decode | bash"'
+    `$psi.UseShellExecute = `$false; `$psi.CreateNoWindow = `$true
+    `$psi.RedirectStandardInput = `$true; `$psi.RedirectStandardOutput = `$true; `$psi.RedirectStandardError = `$true
+    `$process = [Diagnostics.Process]::new(); `$process.StartInfo = `$psi
+    if (-not `$process.Start()) { throw 'could not start WSL health installer' }
+    `$stdoutTask = `$process.StandardOutput.ReadToEndAsync(); `$stderrTask = `$process.StandardError.ReadToEndAsync()
+    `$process.StandardInput.WriteLine('$payloadB64'); `$process.StandardInput.Close()
+    if (-not `$process.WaitForExit(150000)) { try { `$process.Kill() } catch {}; throw 'WSL health installer timed out' }
+    `$stdout = `$stdoutTask.GetAwaiter().GetResult(); `$stderr = `$stderrTask.GetAwaiter().GetResult()
+    [IO.File]::WriteAllText('$WorkerStdoutPath', `$stdout, [Text.UTF8Encoding]::new(`$false))
+    [IO.File]::WriteAllText('$WorkerStderrPath', `$stderr, [Text.UTF8Encoding]::new(`$false))
+    if (`$process.ExitCode -ne 0) { throw "WSL health install failed with exit code `$(`$process.ExitCode)" }
+    `$last = @(`$stdout -split '[\r\n]+' | Where-Object { `$_.Trim() }) | Select-Object -Last 1
+    `$document = `$last | ConvertFrom-Json
+    if (`$document.status -ne 'installed' -or `$document.first_heartbeat -eq `$document.second_heartbeat) { throw 'WSL postcondition failed' }
+    [IO.File]::WriteAllText('$ResultPath', (`$document | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new(`$false))
+}
+catch {
+    `$failure = [ordered]@{ status='failed'; message=`$_.Exception.Message; category=[string]`$_.CategoryInfo; script_stack_trace=`$_.ScriptStackTrace }
+    [IO.File]::WriteAllText('$WorkerErrorPath', (`$failure | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new(`$false))
+    throw
+}
 "@
     [IO.File]::WriteAllText($WorkerPath, $worker, [Text.UTF8Encoding]::new($false))
     $password = New-RandomPassword; Set-LocalUser -Name $service.Name -Password $password; $passwordApplied = $true
@@ -253,6 +356,11 @@ if (`$document.status -ne 'installed' -or `$document.first_heartbeat -eq `$docum
 }
 catch {
     $original = $_.Exception.Message; $rollback = [Collections.Generic.List[string]]::new()
+    $evidencePath = $null
+    $taskSnapshot = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $taskInfoSnapshot = if ($null -eq $taskSnapshot) { $null } else { Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue }
+    try { $evidencePath = Save-FailureEvidence $original $taskSnapshot $taskInfoSnapshot }
+    catch { $rollback.Add("failure evidence preservation: $($_.Exception.Message)") }
     if ($registered -or (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
         try {
             Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -266,15 +374,16 @@ catch {
     if (Test-Path -LiteralPath $Root) { try { Assert-NoReparsePath $Root; Assert-NoReparseDescendants $Root; Remove-Item -LiteralPath $Root -Recurse -Force } catch { $rollback.Add("staging cleanup: $($_.Exception.Message)") } }
     if ($createdReader) {
         try {
-            Remove-LocalUser -Name $ReaderAccount
             $readerProfile = [IO.Path]::GetFullPath("C:\Users\selfhosted-ci-health")
-            if (Test-Path -LiteralPath $readerProfile) { Assert-NoReparsePath $readerProfile; Assert-NoReparseDescendants $readerProfile; Remove-Item -LiteralPath $readerProfile -Recurse -Force }
+            if (Test-Path -LiteralPath $readerProfile) { Remove-ExactManagedReaderProfile $readerProfile }
+            Remove-LocalUser -Name $ReaderAccount
             if ((Get-LocalUser -Name $ReaderAccount -ErrorAction SilentlyContinue) -or (Test-Path -LiteralPath $readerProfile)) { throw "reader rollback postcondition failed" }
         }
         catch { $rollback.Add("reader rollback: $($_.Exception.Message)") }
     }
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { $rollback.Add("task absence postcondition failed") }
-    if ($rollback.Count) { throw "Install failed: $original. Rollback failures: $($rollback -join '; ')" }
-    throw "Install failed and host rollback was verified: $original"
+    $evidence = if ($null -eq $evidencePath) { "unavailable" } else { $evidencePath }
+    if ($rollback.Count) { throw "Install failed: $original. Evidence: $evidence. Rollback failures: $($rollback -join '; ')" }
+    throw "Install failed and host rollback was verified: $original. Evidence: $evidence"
 }
 finally { if ($null -ne $password) { $password.Dispose() } }
