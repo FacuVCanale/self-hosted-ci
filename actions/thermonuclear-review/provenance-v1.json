@@ -1,0 +1,14 @@
+{
+  "provenance_version": 1,
+  "derivation": "clean-room policy authored locally; no upstream text copied",
+  "local_policy": {
+    "path": "actions/thermonuclear-review/policy-v1.md",
+    "policy_version": "clean-room-v1",
+    "sha256": "8c8d736972d3c962e819ab8c5e72faa5823794fd6019601e72cfa1c47766f6b5"
+  },
+  "inspiration_reference": {
+    "url": "https://github.com/cursor/plugins/blob/46756f89270d7e7dcb8c28c90fd0f957ade4ce2c/cursor-team-kit/skills/thermo-nuclear-code-quality-review/SKILL.md",
+    "repository_commit": "46756f89270d7e7dcb8c28c90fd0f957ade4ce2c",
+    "copied": false
+  }
+}

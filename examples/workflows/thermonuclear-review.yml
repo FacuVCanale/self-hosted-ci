@@ -4,22 +4,36 @@ on:
   pull_request_target:
     types: [opened, reopened, ready_for_review, synchronize]
   workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open pull request number to reconcile.
+        required: true
+        type: string
+      base_sha:
+        description: Current canonical base SHA for that pull request.
+        required: true
+        type: string
+      head_sha:
+        description: Current canonical head SHA for that pull request.
+        required: true
+        type: string
 
-# This lane is deliberately separate from ci-gate. It cannot write Checks or
-# PR comments, does not check out PR code, and has no model/provider credential.
 permissions:
   contents: read
   pull-requests: read
 
 jobs:
-  policy:
-    name: thermonuclear reviewer policy (not a merge gate)
-    if: vars.THERMONUCLEAR_REVIEWER_ENABLED == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Report blocked informational policy
-        uses: FacuVCanale/self-hosted-ci/actions/thermonuclear-review@0000000000000000000000000000000000000000
-        with:
-          mode: informational
-          activation-approved: "false"
+  review:
+    # Replace the placeholder with the immutable 40-character release SHA.
+    uses: FacuVCanale/self-hosted-ci/.github/workflows/thermonuclear-review.yml@0000000000000000000000000000000000000000
+    with:
+      app_id: ${{ vars.THERMONUCLEAR_APP_ID }}
+      expected_app_id: ${{ vars.THERMONUCLEAR_EXPECTED_APP_ID }}
+      installation_id: ${{ vars.THERMONUCLEAR_INSTALLATION_ID }}
+      repository: ${{ github.repository }}
+      pr_number: ${{ inputs.pr_number || github.event.pull_request.number }}
+      base_sha: ${{ inputs.base_sha || github.event.pull_request.base.sha }}
+      head_sha: ${{ inputs.head_sha || github.event.pull_request.head.sha }}
+    secrets:
+      THERMONUCLEAR_APP_PRIVATE_KEY: ${{ secrets.THERMONUCLEAR_APP_PRIVATE_KEY }}
+      THERMONUCLEAR_OPENAI_API_KEY: ${{ secrets.THERMONUCLEAR_OPENAI_API_KEY }}

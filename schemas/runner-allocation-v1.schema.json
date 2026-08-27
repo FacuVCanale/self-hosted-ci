@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/FacuVCanale/self-hosted-ci/schemas/runner-allocation-v1.schema.json",
+  "title": "Signed disposable runner allocation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["payload", "signer_fingerprint", "signature"],
+  "properties": {
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runner_allocation_version", "allocation_id", "repository_id", "repository", "head_sha", "workflow_ref", "runner_group", "labels", "image_fingerprint", "nonce", "issued_at", "expires_at", "max_jobs", "ephemeral"],
+      "properties": {
+        "runner_allocation_version": {"const": 1},
+        "allocation_id": {"type": "string", "format": "uuid"},
+        "repository_id": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+        "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+        "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "workflow_ref": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+@refs/heads/[A-Za-z0-9._/-]+$"},
+        "runner_group": {"const": "self-hosted-ci-jit"},
+        "labels": {"type": "array", "minItems": 4, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,63}$"}},
+        "image_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "nonce": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+        "issued_at": {"type": "string", "format": "date-time"},
+        "expires_at": {"type": "string", "format": "date-time"},
+        "max_jobs": {"const": 1},
+        "ephemeral": {"const": true}
+      }
+    },
+    "signer_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "signature": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}$"}
+  }
+}

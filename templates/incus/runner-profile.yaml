@@ -1,0 +1,19 @@
+config:
+  limits.cpu: "2"
+  limits.memory: 4GiB
+  limits.processes: "2048"
+  security.nesting: "false"
+  security.privileged: "false"
+  security.protection.delete: "false"
+description: Disposable one-job runner; destroy after every terminal outcome
+devices:
+  eth0:
+    name: eth0
+    network: ci-jit-isolated
+    type: nic
+  root:
+    path: /
+    pool: ci-jit-dedicated
+    size: 24GiB
+    type: disk
+name: self-hosted-ci-jit

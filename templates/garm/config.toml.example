@@ -1,0 +1,17 @@
+# INERT TEMPLATE. Do not rename to config.toml until runner-boundary-v2 verifies.
+[database]
+backend = "sqlite3"
+passphrase = "REPLACE_FROM_ROOT_ONLY_SECRET_STORE"
+db_file = "/var/lib/self-hosted-ci/garm/garm.db"
+
+[controller]
+webserver = "127.0.0.1"
+port = 9997
+minimum_job_age_backoff = 30
+
+[jwt_auth]
+secret = "REPLACE_FROM_ROOT_ONLY_SECRET_STORE"
+time_to_live = "5m"
+
+# Provider/pool declarations are rendered only after a pinned GARM/Incus
+# compatibility test. Never put GitHub App keys or runner tokens in this repo.

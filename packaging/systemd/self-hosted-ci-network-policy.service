@@ -1,0 +1,13 @@
+[Unit]
+Description=INERT template for self-hosted-ci default-deny network policy
+Before=self-hosted-ci-egress-proxy.service self-hosted-ci-garm.service
+ConditionPathExists=/etc/self-hosted-ci/ACTIVATION_APPROVED
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Fail closed until an audited host-specific policy loader replaces this unit.
+ExecStart=/usr/bin/false
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true

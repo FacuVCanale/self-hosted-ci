@@ -8,7 +8,7 @@
   "token_ceilings": null,
   "timeout_seconds": null,
   "retry_policy": null,
-  "size_limits": { "max_files": 100, "max_diff_bytes": 1048576, "max_changed_lines": 50000 },
+  "size_limits": { "max_files": 100, "max_diff_bytes": 400000, "max_changed_lines": 20000 },
   "oversized_pr_behavior": null,
   "secret_management": null,
   "provider_data_terms": null,

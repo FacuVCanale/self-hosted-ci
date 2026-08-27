@@ -1,0 +1,32 @@
+[Unit]
+Description=GARM control plane for disposable self-hosted-ci runners
+Requires=self-hosted-ci-boundary-verify.service incus.service self-hosted-ci-network-policy.service self-hosted-ci-egress-proxy.service
+BindsTo=self-hosted-ci-network-policy.service self-hosted-ci-egress-proxy.service
+After=self-hosted-ci-boundary-verify.service incus.service network-online.target self-hosted-ci-network-policy.service self-hosted-ci-egress-proxy.service
+ConditionPathExists=/etc/self-hosted-ci/ACTIVATION_APPROVED
+ConditionPathExists=/etc/self-hosted-ci/garm/config.toml
+
+[Service]
+Type=simple
+User=garm-manager
+Group=garm-manager
+SupplementaryGroups=incus-admin
+# Root is required to observe root-owned evidence metadata. The + prefix only
+# elevates this preflight; GARM itself remains the unprivileged service user.
+ExecStartPre=+/usr/local/lib/self-hosted-ci/verify-wsl-jit-readiness.py --evidence /etc/self-hosted-ci/runner-boundary-v2.json --measurement-root /etc/self-hosted-ci/host-evidence --reviewer-public-key /etc/self-hosted-ci/boundary-reviewer-public-key.pem --pinned-fingerprint-file /etc/self-hosted-ci/boundary-reviewer-key.sha256
+ExecStart=/usr/local/bin/garm --config /etc/self-hosted-ci/garm/config.toml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/self-hosted-ci/garm
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

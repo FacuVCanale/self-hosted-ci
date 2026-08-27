@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/FacuVCanale/self-hosted-ci/schemas/runner-boundary-v2.schema.json",
+  "title": "WSL JIT runner boundary evidence v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runner_boundary_version", "activation_requested", "components", "host_security", "network_policy", "measurements", "attestation"],
+  "properties": {
+    "runner_boundary_version": {"const": 2},
+    "activation_requested": {"type": "boolean"},
+    "components": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "artifact_digest", "evidence_refs"],
+        "properties": {
+          "id": {"enum": ["windows-account", "wsl-distro", "incus", "garm", "network-policy", "runner-image"]},
+          "status": {"enum": ["verified", "unverified", "failed"]},
+          "artifact_digest": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+          "evidence_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "host_security": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host_security_schema_version", "platform", "distro_name", "personal_distro_names", "wsl_conf", "checks", "observed_artifact_kinds", "network_policy", "runner_lifecycle_runs"],
+      "properties": {
+        "host_security_schema_version": {"const": 1},
+        "platform": {"const": "wsl2"},
+        "distro_name": {"type": "string", "minLength": 1},
+        "personal_distro_names": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "wsl_conf": {"type": "string", "minLength": 1},
+        "checks": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["id", "status", "evidence_refs", "notes"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "status": {"enum": ["pass", "fail", "unverified"]},
+              "evidence_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+              "notes": {"type": "string"}
+            }
+          }
+        },
+        "observed_artifact_kinds": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "network_policy": {
+          "type": "object", "additionalProperties": false,
+          "required": ["default_deny", "management_separated", "denied_cidrs", "denied_service_classes", "proxy_only_egress", "private_dns_fail_closed", "loaded_before_registration", "windows_reboot_verified", "wsl_reboot_verified"],
+          "properties": {
+            "default_deny": {"type": "boolean"}, "management_separated": {"type": "boolean"},
+            "denied_cidrs": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+            "denied_service_classes": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+            "proxy_only_egress": {"type": "boolean"}, "private_dns_fail_closed": {"type": "boolean"},
+            "loaded_before_registration": {"type": "boolean"}, "windows_reboot_verified": {"type": "boolean"},
+            "wsl_reboot_verified": {"type": "boolean"}
+          }
+        },
+        "runner_lifecycle_runs": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["jit", "ephemeral_registration", "jobs_started", "registration_removed", "workspace_removed", "token_removed", "container_removed", "allocation_removed", "normal_cancel_attempted_before_force", "terminal_mode", "orphan_registrations"],
+            "properties": {
+              "jit": {"type": "boolean"}, "ephemeral_registration": {"type": "boolean"},
+              "jobs_started": {"type": "integer", "minimum": 0, "maximum": 1}, "registration_removed": {"type": "boolean"},
+              "workspace_removed": {"type": "boolean"}, "token_removed": {"type": "boolean"},
+              "container_removed": {"type": "boolean"}, "allocation_removed": {"type": "boolean"},
+              "normal_cancel_attempted_before_force": {"type": "boolean"},
+              "terminal_mode": {"enum": ["success", "failure", "cancel", "timeout", "force-cancel", "reboot"]},
+              "orphan_registrations": {"type": "integer", "minimum": 0}
+            }
+          }
+        }
+      }
+    },
+    "network_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["network_policy_version", "enabled", "default_egress", "blocked_cidrs", "blocked_endpoints", "allowed_destinations", "dns_private_or_rebound_resolution", "must_load_before_runner_registration", "must_survive_reboot", "on_install_or_verification_failure"],
+      "properties": {
+        "network_policy_version": {"const": 2},
+        "enabled": {"type": "boolean"},
+        "default_egress": {"const": "deny"},
+        "blocked_cidrs": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "blocked_endpoints": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "allowed_destinations": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "dns_private_or_rebound_resolution": {"const": "deny"},
+        "must_load_before_runner_registration": {"const": true},
+        "must_survive_reboot": {"const": true},
+        "on_install_or_verification_failure": {"const": "block-local-dispatch"}
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host_measurement_version", "measurement_set_digest", "artifacts"],
+      "properties": {
+        "host_measurement_version": {"const": 1},
+        "measurement_set_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ref", "sha256", "size", "mode", "uid", "gid"],
+            "properties": {
+              "ref": {"type": "string", "minLength": 1},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "size": {"type": "integer", "minimum": 0},
+              "mode": {"type": "string", "pattern": "^[0-7]{4}$"},
+              "uid": {"type": "integer", "minimum": 0},
+              "gid": {"type": "integer", "minimum": 0}
+            }
+          }
+        }
+      }
+    },
+    "attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attestation_version", "signer_fingerprint", "signature"],
+      "properties": {
+        "attestation_version": {"const": 1},
+        "signer_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "signature": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}$"}
+      }
+    }
+  }
+}
