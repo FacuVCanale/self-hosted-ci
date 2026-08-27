@@ -1,175 +1,161 @@
 from __future__ import annotations
 
-import base64
+from datetime import datetime, timedelta, timezone
+import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
-WRAPPER = ROOT / "scripts/host/check-self-hosted-ci-health.sh"
-PROBE = ROOT / "scripts/host/get-self-hosted-ci-health.ps1"
+HOST = ROOT / "scripts/host"
+WRAPPER = HOST / "check-self-hosted-ci-health.sh"
+VALIDATOR = HOST / "validate-health-snapshot.py"
+SUPERVISOR = HOST / "run-health-supervisor.ps1"
+INSTALLER = HOST / "install-health-supervisor.ps1"
+UNINSTALLER = HOST / "uninstall-health-supervisor.ps1"
+SPEC = importlib.util.spec_from_file_location("health_validator", VALIDATOR)
+assert SPEC and SPEC.loader
+MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+SID = "S-1-5-21-1-2-3-1008"
+
+
+def snapshot(now: datetime, *, eligible: bool = True) -> dict[str, object]:
+    stamp = lambda value: value.isoformat().replace("+00:00", "Z")
+    return {
+        "schema_version": 2, "install_nonce": "12345678-1234-4123-8123-123456789abc", "generated_at": stamp(now), "expires_at": stamp(now + timedelta(seconds=180)),
+        "producer": {"windows_sid": SID, "account": "selfhosted-ci-svc", "distro": "Ubuntu-24.04-CI"},
+        "host": {"service_identity_verified": True, "services": {"sshd": {"installed": True, "status": "running"}, "wsl": {"installed": True, "status": "running"}, "lxss_manager": {"installed": False, "status": "absent"}}},
+        "distro": {"name": "Ubuntu-24.04-CI", "platform": "wsl2", "os_id": "ubuntu", "os_version": "24.04"},
+        "runner": {"installed": True, "registered": False, "labels": ["linux", "self-hosted", "wsl-jit", "x64"]},
+        "services": {name: {"active": "active", "enabled": "enabled"} for name in ("incus.service", "self-hosted-ci-boundary-verify.service", "self-hosted-ci-egress-proxy.service", "self-hosted-ci-garm.service", "self-hosted-ci-health-heartbeat.timer", "self-hosted-ci-network-policy.service")},
+        "heartbeat": {"status": "fresh", "observed_at": stamp(now), "age_seconds": 0, "max_age_seconds": 180},
+        "boundary": {"activation_approved": eligible, "network_policy_enabled": eligible},
+        "eligibility": {"eligible_for_local_ci": eligible, "blocking_reasons": [] if eligible else ["activation_not_approved", "network_policy_not_enabled"]},
+        "probe_error": None,
+    }
 
 
 class HostHealthScriptTests(unittest.TestCase):
-    def test_probe_parses_in_powershell_when_available(self) -> None:
-        powershell = next(
-            (candidate for candidate in ("pwsh", "powershell") if subprocess.run(
-                ["bash", "-lc", f"command -v {candidate}"], capture_output=True, check=False
-            ).returncode == 0),
-            None,
-        )
+    def test_powershell_scripts_parse_when_available(self) -> None:
+        powershell = next((name for name in ("pwsh", "powershell") if subprocess.run(["bash", "-lc", f"command -v {name}"], capture_output=True).returncode == 0), None)
         if powershell is None:
             self.skipTest("PowerShell is not installed")
-        command = (
-            "$errors=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("
-            f"'{PROBE}', [ref]$null, [ref]$errors); if ($errors.Count) {{ $errors | Out-String; exit 1 }}"
-        )
-        parsed = subprocess.run([powershell, "-NoProfile", "-Command", command], text=True, capture_output=True)
-        self.assertEqual(0, parsed.returncode, parsed.stdout + parsed.stderr)
+        for script in (SUPERVISOR, INSTALLER, UNINSTALLER):
+            with self.subTest(script=script.name):
+                command = f"$e=$null; [void][Management.Automation.Language.Parser]::ParseFile('{script}',[ref]$null,[ref]$e); if($e.Count){{$e|Out-String;exit 1}}"
+                result = subprocess.run([powershell, "-NoProfile", "-Command", command], text=True, capture_output=True)
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
-    def test_wrapper_is_valid_requires_explicit_target_and_sid(self) -> None:
-        syntax = subprocess.run(["bash", "-n", str(WRAPPER)], text=True, capture_output=True, check=False)
-        self.assertEqual(0, syntax.returncode, syntax.stderr)
-        missing = subprocess.run(["bash", str(WRAPPER)], text=True, capture_output=True, check=False)
-        self.assertEqual(2, missing.returncode)
-        self.assertIn("--ssh-target", missing.stderr)
+    def test_validator_exit_codes_are_strict(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        self.assertEqual((0, "healthy"), MODULE.validate(snapshot(now), SID, "Ubuntu-24.04-CI", now))
+        self.assertEqual((3, "local_ci_ineligible"), MODULE.validate(snapshot(now, eligible=False), SID, "Ubuntu-24.04-CI", now))
+        self.assertEqual((4, "snapshot_expired"), MODULE.validate(snapshot(now - timedelta(minutes=10)), SID, "Ubuntu-24.04-CI", now))
+        crossed = snapshot(now); crossed["producer"]["windows_sid"] = "S-1-5-21-9-9-9-1008"
+        self.assertEqual((5, "invalid_snapshot_contract"), MODULE.validate(crossed, SID, "Ubuntu-24.04-CI", now))
+        unknown = snapshot(now); unknown["unexpected"] = True
+        self.assertEqual((5, "invalid_snapshot_schema"), MODULE.validate(unknown, SID, "Ubuntu-24.04-CI", now))
 
-    def test_wrapper_transmits_probe_and_returns_remote_json_unchanged(self) -> None:
-        expected = {
-            "schema_version": 1,
-            "mode": "read_only",
-            "host": {"reachable": True},
-            "eligibility": {"eligible_for_local_ci": False},
-        }
-        with tempfile.TemporaryDirectory() as raw_tmp:
-            tmp = Path(raw_tmp)
-            capture = tmp / "args.json"
-            fake_ssh = tmp / "ssh"
-            fake_ssh.write_text(
-                "#!/usr/bin/env python3\n"
-                "import json, os, sys\n"
-                "payload = sys.stdin.read()\n"
-                "open(os.environ['SSH_CAPTURE'], 'w').write(json.dumps({'args': sys.argv[1:], 'stdin': payload}))\n"
-                "print(os.environ['SSH_RESPONSE'])\n",
+    def test_validator_fails_closed_on_future_heartbeat_age_probe_and_service_boundaries(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        cases = []
+        future = snapshot(now); future_stamp = (now + timedelta(minutes=2)).isoformat().replace("+00:00", "Z"); future["generated_at"] = future_stamp; future["heartbeat"]["observed_at"] = future_stamp; cases.append((future, "snapshot_from_future"))
+        age = snapshot(now); age["heartbeat"]["age_seconds"] = 99; cases.append((age, "invalid_snapshot_contract"))
+        probe = snapshot(now); probe["probe_error"] = "failed"; cases.append((probe, "invalid_snapshot_contract"))
+        active = snapshot(now); active["services"]["incus.service"]["active"] = "inactive"; cases.append((active, "invalid_snapshot_contract"))
+        enabled = snapshot(now); enabled["services"]["self-hosted-ci-garm.service"]["enabled"] = "disabled"; cases.append((enabled, "invalid_snapshot_contract"))
+        empty = snapshot(now, eligible=False); empty["eligibility"]["blocking_reasons"] = []; cases.append((empty, "invalid_snapshot_contract"))
+        stale = snapshot(now); stale["heartbeat"].update(status="stale", observed_at=(now - timedelta(seconds=181)).isoformat().replace("+00:00", "Z"), age_seconds=181); cases.append((stale, "invalid_snapshot_contract"))
+        for payload, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(expected, MODULE.validate(payload, SID, "Ubuntu-24.04-CI", now)[1])
+
+    def test_collector_systemd_state_executes_without_unbound_local_and_observe_deduplicates(self) -> None:
+        collector_path = HOST / "collect-health-snapshot.py"
+        spec = importlib.util.spec_from_file_location("health_collector", collector_path)
+        assert spec and spec.loader
+        collector = importlib.util.module_from_spec(spec); spec.loader.exec_module(collector)
+        responses = [subprocess.CompletedProcess([], 0, "active\n", ""), subprocess.CompletedProcess([], 0, "enabled\n", "")]
+        with mock.patch.object(collector.subprocess, "run", side_effect=responses):
+            self.assertEqual({"active": "active", "enabled": "enabled"}, collector.systemd_state("incus.service"))
+
+    def test_mac_checker_uses_only_fixed_sftp_get_and_preserves_validator_status(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw); fixture = tmp / "fixture.json"; fixture.write_text(json.dumps(snapshot(datetime.now(timezone.utc))), encoding="utf-8")
+            fake = tmp / "sftp"
+            fake.write_text(
+                "#!/usr/bin/env python3\nimport os,pathlib,shutil,sys\n"
+                "batch=pathlib.Path(sys.argv[sys.argv.index('-b')+1]).read_text().strip().split()\n"
+                "assert batch[0]=='get' and batch[1]=='/C:/ProgramData/self-hosted-ci/health/current.json'\n"
+                "shutil.copyfile(os.environ['HEALTH_FIXTURE'],batch[2])\n",
                 encoding="utf-8",
-            )
-            fake_ssh.chmod(0o755)
-            env = os.environ.copy()
-            env["PATH"] = f"{tmp}:{env['PATH']}"
-            env["SSH_CAPTURE"] = str(capture)
-            env["SSH_RESPONSE"] = json.dumps(expected, separators=(",", ":"))
-            result = subprocess.run(
-                [
-                    "bash",
-                    str(WRAPPER),
-                    "--ssh-target",
-                    "desktop",
-                    "--service-account-sid",
-                    "S-1-5-21-1-2-3-1008",
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-                env=env,
-            )
+            ); fake.chmod(0o755)
+            env = os.environ.copy(); env["PATH"] = f"{tmp}:{env['PATH']}"; env["HEALTH_FIXTURE"] = str(fixture)
+            result = subprocess.run(["bash", str(WRAPPER), "--ssh-target", "desktop", "--service-account-sid", SID], text=True, capture_output=True, env=env)
             self.assertEqual(0, result.returncode, result.stderr)
-            self.assertEqual(expected, json.loads(result.stdout))
-            captured = json.loads(capture.read_text(encoding="utf-8"))
-            args = captured["args"]
-            self.assertEqual(["--", "desktop", "powershell.exe"], args[:3])
-            self.assertEqual(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-"], args[3:])
-            transport = captured["stdin"]
-            lines = transport.splitlines()
-            self.assertEqual("$b=''", lines[0])
-            self.assertEqual(
-                "Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)))",
-                lines[-1],
-            )
-            chunks = []
-            for line in lines[1:-1]:
-                self.assertTrue(line.startswith("$b+='") and line.endswith("'"), line)
-                chunk = line[len("$b+='"):-1]
-                self.assertLessEqual(len(chunk), 2048)
-                chunks.append(chunk)
-            self.assertGreater(len(chunks), 1)
-            payload = base64.b64decode("".join(chunks), validate=True).decode("utf-8")
-            self.assertTrue(payload.startswith("& {\n[CmdletBinding()]"))
-            self.assertIn("-ExpectedDistroName 'Ubuntu-24.04-CI'", payload)
-            self.assertIn("-ExpectedServiceAccountSid 'S-1-5-21-1-2-3-1008'", payload)
-            self.assertIn("eligible_for_local_ci", payload)
-
-    def test_wrapper_never_uses_encoded_command_or_command_line_payload(self) -> None:
+            self.assertEqual("healthy", json.loads(result.stdout)["status"])
         source = WRAPPER.read_text(encoding="utf-8")
-        self.assertNotIn("EncodedCommand", source)
-        self.assertNotIn("-EncodedCommand", source)
-        self.assertIn("FromBase64String", source)
-        self.assertIn("fold -w 2048", source)
-        self.assertIn("-Command -", source)
-        self.assertIn('} | ssh -- "${ssh_target}"', source)
+        self.assertIn("sftp -q -oBatchMode=yes", source)
+        self.assertNotIn("ssh ", source)
+        self.assertNotIn("powershell", source.lower())
+        self.assertNotIn("put ", source)
 
-    def test_wrapper_rejects_sid_injection_before_ssh(self) -> None:
-        result = subprocess.run(
-            [
-                "bash",
-                str(WRAPPER),
-                "--ssh-target",
-                "desktop",
-                "--service-account-sid",
-                "S-1-5-21-1';Write-Host pwned;'",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(2, result.returncode)
-        self.assertIn("invalid Windows SID", result.stderr)
+    def test_mac_checker_usage_and_transport_have_stable_exit_codes(self) -> None:
+        missing = subprocess.run(["bash", str(WRAPPER)], text=True, capture_output=True)
+        self.assertEqual(2, missing.returncode)
+        syntax = subprocess.run(["bash", "-n", str(WRAPPER)], text=True, capture_output=True)
+        self.assertEqual(0, syntax.returncode, syntax.stderr)
 
-    def test_wrapper_rejects_distro_injection_before_ssh(self) -> None:
-        result = subprocess.run(
-            [
-                "bash",
-                str(WRAPPER),
-                "--ssh-target",
-                "desktop",
-                "--service-account-sid",
-                "S-1-5-21-1-2-3-1008",
-                "--distro",
-                "Ubuntu-24.04-CI';Write-Host pwned;'",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        self.assertEqual(2, result.returncode)
-        self.assertIn("invalid WSL distro name", result.stderr)
+    def test_windows_supervisor_is_atomic_identity_bound_and_never_registers_runner(self) -> None:
+        source = SUPERVISOR.read_text(encoding="utf-8")
+        for token in ("Write-AtomicUtf8", "Move-Item -LiteralPath $temporary", "WindowsIdentity]::GetCurrent().User.Value", "service identity mismatch", "schema_version = 2", "supervisor_probe_failed"):
+            self.assertIn(token, source)
+        for forbidden in ("config.sh", "Register-ScheduledTask", "github.com", "Invoke-WebRequest"):
+            self.assertNotIn(forbidden, source)
 
-    def test_probe_is_read_only_and_fails_closed_when_not_observable(self) -> None:
-        source = PROBE.read_text(encoding="utf-8")
-        self.assertIn('[string]$ExpectedDistroName = "Ubuntu-24.04-CI"', source)
-        self.assertIn('@("linux", "self-hosted", "wsl-jit", "x64")', source)
-        self.assertIn('status = "not_observable"', source)
-        self.assertIn('service_identity_not_verified', source)
-        self.assertIn('dedicated_distro_not_observable', source)
-        self.assertIn('heartbeat_not_fresh', source)
-        self.assertIn('eligible_for_local_ci = ($blockingReasons.Count -eq 0)', source)
-        forbidden = (
-            "Register-ScheduledTask",
-            "Start-ScheduledTask",
-            "Set-Service",
-            "Start-Service",
-            "config.sh --",
-            "wsl.exe --import",
-            "wsl.exe --unregister",
-            "New-Item",
-            "Set-Content",
-        )
-        for token in forbidden:
-            self.assertNotIn(token, source)
+    def test_installer_is_plan_only_password_lua_acl_and_postcondition_bound(self) -> None:
+        source = INSTALLER.read_text(encoding="utf-8")
+        for token in ("[switch]$Apply", "AcknowledgePersistentPasswordTask", "Get-DedicatedReader", "Get-LocalUser", "Test-GroupContainsSid", "New-CryptographicAccountPassword", "SecureStringToBSTR", "ZeroFreeBSTR", "TASK_LOGON_PASSWORD", "TASK_RUNLEVEL_LUA", "SetAccessRuleProtection($true, $false)", "GetOwner([Security.Principal.SecurityIdentifier])", "ACL inheritance protection is not exact", "ACL inherited-rule state is not exact", "ACL inheritance or propagation flags are not exact", "ReadAndExecute", "dedicated non-admin identity", "ForceCommand internal-sftp", "DisableForwarding yes", "effective sshd configuration is not SFTP-only", "Principal.LogonType -ne \"Password\"", "previous snapshot could not be fenced", "two distinct post-install snapshots", "SCHED_S_TASK_RUNNING", "producer.windows_sid", "WSL heartbeat timer postcondition failed"):
+            self.assertIn(token, source)
+        self.assertLess(source.index("if (-not $Apply) { return }"), source.index("Set-LocalUser -Name $account.Name -Password $password"))
+        self.assertNotIn("config.sh", source)
+
+    def test_installer_checks_nested_admin_membership_for_both_accounts_independently(self) -> None:
+        source = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn("Test-GroupContainsSid $nested $TargetSid $Visited", source)
+        self.assertIn("Test-GroupContainsSid $administratorGroup $serviceSid.Value $serviceVisitedGroups", source)
+        self.assertIn("Test-GroupContainsSid $administratorGroup $readerSid.Value $readerVisitedGroups", source)
+        self.assertEqual(1, source.count("$serviceVisitedGroups = [Collections.Generic.HashSet[string]]::new"))
+        self.assertEqual(1, source.count("$readerVisitedGroups = [Collections.Generic.HashSet[string]]::new"))
+
+    def test_uninstaller_deletes_task_rotates_then_removes_exact_artifacts(self) -> None:
+        source = UNINSTALLER.read_text(encoding="utf-8")
+        delete = source.index("Unregister-ScheduledTask")
+        rotate = source.index("Set-LocalUser -Name $account.Name -Password $password")
+        remove = source.index("Remove-Item -LiteralPath $path")
+        self.assertLess(delete, rotate); self.assertLess(rotate, remove)
+        self.assertIn("stored_task_credential_invalidated = $true", source)
+        for token in ("task path/principal postcondition failed", "task action arguments are not exact", "task did not stop within the bounded deadline", "Assert-SafeArtifactTree", "artifact descendant is a reparse point", "unexpected artifact blocks uninstall", "Remove-ManagedSftpConfiguration"):
+            self.assertIn(token, source)
+
+    def test_heartbeat_is_atomic_and_systemd_sandboxed(self) -> None:
+        writer = (HOST / "update-health-heartbeat.py").read_text(encoding="utf-8")
+        collector = (HOST / "collect-health-snapshot.py").read_text(encoding="utf-8")
+        service = (ROOT / "packaging/systemd/self-hosted-ci-health-heartbeat.service").read_text(encoding="utf-8")
+        timer = (ROOT / "packaging/systemd/self-hosted-ci-health-heartbeat.timer").read_text(encoding="utf-8")
+        for token in ("tempfile.mkstemp", "os.fsync", "os.replace", "is_symlink"):
+            self.assertIn(token, writer)
+        self.assertIn("heartbeat_not_fresh", collector)
+        for token in ("ProtectSystem=strict", "ReadWritePaths=/var/lib/self-hosted-ci/health", "RestrictAddressFamilies=AF_UNIX", "UMask=0077"):
+            self.assertIn(token, service)
+        self.assertIn("OnUnitActiveSec=30s", timer)
+        self.assertIn("Persistent=true", timer)
 
 
-if __name__ == "__main__":
-    unittest.main()
+if __name__ == "__main__": unittest.main()

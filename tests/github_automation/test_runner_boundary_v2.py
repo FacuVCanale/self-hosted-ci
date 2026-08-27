@@ -276,7 +276,8 @@ class RunnerBoundaryV2Tests(unittest.TestCase):
         self.assertIn('self-hosted-ci-network-policy.service', source)
         self.assertIn('self-hosted-ci-egress-proxy.service', source)
         self.assertIn('rm -f "${TARGET_ROOT}/ACTIVATION_APPROVED"', source)
-        self.assertNotIn("systemctl enable", source)
+        self.assertIn("systemctl enable --now self-hosted-ci-health-heartbeat.timer", source)
+        self.assertNotIn('systemctl enable --now "${SERVICE_NAME}"', source)
 
     def test_systemd_units_require_boundary_and_activation_sentinels(self) -> None:
         verifier = (ROOT / "packaging/systemd/self-hosted-ci-boundary-verify.service").read_text()

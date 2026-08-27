@@ -1,0 +1,18 @@
+[Unit]
+Description=Publish self-hosted-ci WSL health heartbeat
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/lib/self-hosted-ci/update-health-heartbeat.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/self-hosted-ci/health
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+UMask=0077
