@@ -147,7 +147,7 @@ class HostHealthScriptTests(unittest.TestCase):
 
     def test_installer_is_plan_only_password_lua_acl_and_postcondition_bound(self) -> None:
         source = INSTALLER.read_text(encoding="utf-8")
-        for token in ("[switch]$Apply", "AcknowledgePersistentPasswordTask", "Get-DedicatedReader", "Get-LocalUser", "Test-GroupContainsSid", "New-CryptographicAccountPassword", "SecureStringToBSTR", "ZeroFreeBSTR", "TASK_LOGON_PASSWORD", "TASK_RUNLEVEL_LUA", "SetAccessRuleProtection($true, $false)", "GetOwner([Security.Principal.SecurityIdentifier])", "ACL inheritance protection is not exact", "ACL inherited-rule state is not exact", "ACL inheritance or propagation flags are not exact", "ReadAndExecute", "dedicated non-admin identity", "ForceCommand internal-sftp", "DisableForwarding yes", "active sshd configuration does not contain the exact terminal SFTP-only block", "Principal.LogonType -ne \"Password\"", "previous snapshot could not be fenced", "two distinct post-install snapshots", "SCHED_S_TASK_RUNNING", "producer.windows_sid", "WSL heartbeat timer postcondition failed"):
+        for token in ("[switch]$Apply", "AcknowledgePersistentPasswordTask", "Get-DedicatedReader", "Get-LocalUser", "Test-GroupContainsSid", "New-CryptographicAccountPassword", "SecureStringToBSTR", "ZeroFreeBSTR", "TASK_LOGON_PASSWORD", "TASK_RUNLEVEL_LUA", "SetAccessRuleProtection($true, $false)", "GetOwner([Security.Principal.SecurityIdentifier])", "ACL inheritance protection is not exact", "ACL inherited-rule state is not exact", "ACL inheritance or propagation flags are not exact", "ReadAndExecute", "dedicated non-admin identity", "AuthorizedKeysFile C:/Users/selfhosted-ci-health/.ssh/authorized_keys", "ForceCommand internal-sftp", "DisableForwarding yes", "active sshd configuration does not contain the exact terminal SFTP-only block", "Principal.LogonType -ne \"Password\"", "previous snapshot could not be fenced", "two distinct post-install snapshots", "SCHED_S_TASK_RUNNING", "producer.windows_sid", "WSL heartbeat timer postcondition failed"):
             self.assertIn(token, source)
         for primitive in ("WriteData", "AppendData", "WriteExtendedAttributes", "WriteAttributes", "DeleteSubdirectoriesAndFiles", "Delete", "ChangePermissions", "TakeOwnership"):
             self.assertIn(f"FileSystemRights]::{primitive}", source)
@@ -287,6 +287,8 @@ class HostHealthScriptTests(unittest.TestCase):
         self.assertIn("[IO.File]::ReadAllText($SshdConfig)", verifier)
         self.assertIn(".EndsWith($expectedBlock + \"`r`n\", [StringComparison]::Ordinal)", verifier)
         self.assertIn("& $sshd -t -f $SshdConfig", verifier)
+        self.assertEqual(2, install.count("AuthorizedKeysFile C:/Users/selfhosted-ci-health/.ssh/authorized_keys"))
+        self.assertNotIn("CreateProfile", install)
         rollback = install.index("catch {", verify)
         self.assertIn('$sshdRollbackRequired = $sshdConfigured -or (Test-Path -LiteralPath $SshdBackup -PathType Leaf)', install[rollback:])
         self.assertIn("sshd rollback required but backup is missing; service remains stopped", install[rollback:])

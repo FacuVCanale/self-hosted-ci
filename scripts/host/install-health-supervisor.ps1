@@ -198,6 +198,7 @@ function Set-SftpOnlyConfiguration([string]$ReaderName) {
 $SftpBegin
 Match all
 Match User $ReaderName
+    AuthorizedKeysFile C:/Users/selfhosted-ci-health/.ssh/authorized_keys
     ForceCommand internal-sftp
     DisableForwarding yes
     AllowTcpForwarding no
@@ -225,6 +226,7 @@ function Assert-SftpOnlyConfiguration([string]$ReaderName) {
 $SftpBegin
 Match all
 Match User $ReaderName
+    AuthorizedKeysFile C:/Users/selfhosted-ci-health/.ssh/authorized_keys
     ForceCommand internal-sftp
     DisableForwarding yes
     AllowTcpForwarding no
