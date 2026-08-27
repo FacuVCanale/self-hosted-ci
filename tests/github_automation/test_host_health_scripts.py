@@ -56,17 +56,24 @@ class HostHealthScriptTests(unittest.TestCase):
                 result = subprocess.run([powershell, "-NoProfile", "-Command", command], text=True, capture_output=True)
                 self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
-    def test_reader_mutation_mask_does_not_overlap_read_and_detects_write_and_modify_when_powershell_is_available(self) -> None:
+    def test_reader_acl_canonical_rights_and_mutation_mask_when_powershell_is_available(self) -> None:
         powershell = next((name for name in ("pwsh", "powershell") if subprocess.run(["bash", "-lc", f"command -v {name}"], capture_output=True).returncode == 0), None)
         if powershell is None:
             self.skipTest("PowerShell is not installed")
         command = (
+            "if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) { exit 0 };"
             "$r=[Security.AccessControl.FileSystemRights];"
+            "$expected=$r::ReadAndExecute -bor $r::Synchronize;"
+            "$sid=[Security.Principal.SecurityIdentifier]::new('S-1-5-18');"
+            "$inherit=[Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit;"
+            "$rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,$r::ReadAndExecute,$inherit,[Security.AccessControl.PropagationFlags]::None,[Security.AccessControl.AccessControlType]::Allow);"
+            "if([int]$expected -ne 1179817){exit 1};"
+            "if([int]$rule.FileSystemRights -ne [int]$expected){exit 2};"
             "$m=$r::WriteData -bor $r::AppendData -bor $r::WriteExtendedAttributes -bor $r::WriteAttributes -bor "
             "$r::DeleteSubdirectoriesAndFiles -bor $r::Delete -bor $r::ChangePermissions -bor $r::TakeOwnership;"
-            "if((([int]$r::ReadAndExecute)-band $m)-ne 0){exit 1};"
-            "if((([int]$r::Write)-band $m)-eq 0){exit 2};"
-            "if((([int]$r::Modify)-band $m)-eq 0){exit 3}"
+            "if((([int]$rule.FileSystemRights)-band $m)-ne 0){exit 3};"
+            "if((([int]$r::Write)-band $m)-eq 0){exit 4};"
+            "if((([int]$r::Modify)-band $m)-eq 0){exit 5}"
         )
         result = subprocess.run([powershell, "-NoProfile", "-Command", command], text=True, capture_output=True)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
@@ -144,6 +151,8 @@ class HostHealthScriptTests(unittest.TestCase):
             self.assertIn(token, source)
         for primitive in ("WriteData", "AppendData", "WriteExtendedAttributes", "WriteAttributes", "DeleteSubdirectoriesAndFiles", "Delete", "ChangePermissions", "TakeOwnership"):
             self.assertIn(f"FileSystemRights]::{primitive}", source)
+        self.assertIn("FileSystemRights]::Synchronize", source)
+        self.assertIn("$rule.FileSystemRights -ne $expectedReaderRights", source)
         reader_check = source[source.index('if ($rule.IdentityReference.Value -eq $ReaderSid)'):source.index('elseif ($rule.FileSystemRights -ne', source.index('if ($rule.IdentityReference.Value -eq $ReaderSid)'))]
         self.assertNotIn("FileSystemRights]::Modify", reader_check)
         self.assertNotIn("FileSystemRights]::Write -bor", reader_check)

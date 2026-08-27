@@ -125,7 +125,12 @@ function Assert-ExactAcl(
                 [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
                 [Security.AccessControl.FileSystemRights]::TakeOwnership
             if (($rule.FileSystemRights -band $forbidden) -ne 0) { throw "reader has mutating access to health artifacts" }
-            if ($rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::ReadAndExecute) { throw "reader ACL is not exactly ReadAndExecute" }
+            # Windows canonicalizes an Allow ACE requested as ReadAndExecute by
+            # adding Synchronize. Compare against that exact canonical value so
+            # the check stays strict without rejecting the ACE we just created.
+            $expectedReaderRights = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor
+                [Security.AccessControl.FileSystemRights]::Synchronize
+            if ($rule.FileSystemRights -ne $expectedReaderRights) { throw "reader ACL is not exactly canonical ReadAndExecute" }
         }
         elseif ($rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl) {
             throw "privileged ACL rule is not FullControl on $Path"
