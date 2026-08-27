@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly EXPECTED_DISTRO="Ubuntu-24.04"
+readonly EXPECTED_DISTRO="Ubuntu-24.04-CI"
 readonly RUNNER_USER="ci-runner"
 readonly INSTALL_DIR="/opt/self-hosted-ci"
 readonly STATE_DIR="/var/lib/self-hosted-ci"

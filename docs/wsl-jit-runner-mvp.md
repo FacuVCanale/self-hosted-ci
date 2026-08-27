@@ -83,6 +83,45 @@ Any identity, path, ACL, hash, size, disk, task, registry, or preservation
 mismatch stops the migration. Re-running Apply is idempotent only when the
 existing service-account registration points to the exact pinned destination.
 
+## Read-only health from macOS
+
+The dedicated runtime distro is `Ubuntu-24.04-CI`. The only canonical runner
+labels are `linux`, `self-hosted`, `wsl-jit`, and `x64` (sorted in signed
+allocations). The personal `Ubuntu-24.04` distro is migration source material,
+not a CI target.
+
+From the Mac, the health wrapper streams the checked-in PowerShell probe over
+SSH stdin to `powershell.exe -Command -`. Windows PowerShell 5.1 consumes stdin
+one command at a time, so the wrapper Base64-encodes the UTF-8 probe locally,
+appends it to an in-memory PowerShell variable in bounded 2048-character
+chunks, then decodes and invokes it. It does not install the probe, place it on
+the Windows command line, write it to disk, or change the Windows host:
+
+```bash
+scripts/host/check-self-hosted-ci-health.sh \
+  --ssh-target desktop \
+  --service-account-sid 'S-1-5-21-...'
+```
+
+The command emits one stable JSON document. It reports SSH reachability,
+Windows service state, the dedicated distro, the runner installation and
+registration state, required systemd units, the workload heartbeat, and
+fail-closed local-CI eligibility. It never registers a runner, starts a
+service, creates a scheduled task, or writes a heartbeat.
+
+WSL registrations are scoped to a Windows user. Consequently, a probe reached
+through the personal Windows account normally reports the dedicated distro as
+`not_observable`, even when that distro exists under `selfhosted-ci-svc`. This
+is an expected fail-closed result, not permission to infer health from the old
+migration evidence. A future read-only probe endpoint running as the service
+identity may expose the same command; until then, the Mac check proves only
+that Windows and SSH answer.
+
+The workload heartbeat is the mtime of
+`/var/lib/self-hosted-ci/health/heartbeat`. Its producer belongs to the future
+coordinator/runtime and is deliberately absent from this inert layer. Missing,
+stale, or unobservable heartbeat state blocks `eligible_for_local_ci`.
+
 ## Allocation protocol
 
 `github_automation.runner_jit` provides:

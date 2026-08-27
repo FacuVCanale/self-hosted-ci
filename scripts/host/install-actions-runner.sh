@@ -4,7 +4,7 @@ set -euo pipefail
 readonly RUNNER_USER="ci-runner"
 readonly INSTALL_DIR="/opt/self-hosted-ci/actions-runner"
 readonly RELEASE_BASE_URL="https://github.com/actions/runner/releases/download"
-readonly EXPECTED_DISTRO="Ubuntu-24.04"
+readonly EXPECTED_DISTRO="Ubuntu-24.04-CI"
 
 die() {
   printf 'actions-runner install error: %s\n' "$*" >&2

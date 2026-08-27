@@ -88,7 +88,7 @@ class ChildWorkflowTests(unittest.TestCase):
         self.assertIn("needs.validate-package.outputs.backend == 'github'", self.text)
         self.assertIn("needs.validate-package.outputs.backend == 'local'", self.text)
         self.assertIn("vars.CI_GATE_LOCAL_AUTHORITY_ENABLED == 'true'", self.text)
-        self.assertIn("runs-on: [self-hosted, ci-gate-jit, linux, x64]", self.text)
+        self.assertIn("runs-on: [linux, self-hosted, wsl-jit, x64]", self.text)
 
     def test_s53_marker_precedes_project_dependent_command(self) -> None:
         marker = self.text.index("/opt/github-automation/bin/ci-gate-start --admit-and-mark")

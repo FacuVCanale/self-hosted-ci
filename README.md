@@ -51,3 +51,9 @@ make evidence
 
 See [`docs/github-automation-operations.md`](docs/github-automation-operations.md)
 for the generic operating model. Never commit generated operational evidence.
+
+The inert WSL host contract, read-only Mac-to-Windows health command, and the
+activation stop conditions are documented in
+[`docs/wsl-jit-runner-mvp.md`](docs/wsl-jit-runner-mvp.md). The dedicated CI
+distro is `Ubuntu-24.04-CI`; its canonical JIT labels are `linux`,
+`self-hosted`, `wsl-jit`, and `x64`.

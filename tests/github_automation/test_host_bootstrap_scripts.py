@@ -27,7 +27,7 @@ class HostBootstrapScriptTests(unittest.TestCase):
 
     def test_bootstrap_has_exact_platform_guards_and_no_runner_registration(self) -> None:
         source = BASH_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn('EXPECTED_DISTRO="Ubuntu-24.04"', source)
+        self.assertIn('EXPECTED_DISTRO="Ubuntu-24.04-CI"', source)
         self.assertIn('VERSION_ID:-}" == "24.04"', source)
         self.assertIn('WSL_DISTRO_NAME:-}" == "${EXPECTED_DISTRO}"', source)
         self.assertIn("grep -qi 'wsl2' /proc/sys/kernel/osrelease", source)
@@ -56,7 +56,7 @@ class HostBootstrapScriptTests(unittest.TestCase):
         body = match.group("body")
         substitutions = {
             "${generated_at}": "2026-08-26T12:00:00Z",
-            "${EXPECTED_DISTRO}": "Ubuntu-24.04",
+            "${EXPECTED_DISTRO}": "Ubuntu-24.04-CI",
             "${RUNNER_USER}": "ci-runner",
             "${runner_uid}": "1000",
             "${INSTALL_DIR}": "/opt/self-hosted-ci",
@@ -73,11 +73,11 @@ class HostBootstrapScriptTests(unittest.TestCase):
 
     def test_powershell_wrapper_is_pinned_and_streams_bootstrap_to_root(self) -> None:
         source = POWERSHELL_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn('[string]$DistroName = "Ubuntu-24.04"', source)
+        self.assertIn('[string]$DistroName = "Ubuntu-24.04-CI"', source)
         self.assertIn("[string]$BootstrapScript,", source)
         self.assertIn("if ([string]::IsNullOrWhiteSpace($BootstrapScript))", source)
         self.assertIn('$BootstrapScript = Join-Path $PSScriptRoot "bootstrap-ubuntu-24.04-wsl.sh"', source)
-        self.assertIn("$DistroName -ne \"Ubuntu-24.04\"", source)
+        self.assertIn("$DistroName -ne \"Ubuntu-24.04-CI\"", source)
         self.assertIn("[Convert]::ToBase64String", source)
         self.assertIn("base64 --decode | bash", source)
         self.assertIn("& wsl.exe --distribution $DistroName --user root -- bash -lc $wslCommand", source)

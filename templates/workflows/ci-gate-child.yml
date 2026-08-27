@@ -94,7 +94,7 @@ jobs:
     if: >-
       needs.validate-package.outputs.backend == 'local' &&
       vars.CI_GATE_LOCAL_AUTHORITY_ENABLED == 'true'
-    runs-on: [self-hosted, ci-gate-jit, linux, x64]
+    runs-on: [linux, self-hosted, wsl-jit, x64]
     timeout-minutes: 40
     steps:
       - name: Revalidate claim authority before checkout

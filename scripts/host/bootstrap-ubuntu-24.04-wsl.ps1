@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$DistroName = "Ubuntu-24.04",
+    [string]$DistroName = "Ubuntu-24.04-CI",
     [string]$BootstrapScript,
     [switch]$TerminateAfterBootstrap
 )
@@ -12,8 +12,8 @@ if ([string]::IsNullOrWhiteSpace($BootstrapScript)) {
     $BootstrapScript = Join-Path $PSScriptRoot "bootstrap-ubuntu-24.04-wsl.sh"
 }
 
-if ($DistroName -ne "Ubuntu-24.04") {
-    throw "DistroName must be Ubuntu-24.04."
+if ($DistroName -ne "Ubuntu-24.04-CI") {
+    throw "DistroName must be Ubuntu-24.04-CI."
 }
 if (-not (Test-Path -LiteralPath $BootstrapScript -PathType Leaf)) {
     throw "Bootstrap script not found: $BootstrapScript"
