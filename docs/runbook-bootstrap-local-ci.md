@@ -467,3 +467,86 @@ Conservar fuera del repositorio la evidencia de instalación, boundary, policy
 post-reboot, lifecycle completo, cleanup, autoridad de App/runner, fallback y
 rollback. Si falta evidencia independiente de cualquier gate, el resultado es
 GitHub-hosted y el runtime local permanece desactivado.
+
+## Actualizar el live contract desde Windows
+
+La instalación sobre la distro que pertenece a la cuenta de servicio se hace
+con `scripts/host/install-wsl-jit-live-contract.ps1`. El script es plan-only por
+defecto y usa una tarea one-shot `Password`/`Limited`; no activa GARM, no
+configura GitHub, no crea `outbound-worker.runtime-ready` y no registra runners.
+
+El flujo tiene dos operaciones separadas. Primero, el paquete contiene
+`artifacts/live-contract/unsigned-live-contract-source.tar`: un tar POSIX
+determinista, root-owned, con un único árbol `contract/`, el template en
+`contract/runner-boundary-template-v2.json` y todos sus archivos públicos de
+medición. Construí ese input sin metadata dependiente de la máquina:
+
+```bash
+python3 scripts/host/build-wsl-jit-live-contract-tar.py source \
+  --contract-dir /path/to/unsigned-contract-source \
+  --output artifacts/live-contract/unsigned-live-contract-source.tar
+```
+
+La recolección ocurre adentro de la distro de servicio y no
+provisiona nada. Corré primero el mismo comando sin `-Apply`: el JSON del plan
+informa `input_sha256` e `input_bytes`. Copiá ambos valores literalmente al
+apply como expectativa externa del archivo que Windows va a abrir:
+
+```powershell
+& "C:\ProgramData\self-hosted-ci\package\scripts\host\install-wsl-jit-live-contract.ps1" `
+  -ExpectedServiceAccountSid "<SID-exacto-de-selfhosted-ci-svc>" `
+  -CollectUnsigned `
+  -Apply `
+  -ExpectedInputSha256 "<sha256-del-source-tar>" `
+  -ExpectedInputBytes <bytes-del-source-tar> `
+  -AcknowledgeUnsignedCollection `
+  -AcknowledgeOneTimePasswordRotation
+```
+
+El JSON final informa un path content-addressed bajo
+`C:\ProgramData\self-hosted-ci\unsigned-live-contract`. Copiá exactamente ese
+tar fuera de Windows, firmá `runner-boundary-measured-v2.json` con
+`scripts/host/sign-wsl-jit-boundary.py`, agregá sólo la clave pública y su
+fingerprint, y construí el bundle final con el helper. El helper verifica la
+firma y que el fingerprint corresponda al SPKI Ed25519 antes de escribir el
+tar; no acepta ni lee una clave privada:
+
+```bash
+python3 scripts/host/sign-wsl-jit-boundary.py \
+  --input /path/to/contract/runner-boundary-measured-v2.json \
+  --output /path/to/runner-boundary-v2.json \
+  --reviewer-private-key /absolute/path/outside/repo/reviewer-private-key.pem
+
+python3 scripts/host/build-wsl-jit-live-contract-tar.py signed \
+  --unsigned-tar /path/to/unsigned-live-contract-<sha256>.tar \
+  --signed-boundary /path/to/runner-boundary-v2.json \
+  --reviewer-public-key /path/to/reviewer-public-key.pem \
+  --reviewer-key-fingerprint <sha256-spki-del-reviewer> \
+  --output artifacts/live-contract/live-contract-bundle.tar
+```
+
+La clave privada del reviewer permanece fuera de Windows y fuera del
+repositorio. El flujo detallado de stage, medición, firma y verificación está
+en [`wsl-jit-runner-mvp.md`](wsl-jit-runner-mvp.md).
+
+Con el bundle firmado ya copiado al paquete, corré otra vez el plan para leer
+su SHA-256 y tamaño. El fingerprint esperado es el SHA-256 lowercase del SPKI
+DER de la clave pública del reviewer, calculado fuera de Windows; el
+fingerprint incluido en el bundle no es una raíz de confianza. Después, desde
+una PowerShell elevada:
+
+```powershell
+& "C:\ProgramData\self-hosted-ci\package\scripts\host\install-wsl-jit-live-contract.ps1" `
+  -ExpectedServiceAccountSid "<SID-exacto-de-selfhosted-ci-svc>" `
+  -Apply `
+  -ExpectedInputSha256 "<sha256-del-bundle-firmado>" `
+  -ExpectedInputBytes <bytes-del-bundle-firmado> `
+  -ExpectedReviewerFingerprint "<sha256-spki-del-reviewer>" `
+  -AcknowledgeLiveContractMutation `
+  -AcknowledgeOneTimePasswordRotation
+```
+
+El éxito exige que la tarea, la credencial almacenada y el staging hayan sido
+eliminados; además re-mide el contrato dentro de la distro y exige igualdad con
+el contenido firmado antes de provisionar. Un fallo conserva sólo diagnósticos
+redactados y deja el sistema sin activation/runtime-ready nuevos.
