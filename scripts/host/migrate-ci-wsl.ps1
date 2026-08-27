@@ -641,18 +641,49 @@ try {
         if (@(Get-ChildItem -LiteralPath $destination -Force).Count -ne 0) {
             throw "Destination must be empty before first import."
         }
-        $process = Start-Process -FilePath "wsl.exe" -ArgumentList @(
-            "--import", $DistroName, $destination, $ExportPath, "--version", "2"
-        ) -NoNewWindow -PassThru -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath
+        $quote = [char]34
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = "wsl.exe"
+        $startInfo.Arguments = "--import ${quote}${DistroName}${quote} ${quote}${destination}${quote} ${quote}${ExportPath}${quote} --version 2"
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) { throw "Unable to start wsl.exe --import." }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($ImportTimeoutSeconds * 1000)) {
             try { $process.Kill() } catch { }
             $process.WaitForExit()
             throw "wsl.exe --import exceeded its $ImportTimeoutSeconds second timeout and was terminated."
         }
         $process.WaitForExit()
-        if ($process.ExitCode -ne 0) { throw "wsl.exe --import failed with exit code $($process.ExitCode)." }
-        $operation = "imported"
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        [IO.File]::WriteAllText($StdoutPath, $stdout, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($StderrPath, $stderr, [Text.UTF8Encoding]::new($false))
+
+        $exitCodeAvailable = $false
+        $exitCode = $null
+        try {
+            $exitCode = [int]$process.ExitCode
+            $exitCodeAvailable = $true
+        }
+        catch {
+            $exitCodeAvailable = $false
+        }
         $distros = @(Get-Distros)
+        $importPostconditionPassed = $distros -contains $DistroName
+        if ($exitCodeAvailable -and $exitCode -ne 0) {
+            throw "wsl.exe --import failed with exit code $exitCode."
+        }
+        if (-not $importPostconditionPassed) {
+            $metadata = if ($exitCodeAvailable) { "exit code $exitCode" } else { "unavailable exit metadata" }
+            throw "wsl.exe --import did not register the exact distro ($metadata)."
+        }
+        $operation = "imported"
     }
     if ($distros -notcontains $DistroName) { throw "Imported distro is not visible under the service identity." }
 
@@ -760,7 +791,7 @@ try {
         $taskState = (Get-ScheduledTask -TaskName $TaskName).State
         $taskInfo = Get-ScheduledTaskInfo -TaskName $TaskName
         $completed = [string]$taskState -eq "Ready" -and
-            $taskInfo.LastRunTime -ge $startedAt
+            (Test-Path -LiteralPath $ResultPath -PathType Leaf)
     } while (-not $completed -and (Get-Date) -lt $deadline)
 
     if (-not $completed) {
