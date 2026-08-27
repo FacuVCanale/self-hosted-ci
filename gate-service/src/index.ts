@@ -86,12 +86,16 @@ export function classifyRequestError(error: unknown, now = Date.now()): {
   code: string;
   headers: HeadersInit;
 } {
-  const retryableMatch = error instanceof Error
-    ? /^CanonicalPullRequestUnavailable:(\d{13})$/.exec(error.name)
+  const errorName = error !== null && typeof error === "object" && "name" in error
+    && typeof error.name === "string"
+    ? error.name
     : null;
+  const retryableMatch = errorName === null
+    ? null
+    : /^CanonicalPullRequestUnavailable:(\d{13})$/.exec(errorName);
   const retryableCanonical = retryableMatch !== null;
   const blockedCanonical = error instanceof CanonicalPullRequestBlocked
-    || (error instanceof Error && error.name === "CanonicalPullRequestBlocked");
+    || errorName === "CanonicalPullRequestBlocked";
   if (retryableCanonical) {
     const retryAt = Number(retryableMatch[1]);
     const retryAfterSeconds = Math.max(1, Math.ceil((retryAt - now) / 1_000));
@@ -103,8 +107,11 @@ export function classifyRequestError(error: unknown, now = Date.now()): {
   }
   if (error instanceof AuthenticationError) return { status: 401, code: "unauthorized", headers: {} };
   if (blockedCanonical) return { status: 409, code: "canonical_pull_request_blocked", headers: {} };
-  if (error instanceof GateFenced) return { status: 409, code: "fenced", headers: {} };
-  if (error instanceof GateConflict || error instanceof ZodError) {
+  if (error instanceof GateFenced || errorName === "GateFenced") {
+    return { status: 409, code: "fenced", headers: {} };
+  }
+  if (error instanceof GateConflict || error instanceof ZodError
+    || errorName === "GateConflict" || errorName === "ZodError") {
     return { status: 400, code: "invalid_request", headers: {} };
   }
   return { status: 500, code: "internal_error", headers: {} };

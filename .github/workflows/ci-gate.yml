@@ -114,11 +114,18 @@ jobs:
       - name: Observe Git toolchain
         id: toolchain
         shell: bash
+        env:
+          EXPECTED_RUNNER_IMAGE: ${{ needs.acquire.outputs.runner_image }}
         run: |
           set -euo pipefail
           git_version="$(git --version)"
           [[ "$git_version" =~ ^git\ version\ [0-9]+\.[0-9]+\.[0-9]+([.][A-Za-z0-9.-]+)?(\ \(Apple\ Git-[0-9]+\))?$ ]]
-          printf 'git_version=%s\n' "$git_version" >>"$GITHUB_OUTPUT"
+          test "$EXPECTED_RUNNER_IMAGE" = ubuntu-24.04
+          sentinel="${RUNNER_TEMP}/ci-gate-toolchain-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          printf '%s\n%s\n' "$git_version" "$EXPECTED_RUNNER_IMAGE" >"$sentinel"
+          chmod 0444 "$sentinel"
+          sentinel_digest="$(sha256sum "$sentinel" | cut -d' ' -f1)"
+          printf 'git_version=%s\nsentinel=%s\nsentinel_digest=%s\n' "$git_version" "$sentinel" "$sentinel_digest" >>"$GITHUB_OUTPUT"
       - name: Check out exact canonical base
         id: checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -135,10 +142,17 @@ jobs:
           HEAD_SHA: ${{ needs.acquire.outputs.head_sha }}
           PR_NUMBER: ${{ inputs.pr_number }}
           EXPECTED_RUNNER_IMAGE: ${{ needs.acquire.outputs.runner_image }}
+          EXPECTED_GIT_VERSION: ${{ steps.toolchain.outputs.git_version }}
+          TOOLCHAIN_SENTINEL: ${{ steps.toolchain.outputs.sentinel }}
+          TOOLCHAIN_SENTINEL_DIGEST: ${{ steps.toolchain.outputs.sentinel_digest }}
         run: |
           set -euo pipefail
           export GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
           test "$EXPECTED_RUNNER_IMAGE" = ubuntu-24.04
+          test -f "$TOOLCHAIN_SENTINEL" && test ! -L "$TOOLCHAIN_SENTINEL" && test -O "$TOOLCHAIN_SENTINEL"
+          test "$(sha256sum "$TOOLCHAIN_SENTINEL" | cut -d' ' -f1)" = "$TOOLCHAIN_SENTINEL_DIGEST"
+          test "$(sed -n '1p' "$TOOLCHAIN_SENTINEL")" = "$EXPECTED_GIT_VERSION"
+          test "$(sed -n '2p' "$TOOLCHAIN_SENTINEL")" = "$EXPECTED_RUNNER_IMAGE"
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           test "$(git remote get-url origin)" = "https://github.com/${GITHUB_REPOSITORY}"
           git config --local core.hooksPath /dev/null
@@ -150,6 +164,7 @@ jobs:
           merge_base_sha="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
           test -n "$merge_base_sha"
           git checkout --detach "$BASE_SHA"
+          test "$(git --version)" = "$EXPECTED_GIT_VERSION"
           git merge -s ort --no-ff --no-commit "$HEAD_SHA"
           tested_tree_sha="$(git write-tree)"
           local_commit_sha="$(printf '%s\n' 'ci-gate deterministic local ort merge' | GIT_AUTHOR_NAME=ci-gate GIT_AUTHOR_EMAIL=ci-gate@invalid GIT_AUTHOR_DATE='1970-01-01T00:00:00Z' GIT_COMMITTER_NAME=ci-gate GIT_COMMITTER_EMAIL=ci-gate@invalid GIT_COMMITTER_DATE='1970-01-01T00:00:00Z' git commit-tree "$tested_tree_sha" -p "$BASE_SHA" -p "$HEAD_SHA")"
