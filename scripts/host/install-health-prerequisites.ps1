@@ -333,7 +333,7 @@ try {
     for (`$attempt = 1; `$attempt -le 10; `$attempt++) {
         `$listRaw = @(& "`$env:SystemRoot\System32\wsl.exe" --list --quiet 2>&1)
         `$listExitCode = `$LASTEXITCODE
-        `$names = @(`$listRaw | ForEach-Object { ([string]`$_).Replace([char]0, '').Trim() } | Where-Object { `$_ })
+        `$names = @(`$listRaw | ForEach-Object { ([string]`$_).Replace([string][char]0, [string]::Empty).Trim() } | Where-Object { `$_ })
         `$visibility.Add([ordered]@{ attempt=`$attempt; observed_at=[DateTimeOffset]::UtcNow.ToString('o'); exit_code=`$listExitCode; names=`$names; raw=(`$listRaw -join "`n") })
         `$exactNames = @(`$names | Where-Object { [StringComparer]::Ordinal.Equals([string]`$_, '$DistroName') })
         if (`$listExitCode -eq 0 -and `$exactNames.Count -eq 1) { `$distroVisible = `$true; break }

@@ -163,7 +163,7 @@ class HostHealthScriptTests(unittest.TestCase):
             "HKCU and exact-SID WSL registration GUIDs differ", "WSL registration name is not exact",
             "WSL registration version is not 2", "WSL registration BasePath is not exact",
             "exact WSL registry validation failed", "--distribution-id ", "ExpectedDistroBasePath",
-            ".Replace([char]0, '')", "StringComparer]::Ordinal.Equals",
+            ".Replace([string][char]0, [string]::Empty)", "StringComparer]::Ordinal.Equals",
         ):
             self.assertIn(token, source)
         orphan_delete = source.index('if ($orphanReaderProfile) { Remove-ExactManagedReaderProfile')
@@ -178,6 +178,7 @@ class HostHealthScriptTests(unittest.TestCase):
         self.assertLess(visibility_failure, payload_start)
         self.assertIn("for (`$attempt = 1; `$attempt -le 10; `$attempt++)", source)
         self.assertIn("if (`$attempt -lt 10) { Start-Sleep -Seconds 2 }", source)
+        self.assertNotIn(".Replace([char]0, '')", source)
         self.assertNotIn("--import-in-place", source)
         self.assertNotIn("--distribution \"$DistroName\"", source)
         registry_validation = source.index("if (-not `$registrationValidated)")
