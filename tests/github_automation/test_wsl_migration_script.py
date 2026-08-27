@@ -78,6 +78,18 @@ class WslMigrationScriptTests(unittest.TestCase):
         self.assertIn('Principal.RunLevel -ne "Limited"', source)
         self.assertIn("Principal.UserId", source)
 
+    def test_task_principal_identity_is_compared_semantically_by_sid(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("function Resolve-PrincipalSidValue", source)
+        self.assertIn("[Security.Principal.SecurityIdentifier]::new($UserId)", source)
+        self.assertIn("[Security.Principal.NTAccount]::new($candidate)", source)
+        self.assertIn("Translate([Security.Principal.SecurityIdentifier])", source)
+        self.assertIn('$candidates += "$env:COMPUTERNAME\\$UserId"', source)
+        self.assertIn("$actualTaskSid = Resolve-PrincipalSidValue $actualTaskUserId", source)
+        self.assertIn("if ($actualTaskSid -ne $serviceSid.Value)", source)
+        self.assertIn("actual_user_id='$actualTaskUserId'", source)
+        self.assertNotIn("@($accountId, $serviceSid.Value) -notcontains", source)
+
     def test_password_material_is_random_memory_only_and_bstr_is_zeroed(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn("function New-CryptographicAccountPassword", source)

@@ -46,6 +46,30 @@ function Get-NormalizedPath([string]$Path) {
     return [IO.Path]::GetFullPath($Path).TrimEnd('\')
 }
 
+function Resolve-PrincipalSidValue([string]$UserId) {
+    if ([string]::IsNullOrWhiteSpace($UserId)) {
+        throw "Task Scheduler returned an empty principal UserId."
+    }
+    if ($UserId -match '^S-\d-(?:\d+-){1,14}\d+$') {
+        return ([Security.Principal.SecurityIdentifier]::new($UserId)).Value
+    }
+
+    $candidates = @($UserId)
+    if ($UserId -notmatch '[\\@]') {
+        $candidates += "$env:COMPUTERNAME\$UserId"
+    }
+    foreach ($candidate in $candidates) {
+        try {
+            $account = [Security.Principal.NTAccount]::new($candidate)
+            return ($account.Translate([Security.Principal.SecurityIdentifier])).Value
+        }
+        catch [Security.Principal.IdentityNotMappedException] {
+            continue
+        }
+    }
+    throw "Unable to resolve Task Scheduler principal actual_user_id='$UserId' to a Windows SID."
+}
+
 function Get-WslDistros {
     $lines = @(& wsl.exe --list --quiet 2>&1)
     if ($LASTEXITCODE -ne 0) {
@@ -722,8 +746,10 @@ try {
     if ($taskPostcondition.Principal.RunLevel -ne "Limited") {
         throw "Registered task failed the limited run-level postcondition."
     }
-    if (@($accountId, $serviceSid.Value) -notcontains $taskPostcondition.Principal.UserId) {
-        throw "Registered task failed the service-identity postcondition."
+    $actualTaskUserId = [string]$taskPostcondition.Principal.UserId
+    $actualTaskSid = Resolve-PrincipalSidValue $actualTaskUserId
+    if ($actualTaskSid -ne $serviceSid.Value) {
+        throw "Registered task failed the service-identity postcondition: actual_user_id='$actualTaskUserId', actual_sid='$actualTaskSid'."
     }
     $startedAt = Get-Date
     Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
