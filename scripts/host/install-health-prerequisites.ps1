@@ -23,6 +23,7 @@ $ResultPath = Join-Path $Root "install-result.json"
 $WorkerStdoutPath = Join-Path $Root "worker.stdout.log"
 $WorkerStderrPath = Join-Path $Root "worker.stderr.log"
 $WorkerErrorPath = Join-Path $Root "worker-error.json"
+$WorkerContextPath = Join-Path $Root "worker-context.json"
 $EvidenceRoot = "C:\ProgramData\self-hosted-ci\diagnostics\health-prerequisites"
 $AttemptId = [guid]::NewGuid().ToString("D")
 $PayloadTemplate = Join-Path $PSScriptRoot "install-health-wsl-payload.sh.in"
@@ -149,7 +150,7 @@ function Save-FailureEvidence([string]$OriginalMessage, [object]$Task, [object]$
     $attempt = Join-Path $EvidenceRoot $AttemptId
     [void](New-Item -ItemType Directory -Path $attempt)
     Set-Acl -LiteralPath $attempt -AclObject (New-AdminOnlyAcl $true)
-    foreach ($source in @($WorkerStdoutPath, $WorkerStderrPath, $WorkerErrorPath, $ResultPath)) {
+    foreach ($source in @($WorkerStdoutPath, $WorkerStderrPath, $WorkerErrorPath, $WorkerContextPath, $ResultPath)) {
         if (Test-Path -LiteralPath $source -PathType Leaf) {
             $destination = Join-Path $attempt ([IO.Path]::GetFileName($source))
             Copy-Item -LiteralPath $source -Destination $destination
@@ -220,6 +221,10 @@ function Register-OneShot([string]$UserId, [Security.SecureString]$Password) {
         $definition.Principal.LogonType = 1 # TASK_LOGON_PASSWORD
         $definition.Principal.RunLevel = 0 # TASK_RUNLEVEL_LUA
         $definition.Settings.Enabled = $true; $definition.Settings.ExecutionTimeLimit = "PT5M"; $definition.Settings.StartWhenAvailable = $false
+        $definition.Settings.AllowDemandStart = $true
+        $definition.Settings.DisallowStartIfOnBatteries = $false
+        $definition.Settings.StopIfGoingOnBatteries = $false
+        $definition.Settings.MultipleInstances = 2 # TASK_INSTANCES_IGNORE_NEW
         $action = $definition.Actions.Create(0); $action.Path = $PowerShellExe; $action.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$WorkerPath`""
         return $folder.RegisterTaskDefinition($TaskName, $definition, 6, $UserId, $plain, 1, $null)
     }
@@ -289,10 +294,41 @@ try {
     $payloadB64 = [Convert]::ToBase64String($payloadBytes)
     $worker = @"
 `$ErrorActionPreference = 'Stop'
+function Get-ExactRegistration([string]`$RegistryRoot) {
+    `$base = "`$RegistryRoot\Software\Microsoft\Windows\CurrentVersion\Lxss"
+    try {
+        `$matches = @(Get-ChildItem -LiteralPath `$base -ErrorAction Stop | ForEach-Object {
+            `$value = Get-ItemProperty -LiteralPath `$_.PSPath -ErrorAction Stop
+            if ([string]`$value.DistributionName -eq '$DistroName') {
+                [ordered]@{ key=`$_.PSChildName; distribution_name=[string]`$value.DistributionName; version=[int]`$value.Version; base_path=[string]`$value.BasePath; state=[int]`$value.State }
+            }
+        })
+        return [ordered]@{ accessible=`$true; exact_match_count=`$matches.Count; exact_matches=`$matches; error=`$null }
+    }
+    catch { return [ordered]@{ accessible=`$false; exact_match_count=0; exact_matches=@(); error=`$_.Exception.Message } }
+}
 try {
     `$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     if (`$sid -ne '$ExpectedServiceAccountSid') { throw 'worker service SID mismatch' }
     if ('$FailureInjection' -eq 'worker-before-wsl') { throw 'injected failure before WSL' }
+    `$visibility = [Collections.Generic.List[object]]::new(); `$distroVisible = `$false
+    for (`$attempt = 1; `$attempt -le 10; `$attempt++) {
+        `$listRaw = @(& "`$env:SystemRoot\System32\wsl.exe" --list --quiet 2>&1)
+        `$listExitCode = `$LASTEXITCODE
+        `$names = @(`$listRaw | ForEach-Object { ([string]`$_).Trim([char]0).Trim() } | Where-Object { `$_ })
+        `$visibility.Add([ordered]@{ attempt=`$attempt; observed_at=[DateTimeOffset]::UtcNow.ToString('o'); exit_code=`$listExitCode; names=`$names; raw=(`$listRaw -join "`n") })
+        if (`$listExitCode -eq 0 -and `$names -contains '$DistroName') { `$distroVisible = `$true; break }
+        if (`$attempt -lt 10) { Start-Sleep -Seconds 2 }
+    }
+    `$context = [ordered]@{
+        identity_sid=`$sid; process_session_id=[Diagnostics.Process]::GetCurrentProcess().SessionId
+        user_profile_environment=[string]`$env:USERPROFILE; user_profile_folder=[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        hkcu_registration=(Get-ExactRegistration 'Registry::HKEY_CURRENT_USER')
+        exact_sid_hku_registration=(Get-ExactRegistration 'Registry::HKEY_USERS\$ExpectedServiceAccountSid')
+        visibility_attempts=`$visibility; exact_distro_visible=`$distroVisible
+    }
+    [IO.File]::WriteAllText('$WorkerContextPath', (`$context | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new(`$false))
+    if (-not `$distroVisible) { throw 'exact WSL distro remained invisible after bounded preflight' }
     `$psi = [Diagnostics.ProcessStartInfo]::new()
     `$psi.FileName = "`$env:SystemRoot\System32\wsl.exe"
     `$psi.Arguments = '--distribution "$DistroName" --user root -- bash -lc "base64 --decode | bash"'
@@ -327,6 +363,7 @@ catch {
     $expectedArguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$WorkerPath`""
     if ($observed.TaskPath -ne "\" -or $actualSid -ne $ExpectedServiceAccountSid -or $observed.Principal.LogonType -ne "Password" -or $observed.Principal.RunLevel -ne "Limited") { throw "one-shot task principal postcondition failed" }
     if (@($observed.Actions).Count -ne 1 -or $observed.Actions[0].Execute -ne $PowerShellExe -or $observed.Actions[0].Arguments -ne $expectedArguments) { throw "one-shot task action postcondition failed" }
+    if (-not $observed.Settings.AllowDemandStart -or $observed.Settings.DisallowStartIfOnBatteries -or $observed.Settings.StopIfGoingOnBatteries -or $observed.Settings.MultipleInstances -ne "IgnoreNew") { throw "one-shot task settings postcondition failed" }
     $startedAt = [DateTimeOffset]::Now
     Start-ScheduledTask -TaskName $TaskName
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
