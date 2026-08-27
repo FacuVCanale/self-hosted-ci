@@ -220,11 +220,29 @@ Match all
 
 function Assert-SftpOnlyConfiguration([string]$ReaderName) {
     if ((Get-Service -Name sshd -ErrorAction Stop).Status -ne "Running") { throw "sshd did not return to Running" }
-    $sshd = (Get-Command sshd.exe -ErrorAction Stop).Source
-    $effective = @(& $sshd -T -f $SshdConfig -C "user=$ReaderName,host=localhost,addr=127.0.0.1" 2>&1) -join "`n"
-    if ($LASTEXITCODE -ne 0 -or $effective -notmatch '(?im)^forcecommand internal-sftp$' -or $effective -notmatch '(?im)^disableforwarding yes$' -or $effective -notmatch '(?im)^permittty no$' -or $effective -notmatch '(?im)^x11forwarding no$') {
-        throw "effective sshd configuration is not SFTP-only"
+    $expectedBlock = @"
+
+$SftpBegin
+Match all
+Match User $ReaderName
+    ForceCommand internal-sftp
+    DisableForwarding yes
+    AllowTcpForwarding no
+    AllowAgentForwarding no
+    PermitTTY no
+    X11Forwarding no
+$SftpEnd
+Match all
+"@
+    $active = [IO.File]::ReadAllText($SshdConfig)
+    if ([regex]::Matches($active, [regex]::Escape($SftpBegin)).Count -ne 1 -or
+        [regex]::Matches($active, [regex]::Escape($SftpEnd)).Count -ne 1 -or
+        -not $active.EndsWith($expectedBlock + "`r`n", [StringComparison]::Ordinal)) {
+        throw "active sshd configuration does not contain the exact terminal SFTP-only block"
     }
+    $sshd = (Get-Command sshd.exe -ErrorAction Stop).Source
+    & $sshd -t -f $SshdConfig
+    if ($LASTEXITCODE -ne 0) { throw "sshd rejected active managed SFTP configuration" }
 }
 
 if ($env:OS -ne "Windows_NT") { throw "installer requires Windows" }
