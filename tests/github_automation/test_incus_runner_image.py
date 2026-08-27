@@ -17,11 +17,17 @@ FINGERPRINT = "a" * 64
 class IncusRunnerImageTests(unittest.TestCase):
     def command(self, *extra: str) -> list[str]:
         return [
-            "bash", str(SCRIPT), *extra,
-            "--source-remote", "images",
-            "--source-ref", "ubuntu/24.04/cloud",
-            "--expected-fingerprint", FINGERPRINT,
-            "--local-alias", "runner-ubuntu-24.04-pinned",
+            "bash",
+            str(SCRIPT),
+            *extra,
+            "--source-remote",
+            "images",
+            "--source-ref",
+            "ubuntu/24.04/cloud",
+            "--expected-fingerprint",
+            FINGERPRINT,
+            "--local-alias",
+            "runner-ubuntu-24.04-pinned",
         ]
 
     def test_plan_is_exact_machine_readable_and_inert(self) -> None:
@@ -40,17 +46,24 @@ class IncusRunnerImageTests(unittest.TestCase):
         self.assertEqual("not_performed", value["runner_registration"])
 
     def test_inputs_are_explicit_and_fingerprint_is_lowercase_sha256(self) -> None:
-        missing = subprocess.run(["bash", str(SCRIPT), "--plan"], text=True, capture_output=True)
+        missing = subprocess.run(
+            ["bash", str(SCRIPT), "--plan"], text=True, capture_output=True
+        )
         self.assertNotEqual(0, missing.returncode)
         uppercase = subprocess.run(
-            [part if part != FINGERPRINT else "A" * 64 for part in self.command("--plan")],
+            [
+                part if part != FINGERPRINT else "A" * 64
+                for part in self.command("--plan")
+            ],
             text=True,
             capture_output=True,
         )
         self.assertNotEqual(0, uppercase.returncode)
         self.assertIn("lowercase SHA-256", uppercase.stderr)
 
-    def test_apply_has_pinned_copy_exact_postconditions_and_safe_alias_rollback(self) -> None:
+    def test_apply_has_pinned_copy_exact_postconditions_and_safe_alias_rollback(
+        self,
+    ) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         for token in (
             "--acknowledge-remote-image-fetch",
@@ -80,12 +93,16 @@ class IncusRunnerImageTests(unittest.TestCase):
 
     def test_script_is_installed_and_covered_by_the_signed_live_contract(self) -> None:
         target = "/usr/local/lib/self-hosted-ci/prepare-incus-runner-image.sh"
-        self.assertIn("prepare-incus-runner-image.sh", PROVISION.read_text(encoding="utf-8"))
+        self.assertIn(
+            "prepare-incus-runner-image.sh", PROVISION.read_text(encoding="utf-8")
+        )
         self.assertIn(target, STAGER.read_text(encoding="utf-8"))
         self.assertIn(target, VERIFIER.read_text(encoding="utf-8"))
 
     def test_script_parses(self) -> None:
-        result = subprocess.run(["bash", "-n", str(SCRIPT)], text=True, capture_output=True)
+        result = subprocess.run(
+            ["bash", "-n", str(SCRIPT)], text=True, capture_output=True
+        )
         self.assertEqual(0, result.returncode, result.stderr)
 
 

@@ -33,21 +33,31 @@ def main(argv: list[str] | None = None) -> int:
         destination = args.output.resolve(strict=False)
         private_key_path = args.reviewer_private_key.resolve(strict=True)
         if source == destination:
-            raise RunnerBoundaryError("signed output must differ from the unsigned input")
+            raise RunnerBoundaryError(
+                "signed output must differ from the unsigned input"
+            )
         if ROOT.resolve() in private_key_path.parents:
-            raise RunnerBoundaryError("reviewer private key must remain outside the repository")
+            raise RunnerBoundaryError(
+                "reviewer private key must remain outside the repository"
+            )
         key_stat = private_key_path.stat()
         if key_stat.st_mode & 0o077:
-            raise RunnerBoundaryError("reviewer private key must not be group/world accessible")
+            raise RunnerBoundaryError(
+                "reviewer private key must not be group/world accessible"
+            )
         unsigned = parse_ijson(source.read_bytes())
         if "attestation" in unsigned:
             raise RunnerBoundaryError("input boundary must be unsigned")
-        loaded = serialization.load_pem_private_key(private_key_path.read_bytes(), password=None)
+        loaded = serialization.load_pem_private_key(
+            private_key_path.read_bytes(), password=None
+        )
         if not isinstance(loaded, ed25519.Ed25519PrivateKey):
             raise RunnerBoundaryError("reviewer private key must be Ed25519")
         encoded = canonicalize_jcs(sign_runner_boundary(unsigned, loaded)) + b"\n"
         destination.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{destination.name}.", dir=destination.parent
+        )
         try:
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "wb") as handle:

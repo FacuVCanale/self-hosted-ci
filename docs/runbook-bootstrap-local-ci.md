@@ -235,6 +235,45 @@ activation y los `ExecStartPre` de boundary, network policy, proxy y GARM lo
 revalidan otra vez. Cualquier cambio de bytes, owner, group, mode, hardlink o
 symlink bloquea el arranque.
 
+En Windows, la instalación o actualización reproducible usa un bundle tar
+público dentro de `C:\ProgramData\self-hosted-ci\package`. El tar debe preservar
+owner/mode Unix y contener un único árbol `contract/` con:
+
+- `runner-boundary-template-v2.json`;
+- `runner-boundary-v2.json`, ya firmado por el reviewer independiente;
+- `reviewer-public-key.pem` y `reviewer-key.sha256`;
+- todos los refs relativos medidos por el bundle (por ejemplo `evidence/` y
+  `live/`).
+
+El wrapper vuelve a ejecutar staging y collection dentro de
+`Ubuntu-24.04-CI`, exige igualdad canónica con el contenido firmado, verifica y
+recién entonces provisiona. No recibe claves privadas, no habilita GARM, no
+configura GitHub y no crea ni modifica `outbound-worker.runtime-ready`.
+
+Desde una PowerShell elevada, primero inspeccioná el plan:
+
+```powershell
+& .\install-wsl-jit-live-contract.ps1 `
+  -ExpectedServiceAccountSid "<SID-exacto>"
+```
+
+Aplicá el mismo bundle content-addressed con los dos acknowledgements:
+
+```powershell
+& .\install-wsl-jit-live-contract.ps1 `
+  -ExpectedServiceAccountSid "<SID-exacto>" `
+  -Apply `
+  -AcknowledgeLiveContractMutation `
+  -AcknowledgeOneTimePasswordRotation
+```
+
+El bundle por defecto es
+`artifacts/live-contract/live-contract-bundle.tar`; `-BundleRelativePath`
+permite otro path relativo seguro dentro de `package`. En éxito, la tarea
+Password/LUA, su credencial almacenada y el staging desaparecen. En falla, el
+wrapper rota otra vez la contraseña y conserva diagnóstico público versionado
+en `C:\ProgramData\self-hosted-ci\diagnostics\live-contract-install\v1`.
+
 Aplicar el contrato únicamente con evidencia verificada y la clave pública del
 reviewer (nunca con su clave privada):
 

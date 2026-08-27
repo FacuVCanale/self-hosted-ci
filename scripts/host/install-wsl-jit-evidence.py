@@ -63,7 +63,9 @@ def install(evidence: Path, measurement_root: Path, target_root: Path) -> None:
         for ref in check.get("evidence_refs", [])
     )
     if set(records) != required:
-        raise InstallError("measurement artifacts are not the exact signed reference set")
+        raise InstallError(
+            "measurement artifacts are not the exact signed reference set"
+        )
 
     target_evidence = target_root / "host-evidence"
     target_bundle = target_root / "runner-boundary-v2.json"
@@ -83,11 +85,17 @@ def install(evidence: Path, measurement_root: Path, target_root: Path) -> None:
             if record.get("uid") != 0 or record.get("gid") != 0:
                 raise InstallError(f"signed evidence is not root-owned: {ref}")
             mode_text = record.get("mode")
-            if not isinstance(mode_text, str) or len(mode_text) != 4 or any(ch not in "01234567" for ch in mode_text):
+            if (
+                not isinstance(mode_text, str)
+                or len(mode_text) != 4
+                or any(ch not in "01234567" for ch in mode_text)
+            ):
                 raise InstallError(f"signed evidence mode is invalid: {ref}")
             mode = int(mode_text, 8)
             if mode & 0o7137:
-                raise InstallError(f"signed evidence is writable/executable outside root: {ref}")
+                raise InstallError(
+                    f"signed evidence is writable/executable outside root: {ref}"
+                )
             source = safe_ref(measurement_root, ref)
             destination = stage.joinpath(*PurePosixPath(ref).parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -140,7 +148,9 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, InstallError, TypeError, ValueError) as exc:
         print(f"evidence installation blocked: {exc}", file=sys.stderr)
         return 2
-    print('{"status":"installed","bundle":"runner-boundary-v2.json","measurement_root":"host-evidence","root_owned":true,"symlinks":false}')
+    print(
+        '{"status":"installed","bundle":"runner-boundary-v2.json","measurement_root":"host-evidence","root_owned":true,"symlinks":false}'
+    )
     return 0
 
 

@@ -6,8 +6,12 @@ import tempfile
 import unittest
 
 from github_automation.coordinator import (
-    CoordinatorUnavailable, ReserveDefinitelyUnavailableBeforeEffect,
-    ReservePartialFailure, github_hosted_fallback, main, outbound_local_dispatch,
+    CoordinatorUnavailable,
+    ReserveDefinitelyUnavailableBeforeEffect,
+    ReservePartialFailure,
+    github_hosted_fallback,
+    main,
+    outbound_local_dispatch,
 )
 from github_automation.github import ObservedWorkflowJob
 from tests.github_automation.test_github_contracts import protocol
@@ -32,7 +36,9 @@ class CoordinatorCliTests(unittest.TestCase):
     def test_coordinate_and_reconcile_are_inert_without_external_adapter(self) -> None:
         self.assertEqual(2, main(["coordinate"], {}))
         self.assertEqual(2, main(["reconcile"], {}))
-        self.assertEqual(2, main(["coordinate"], {"CI_GATE_COORDINATOR_ENABLED": "true"}))
+        self.assertEqual(
+            2, main(["coordinate"], {"CI_GATE_COORDINATOR_ENABLED": "true"})
+        )
 
     def test_child_validates_before_emitting_fixed_scalar_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -43,7 +49,9 @@ class CoordinatorCliTests(unittest.TestCase):
                 "GITHUB_OUTPUT": str(output),
             }
             self.assertEqual(0, main(["child"], environment))
-            values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            values = dict(
+                line.split("=", 1) for line in output.read_text().splitlines()
+            )
             self.assertEqual("local", values["backend"])
             self.assertEqual("c" * 40, values["tested_sha"])
 
@@ -75,87 +83,194 @@ class CoordinatorCliTests(unittest.TestCase):
         self.assertEqual(2, main(["child", "--mark-started"], environment))
         self.assertEqual(2, main(["child", "--complete-hosted"], environment))
 
-    def test_outbound_worker_reserves_dispatches_observes_signs_then_finalizes(self) -> None:
+    def test_outbound_worker_reserves_dispatches_observes_signs_then_finalizes(
+        self,
+    ) -> None:
         calls = []
         reservation = {
             "allocation_reservation_version": 1,
             "allocation_id": "12345678-1234-4123-8123-123456789abc",
             "nonce": "A" * 43,
             "scale_set_name": "wsl-jit-" + "1" * 32,
-            "repository_id": "123", "repository": "example-owner/example-repo",
+            "repository_id": "123",
+            "repository": "example-owner/example-repo",
             "head_sha": "a" * 40,
             "workflow_ref": "example-owner/example-repo/.github/workflows/ci-gate-child.yml@refs/heads/main",
-            "job_name": "local-quality", "authority_kind": "personal-repository",
-            "runner_group": None, "labels": ["wsl-jit-" + "1" * 32],
-            "image_fingerprint": "d" * 64, "issued_at": "2026-08-26T12:00:00Z",
-            "expires_at": "2026-08-26T12:05:00Z", "max_jobs": 1, "ephemeral": True,
+            "job_name": "local-quality",
+            "authority_kind": "personal-repository",
+            "runner_group": None,
+            "labels": ["wsl-jit-" + "1" * 32],
+            "image_fingerprint": "d" * 64,
+            "issued_at": "2026-08-26T12:00:00Z",
+            "expires_at": "2026-08-26T12:05:00Z",
+            "max_jobs": 1,
+            "ephemeral": True,
         }
+
         class Allocation:
-            def reserve(self, value): calls.append("reserve"); return {"allocation_id": value["allocation_id"], "scale_set_id": "9", "runner_label": value["scale_set_name"], "state": "reserved-disabled"}
-            def finalize(self, envelope): calls.append(("finalize", envelope["payload"]["job_id"])); return {"allocation_id": reservation["allocation_id"], "state": "enabled-awaiting-claim"}
-            def recover(self, allocation_id): calls.append(("recover", allocation_id))
+            def reserve(self, value):
+                calls.append("reserve")
+                return {
+                    "allocation_id": value["allocation_id"],
+                    "scale_set_id": "9",
+                    "runner_label": value["scale_set_name"],
+                    "state": "reserved-disabled",
+                }
+
+            def finalize(self, envelope):
+                calls.append(("finalize", envelope["payload"]["job_id"]))
+                return {
+                    "allocation_id": reservation["allocation_id"],
+                    "state": "enabled-awaiting-claim",
+                }
+
+            def recover(self, allocation_id):
+                calls.append(("recover", allocation_id))
+
         class GitHub:
-            def dispatch_package(self, package): calls.append(("dispatch", package["runner_label"])); return 444
-            def observe_exact_job(self, run_id, label): calls.append(("observe", run_id, label)); return ObservedWorkflowJob(444, 1, 555, "local-quality", "f" * 40)
+            def dispatch_package(self, package):
+                calls.append(("dispatch", package["runner_label"]))
+                return 444
+
+            def observe_exact_job(self, run_id, label):
+                calls.append(("observe", run_id, label))
+                return ObservedWorkflowJob(444, 1, 555, "local-quality", "f" * 40)
+
         class Signer:
-            def sign_allocation(self, payload): calls.append(("sign", payload["run_id"])); return {"payload": payload, "signature": "external"}
-        package, observed = outbound_local_dispatch(protocol(), reservation, allocation=Allocation(), github=GitHub(), signer=Signer())
+            def sign_allocation(self, payload):
+                calls.append(("sign", payload["run_id"]))
+                return {"payload": payload, "signature": "external"}
+
+        package, observed = outbound_local_dispatch(
+            protocol(),
+            reservation,
+            allocation=Allocation(),
+            github=GitHub(),
+            signer=Signer(),
+        )
         self.assertEqual(reservation["scale_set_name"], package.values["runner_label"])
         self.assertEqual(555, observed.job_id)
-        self.assertEqual(["reserve", ("dispatch", reservation["scale_set_name"]), ("observe", 444, reservation["scale_set_name"]), ("sign", "444"), ("finalize", "555")], calls)
+        self.assertEqual(
+            [
+                "reserve",
+                ("dispatch", reservation["scale_set_name"]),
+                ("observe", 444, reservation["scale_set_name"]),
+                ("sign", "444"),
+                ("finalize", "555"),
+            ],
+            calls,
+        )
 
-    def test_local_unavailability_falls_back_before_dispatch_without_local_authority(self) -> None:
+    def test_local_unavailability_falls_back_before_dispatch_without_local_authority(
+        self,
+    ) -> None:
         fallback = github_hosted_fallback(protocol())
         self.assertEqual("github", fallback.values["backend"])
-        for field in ("allocation_id", "allocation_nonce", "runner_label", "local_child_run_id", "local_child_job_id", "attestation_id"):
+        for field in (
+            "allocation_id",
+            "allocation_nonce",
+            "runner_label",
+            "local_child_run_id",
+            "local_child_job_id",
+            "attestation_id",
+        ):
             self.assertIsNone(fallback.values[field])
 
-    def test_reserve_unavailability_dispatches_hosted_without_local_authority(self) -> None:
+    def test_reserve_unavailability_dispatches_hosted_without_local_authority(
+        self,
+    ) -> None:
         dispatched = []
+
         class Allocation:
-            def reserve(self, value): raise ReserveDefinitelyUnavailableBeforeEffect("broker unavailable")
+            def reserve(self, value):
+                raise ReserveDefinitelyUnavailableBeforeEffect("broker unavailable")
+
         class GitHub:
-            def dispatch_package(self, package): dispatched.append(package); return 999
-        hosted, observed = outbound_local_dispatch(protocol(), {}, allocation=Allocation(), github=GitHub(), signer=object())
+            def dispatch_package(self, package):
+                dispatched.append(package)
+                return 999
+
+        hosted, observed = outbound_local_dispatch(
+            protocol(), {}, allocation=Allocation(), github=GitHub(), signer=object()
+        )
         self.assertIsNone(observed)
         self.assertEqual("github", hosted.values["backend"])
         self.assertEqual([hosted.values], dispatched)
 
     def test_ambiguous_reserve_failure_blocks_without_hosted_dispatch(self) -> None:
         dispatched = []
+
         class Allocation:
-            def reserve(self, value): raise OSError("connection dropped")
+            def reserve(self, value):
+                raise OSError("connection dropped")
+
         class GitHub:
-            def dispatch_package(self, package): dispatched.append(package); return 999
+            def dispatch_package(self, package):
+                dispatched.append(package)
+                return 999
+
         with self.assertRaisesRegex(CoordinatorUnavailable, "ambiguous"):
-            outbound_local_dispatch(protocol(), {}, allocation=Allocation(), github=GitHub(), signer=object())
+            outbound_local_dispatch(
+                protocol(),
+                {},
+                allocation=Allocation(),
+                github=GitHub(),
+                signer=object(),
+            )
         self.assertEqual([], dispatched)
 
-    def test_partial_reserve_recovers_exact_allocation_before_hosted_fallback(self) -> None:
+    def test_partial_reserve_recovers_exact_allocation_before_hosted_fallback(
+        self,
+    ) -> None:
         value = {"allocation_id": "12345678-1234-4123-8123-123456789abc"}
         calls = []
+
         class Allocation:
-            def reserve(self, reservation): raise ReservePartialFailure(reservation["allocation_id"])
+            def reserve(self, reservation):
+                raise ReservePartialFailure(reservation["allocation_id"])
+
             def recover(self, allocation_id):
                 calls.append(("recover", allocation_id))
                 return {"allocation_id": allocation_id, "state": "absent"}
+
         class GitHub:
-            def dispatch_package(self, package): calls.append(("dispatch", package["backend"])); return 999
-        hosted, observed = outbound_local_dispatch(protocol(), value, allocation=Allocation(), github=GitHub(), signer=object())
+            def dispatch_package(self, package):
+                calls.append(("dispatch", package["backend"]))
+                return 999
+
+        hosted, observed = outbound_local_dispatch(
+            protocol(), value, allocation=Allocation(), github=GitHub(), signer=object()
+        )
         self.assertIsNone(observed)
         self.assertEqual("github", hosted.values["backend"])
-        self.assertEqual([("recover", value["allocation_id"]), ("dispatch", "github")], calls)
+        self.assertEqual(
+            [("recover", value["allocation_id"]), ("dispatch", "github")], calls
+        )
 
     def test_partial_reserve_without_exact_absence_proof_blocks_fallback(self) -> None:
         value = {"allocation_id": "12345678-1234-4123-8123-123456789abc"}
         dispatched = []
+
         class Allocation:
-            def reserve(self, reservation): raise ReservePartialFailure(reservation["allocation_id"])
-            def recover(self, allocation_id): return {"allocation_id": allocation_id, "state": "cleaned"}
+            def reserve(self, reservation):
+                raise ReservePartialFailure(reservation["allocation_id"])
+
+            def recover(self, allocation_id):
+                return {"allocation_id": allocation_id, "state": "cleaned"}
+
         class GitHub:
-            def dispatch_package(self, package): dispatched.append(package); return 999
+            def dispatch_package(self, package):
+                dispatched.append(package)
+                return 999
+
         with self.assertRaisesRegex(CoordinatorUnavailable, "prove absence"):
-            outbound_local_dispatch(protocol(), value, allocation=Allocation(), github=GitHub(), signer=object())
+            outbound_local_dispatch(
+                protocol(),
+                value,
+                allocation=Allocation(),
+                github=GitHub(),
+                signer=object(),
+            )
         self.assertEqual([], dispatched)
 
 

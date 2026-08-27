@@ -10,7 +10,12 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from github_automation.crypto import spki_fingerprint
 from github_automation.runner_jit import SqliteAllocationLedger, sign_allocation
-from github_automation.runner_jit_broker import AllocationBroker, ExternalLiveWorkflowJobVerifier, GarmCliAllocationDriver, JobStartedContext
+from github_automation.runner_jit_broker import (
+    AllocationBroker,
+    ExternalLiveWorkflowJobVerifier,
+    GarmCliAllocationDriver,
+    JobStartedContext,
+)
 from tests.github_automation.test_runner_jit import payload, reservation
 
 
@@ -23,40 +28,68 @@ class FakeGarm:
         self.scales: dict[str, dict] = {}
         self.runner_name = "runner-unique"
 
-    def assert_no_persistent_scale_set(self): self.events.append("assert-zero-persistent")
+    def assert_no_persistent_scale_set(self):
+        self.events.append("assert-zero-persistent")
+
     def ensure_disabled_scale_set(self, value):
         self.events.append("create-disabled")
         self.scales[value["scale_set_name"]] = {"id": "41", "enabled": False}
         return "41"
-    def bind_signed_allocation(self, scale_id, value, envelope): self.events.append("bind-signed")
+
+    def bind_signed_allocation(self, scale_id, value, envelope):
+        self.events.append("bind-signed")
+
     def find_scale_set(self, name):
         return self.scales.get(name, {}).get("id")
+
     def enable_scale_set(self, scale_id, name):
-        self.events.append("enable"); self.scales[name]["enabled"] = True
+        self.events.append("enable")
+        self.scales[name]["enabled"] = True
+
     def assert_runner_claim(self, scale_id, name, runner_name, payload):
         self.events.append("claim")
-        if runner_name != self.runner_name or not self.scales[name]["enabled"]: raise AssertionError
+        if runner_name != self.runner_name or not self.scales[name]["enabled"]:
+            raise AssertionError
+
     def disable_scale_set(self, scale_id, name):
-        self.events.append("disable"); self.scales[name]["enabled"] = False
-    def drain_scale_set(self, scale_id, name): self.events.append("drain")
-    def delete_scale_set(self, scale_id, name): self.events.append("delete"); self.scales.pop(name)
+        self.events.append("disable")
+        self.scales[name]["enabled"] = False
+
+    def drain_scale_set(self, scale_id, name):
+        self.events.append("drain")
+
+    def delete_scale_set(self, scale_id, name):
+        self.events.append("delete")
+        self.scales.pop(name)
+
     def assert_scale_set_absent(self, name):
         self.events.append("absent")
-        if name in self.scales: raise AssertionError
+        if name in self.scales:
+            raise AssertionError
+
     def measure_cleanup(self, allocation_id, name):
-        if name in self.scales: raise AssertionError
+        if name in self.scales:
+            raise AssertionError
         return {
-            "registration_removed": True, "workspace_removed": True,
-            "token_removed": True, "container_removed": True,
-            "allocation_removed": True, "orphan_registrations": 0,
+            "registration_removed": True,
+            "workspace_removed": True,
+            "token_removed": True,
+            "container_removed": True,
+            "allocation_removed": True,
+            "orphan_registrations": 0,
         }
+
     def assert_runtime_empty(self):
-        if self.scales: raise AssertionError
+        if self.scales:
+            raise AssertionError
 
 
 class FakeLiveJobVerifier:
-    def __init__(self): self.calls = []
-    def verify(self, payload, context): self.calls.append((payload["job_id"], context.run_id))
+    def __init__(self):
+        self.calls = []
+
+    def verify(self, payload, context):
+        self.calls.append((payload["job_id"], context.run_id))
 
 
 class AllocationBrokerTests(unittest.TestCase):
@@ -67,22 +100,30 @@ class AllocationBrokerTests(unittest.TestCase):
         self.ledger = SqliteAllocationLedger(Path(self.tempdir.name) / "ledger.sqlite3")
         self.live = FakeLiveJobVerifier()
         self.broker = AllocationBroker(
-            self.ledger, self.driver, self.private.public_key(),
-            spki_fingerprint(self.private.public_key()), self.live,
+            self.ledger,
+            self.driver,
+            self.private.public_key(),
+            spki_fingerprint(self.private.public_key()),
+            self.live,
         )
         self.payload = payload()
         self.reservation = reservation()
         self.envelope = sign_allocation(self.payload, self.private, now=NOW)
 
-    def tearDown(self): self.tempdir.cleanup()
+    def tearDown(self):
+        self.tempdir.cleanup()
 
     def context(self, **changes):
         value = {
-            "repository_id": self.payload["repository_id"], "repository": self.payload["repository"],
-            "dispatch_sha": self.payload["dispatch_sha"], "tested_sha": self.payload["tested_sha"],
+            "repository_id": self.payload["repository_id"],
+            "repository": self.payload["repository"],
+            "dispatch_sha": self.payload["dispatch_sha"],
+            "tested_sha": self.payload["tested_sha"],
             "workflow_ref": self.payload["workflow_ref"],
-            "run_id": self.payload["run_id"], "run_attempt": self.payload["run_attempt"],
-            "job_name": self.payload["job_name"], "runner_name": self.driver.runner_name,
+            "run_id": self.payload["run_id"],
+            "run_attempt": self.payload["run_attempt"],
+            "job_name": self.payload["job_name"],
+            "runner_name": self.driver.runner_name,
             "scale_set_name": self.payload["scale_set_name"],
         }
         value.update(changes)
@@ -91,60 +132,103 @@ class AllocationBrokerTests(unittest.TestCase):
     def test_exact_transient_lifecycle_has_no_persistent_scale_set(self):
         prepared = self.broker.reserve(self.reservation, now=NOW)
         self.assertEqual(self.payload["scale_set_name"], prepared["runner_label"])
-        self.assertEqual("reserved", self.ledger.get(self.payload["allocation_id"]).state)
+        self.assertEqual(
+            "reserved", self.ledger.get(self.payload["allocation_id"]).state
+        )
         self.broker.finalize(self.envelope, now=NOW)
         self.broker.job_started(self.payload["allocation_id"], self.context(), now=NOW)
         self.broker.finish(self.payload["allocation_id"], outcome="success")
-        self.assertEqual("cleaned", self.ledger.get(self.payload["allocation_id"]).state)
         self.assertEqual(
-            ["assert-zero-persistent", "create-disabled", "bind-signed", "enable", "claim", "disable",
-             "disable", "drain", "delete", "absent"],
+            "cleaned", self.ledger.get(self.payload["allocation_id"]).state
+        )
+        self.assertEqual(
+            [
+                "assert-zero-persistent",
+                "create-disabled",
+                "bind-signed",
+                "enable",
+                "claim",
+                "disable",
+                "disable",
+                "drain",
+                "delete",
+                "absent",
+            ],
             self.driver.events,
         )
         self.assertEqual({}, self.driver.scales)
-        self.assertEqual([(self.payload["job_id"], self.payload["run_id"])], self.live.calls)
+        self.assertEqual(
+            [(self.payload["job_id"], self.payload["run_id"])], self.live.calls
+        )
 
     def test_provider_bootstrap_installs_signed_binding_and_fail_closed_hook(self):
         hook = Path(self.tempdir.name) / "hook.py"
         hook.write_text("#!/usr/bin/env python3\nprint('hook')\n", encoding="utf-8")
-        driver = GarmCliAllocationDriver({
-            "garm_cli_home": "/var/lib/garm", "provider_name": "incus_ci_jit",
-            "image_alias": "runner-pinned", "image_fingerprint": "b" * 64,
-            "targets": {self.payload["repository_id"]: {
-                "authority_kind": "personal-repository", "entity_flag": "--repo",
-                "entity_id": "1", "entity_name": self.payload["repository"], "runner_group": None,
-            }},
-        }, hook)
+        driver = GarmCliAllocationDriver(
+            {
+                "garm_cli_home": "/var/lib/garm",
+                "provider_name": "incus_ci_jit",
+                "image_alias": "runner-pinned",
+                "image_fingerprint": "b" * 64,
+                "targets": {
+                    self.payload["repository_id"]: {
+                        "authority_kind": "personal-repository",
+                        "entity_flag": "--repo",
+                        "entity_id": "1",
+                        "entity_name": self.payload["repository"],
+                        "runner_group": None,
+                    }
+                },
+            },
+            hook,
+        )
         bootstrap = driver._bootstrap(self.envelope).decode("utf-8")
         self.assertIn("/etc/self-hosted-ci/allocation.json", bootstrap)
         self.assertIn(self.payload["allocation_id"], bootstrap)
         self.assertIn(self.payload["scale_set_name"], bootstrap)
-        self.assertIn("ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/self-hosted-ci/bin/runner-job-started-hook.py", bootstrap)
+        self.assertIn(
+            "ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/self-hosted-ci/bin/runner-job-started-hook.py",
+            bootstrap,
+        )
         self.assertIn("systemctl daemon-reexec", bootstrap)
 
     def test_hook_uses_only_fixed_bridge_local_broker_before_steps(self):
-        source = (Path(__file__).parents[2] / "scripts/host/runner-job-started-hook.py").read_text()
+        source = (
+            Path(__file__).parents[2] / "scripts/host/runner-job-started-hook.py"
+        ).read_text()
         self.assertIn('BROKER_URL = "http://10.254.0.1:8079/v1/job-started"', source)
         self.assertNotIn("BROKER_URL = os.environ", source)
         for field in (
-            "GITHUB_REPOSITORY_ID", "GITHUB_REPOSITORY", "CI_GATE_TRUSTED_TESTED_SHA", "GITHUB_WORKFLOW_REF",
-            "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB", "RUNNER_NAME",
+            "GITHUB_REPOSITORY_ID",
+            "GITHUB_REPOSITORY",
+            "CI_GATE_TRUSTED_TESTED_SHA",
+            "GITHUB_WORKFLOW_REF",
+            "GITHUB_RUN_ID",
+            "GITHUB_RUN_ATTEMPT",
+            "GITHUB_JOB",
+            "RUNNER_NAME",
         ):
             self.assertIn(field, source)
         self.assertIn("response.status != 204 or response_body", source)
 
     def test_broker_http_threads_are_strictly_bounded(self):
-        source = (Path(__file__).parents[2] / "scripts/host/garm-allocation-broker.py").read_text()
+        source = (
+            Path(__file__).parents[2] / "scripts/host/garm-allocation-broker.py"
+        ).read_text()
         self.assertIn("class BoundedThreadingHTTPServer", source)
         self.assertIn("threading.BoundedSemaphore(max_workers)", source)
         self.assertIn("max_workers=4", source)
 
     def test_external_live_job_verifier_requires_exact_numeric_job_response(self):
         executable = Path(self.tempdir.name) / "verify-job"
-        executable.write_text("#!/bin/sh\nprintf '%s' '{\"verified\":false}'\n", encoding="utf-8")
+        executable.write_text(
+            "#!/bin/sh\nprintf '%s' '{\"verified\":false}'\n", encoding="utf-8"
+        )
         executable.chmod(0o755)
         verifier = ExternalLiveWorkflowJobVerifier(executable)
-        with self.assertRaisesRegex(ValueError, "live workflow-job verifier executable is unsafe"):
+        with self.assertRaisesRegex(
+            ValueError, "live workflow-job verifier executable is unsafe"
+        ):
             verifier.verify(self.payload, self.context())
 
     def test_job_started_cross_binding_fails_before_disable_or_start(self):
@@ -162,7 +246,9 @@ class AllocationBrokerTests(unittest.TestCase):
         self.broker.finalize(self.envelope, now=NOW)
         recovered = self.broker.recover_all()
         self.assertEqual([self.payload["allocation_id"]], recovered)
-        self.assertEqual("cleaned", self.ledger.get(self.payload["allocation_id"]).state)
+        self.assertEqual(
+            "cleaned", self.ledger.get(self.payload["allocation_id"]).state
+        )
         self.assertEqual([], self.broker.recover_all())
         self.assertEqual({}, self.driver.scales)
 
@@ -183,7 +269,9 @@ class AllocationBrokerTests(unittest.TestCase):
         self.broker.reserve(first, now=NOW)
         self.broker.reserve(second, now=NOW)
         receipt = self.broker.recover(first["allocation_id"])
-        self.assertEqual({"allocation_id": first["allocation_id"], "state": "absent"}, receipt)
+        self.assertEqual(
+            {"allocation_id": first["allocation_id"], "state": "absent"}, receipt
+        )
         self.assertNotIn(first["scale_set_name"], self.driver.scales)
         self.assertIn(second["scale_set_name"], self.driver.scales)
         self.assertEqual("reserved", self.ledger.get(second["allocation_id"]).state)
@@ -192,12 +280,17 @@ class AllocationBrokerTests(unittest.TestCase):
         self.broker.reserve(self.reservation, now=NOW)
         self.broker.finalize(self.envelope, now=NOW)
         receipt = self.broker.finish(self.payload["allocation_id"], outcome="failure")
-        self.assertEqual({
-            "allocation_id": self.payload["allocation_id"],
-            "runner_label": self.payload["scale_set_name"],
-            "state": "cleaned",
-        }, receipt)
-        self.assertEqual("cleaned", self.ledger.get(self.payload["allocation_id"]).state)
+        self.assertEqual(
+            {
+                "allocation_id": self.payload["allocation_id"],
+                "runner_label": self.payload["scale_set_name"],
+                "state": "cleaned",
+            },
+            receipt,
+        )
+        self.assertEqual(
+            "cleaned", self.ledger.get(self.payload["allocation_id"]).state
+        )
         self.assertNotIn(self.payload["scale_set_name"], self.driver.scales)
 
     def test_cleanup_proof_is_exact_cross_label_safe_and_concurrent(self):
@@ -207,11 +300,18 @@ class AllocationBrokerTests(unittest.TestCase):
         receipt = self.broker.finish(self.payload["allocation_id"], outcome="success")
         self.assertEqual("cleaned", receipt["state"])
         with self.assertRaisesRegex(ValueError, "crossed"):
-            self.broker.prove_clean(self.payload["allocation_id"], "wsl-jit-" + "0" * 32)
+            self.broker.prove_clean(
+                self.payload["allocation_id"], "wsl-jit-" + "0" * 32
+            )
         with ThreadPoolExecutor(max_workers=4) as pool:
-            proofs = list(pool.map(lambda _: self.broker.prove_clean(
-                self.payload["allocation_id"], self.payload["scale_set_name"]
-            ), range(8)))
+            proofs = list(
+                pool.map(
+                    lambda _: self.broker.prove_clean(
+                        self.payload["allocation_id"], self.payload["scale_set_name"]
+                    ),
+                    range(8),
+                )
+            )
         self.assertTrue(all(proof["runtime_empty"] is True for proof in proofs))
 
     def test_cleanup_proof_rejects_orphan_runtime(self):
@@ -221,7 +321,9 @@ class AllocationBrokerTests(unittest.TestCase):
         self.broker.finish(self.payload["allocation_id"], outcome="success")
         self.driver.scales["orphan"] = {"id": "99", "enabled": False}
         with self.assertRaises(AssertionError):
-            self.broker.prove_clean(self.payload["allocation_id"], self.payload["scale_set_name"])
+            self.broker.prove_clean(
+                self.payload["allocation_id"], self.payload["scale_set_name"]
+            )
 
 
 if __name__ == "__main__":

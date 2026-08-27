@@ -8,7 +8,11 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from github_automation.check_delivery import AmbiguousCheckWrite, CheckDelivery, deliver_exact
+from github_automation.check_delivery import (
+    AmbiguousCheckWrite,
+    CheckDelivery,
+    deliver_exact,
+)
 from github_automation.github import (
     AppAuthorityV1,
     ControlFailure,
@@ -154,7 +158,12 @@ def successful_auth_http(**overrides: object) -> FakeHTTP:
         "repositories": [{"id": 123, "full_name": REPOSITORY}],
     }
     repository = {"id": 123, "full_name": REPOSITORY}
-    objects = {"app": app, "installation": installation, "token": token, "repository": repository}
+    objects = {
+        "app": app,
+        "installation": installation,
+        "token": token,
+        "repository": repository,
+    }
     for key, value in overrides.items():
         objects[key] = value
     return FakeHTTP(
@@ -177,9 +186,7 @@ class GitHubAppAuthenticationTests(unittest.TestCase):
         self.assertEqual(REPOSITORY, token.repository)
         self.assertNotIn(token.value, repr(token))
         self.assertEqual(4, len(http.requests))
-        self.assertEqual(
-            ("GET", "https://api.github.com/app"), http.requests[0][:2]
-        )
+        self.assertEqual(("GET", "https://api.github.com/app"), http.requests[0][:2])
         self.assertEqual(
             ("GET", f"https://api.github.com/repos/{REPOSITORY}/installation"),
             http.requests[1][:2],
@@ -195,39 +202,69 @@ class GitHubAppAuthenticationTests(unittest.TestCase):
             ("GET", f"https://api.github.com/repos/{REPOSITORY}"),
             http.requests[3][:2],
         )
-        self.assertIn("Bearer ghs_installation_secret", http.requests[3][2]["Authorization"])
+        self.assertIn(
+            "Bearer ghs_installation_secret", http.requests[3][2]["Authorization"]
+        )
 
         header, claims = signer.inputs[0].decode().split(".")
-        decode = lambda part: json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+        decode = lambda part: json.loads(
+            base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+        )
         self.assertEqual({"alg": "RS256", "typ": "JWT"}, decode(header))
         self.assertEqual(
-            {"iat": int(NOW.timestamp()) - 60, "exp": int(NOW.timestamp()) + 540, "iss": "111"},
+            {
+                "iat": int(NOW.timestamp()) - 60,
+                "exp": int(NOW.timestamp()) + 540,
+                "iss": "111",
+            },
             decode(claims),
         )
 
     def test_rejects_local_mint_scope_before_http(self) -> None:
         for request in (
             mint_request(repository_id=999),
-            mint_request(permissions={"metadata": "read", "checks": "write", "actions": "write"}),
+            mint_request(
+                permissions={"metadata": "read", "checks": "write", "actions": "write"}
+            ),
         ):
             with self.subTest(request=request):
                 http = FakeHTTP()
                 with self.assertRaises(ControlFailure):
-                    GitHubAppAuthenticator(authority(), identity(), FakeSigner(), http, clock=lambda: NOW).mint(request)
+                    GitHubAppAuthenticator(
+                        authority(), identity(), FakeSigner(), http, clock=lambda: NOW
+                    ).mint(request)
                 self.assertEqual([], http.requests)
 
     def test_rejects_each_remote_authority_drift_before_token_use(self) -> None:
         cases = {
-            "app": {"id": 999, "slug": "ci-gate", "owner": {"login": "example-owner"}, "permissions": dict(MINIMUM_APP_PERMISSIONS)},
-            "installation": {"id": 222, "app_id": 111, "repository_selection": "all", "permissions": dict(MINIMUM_APP_PERMISSIONS), "suspended_at": None},
-            "token": {"token": "x", "expires_at": "2026-08-26T13:00:00Z", "permissions": dict(MINIMUM_APP_PERMISSIONS), "repositories": [{"id": 999, "full_name": REPOSITORY}]},
+            "app": {
+                "id": 999,
+                "slug": "ci-gate",
+                "owner": {"login": "example-owner"},
+                "permissions": dict(MINIMUM_APP_PERMISSIONS),
+            },
+            "installation": {
+                "id": 222,
+                "app_id": 111,
+                "repository_selection": "all",
+                "permissions": dict(MINIMUM_APP_PERMISSIONS),
+                "suspended_at": None,
+            },
+            "token": {
+                "token": "x",
+                "expires_at": "2026-08-26T13:00:00Z",
+                "permissions": dict(MINIMUM_APP_PERMISSIONS),
+                "repositories": [{"id": 999, "full_name": REPOSITORY}],
+            },
             "repository": {"id": 999, "full_name": REPOSITORY},
         }
         for boundary, bad in cases.items():
             with self.subTest(boundary=boundary):
                 http = successful_auth_http(**{boundary: bad})
                 with self.assertRaises(ControlFailure):
-                    GitHubAppAuthenticator(authority(), identity(), FakeSigner(), http, clock=lambda: NOW).mint(mint_request())
+                    GitHubAppAuthenticator(
+                        authority(), identity(), FakeSigner(), http, clock=lambda: NOW
+                    ).mint(mint_request())
 
     def test_rejects_http_json_and_token_ttl_fail_closed(self) -> None:
         bad_ttl = {
@@ -237,11 +274,27 @@ class GitHubAppAuthenticationTests(unittest.TestCase):
             "repositories": [{"id": 123, "full_name": REPOSITORY}],
         }
         with self.assertRaises(ControlFailure):
-            GitHubAppAuthenticator(authority(), identity(), FakeSigner(), successful_auth_http(token=bad_ttl), clock=lambda: NOW).mint(mint_request())
-        for first in (HTTPResponse(500, b"{}"), HTTPResponse(200, b'{"id":111,"id":111}'), HTTPResponse(200, b"[]")):
+            GitHubAppAuthenticator(
+                authority(),
+                identity(),
+                FakeSigner(),
+                successful_auth_http(token=bad_ttl),
+                clock=lambda: NOW,
+            ).mint(mint_request())
+        for first in (
+            HTTPResponse(500, b"{}"),
+            HTTPResponse(200, b'{"id":111,"id":111}'),
+            HTTPResponse(200, b"[]"),
+        ):
             with self.subTest(body=first.body):
                 with self.assertRaises(GitHubAdapterError):
-                    GitHubAppAuthenticator(authority(), identity(), FakeSigner(), FakeHTTP(first), clock=lambda: NOW).mint(mint_request())
+                    GitHubAppAuthenticator(
+                        authority(),
+                        identity(),
+                        FakeSigner(),
+                        FakeHTTP(first),
+                        clock=lambda: NOW,
+                    ).mint(mint_request())
 
     def test_server_one_hour_expiry_derives_shorter_local_usable_deadline(self) -> None:
         token_response = {
@@ -251,16 +304,26 @@ class GitHubAppAuthenticationTests(unittest.TestCase):
             "repositories": [{"id": 123, "full_name": REPOSITORY}],
         }
         token = GitHubAppAuthenticator(
-            authority(), identity(), FakeSigner(), successful_auth_http(token=token_response), clock=lambda: NOW
+            authority(),
+            identity(),
+            FakeSigner(),
+            successful_auth_http(token=token_response),
+            clock=lambda: NOW,
         ).mint(mint_request(ttl_seconds=300))
         self.assertEqual(NOW + timedelta(minutes=5), token.expires_at)
 
         normal = GitHubAppAuthenticator(
-            authority(), identity(), FakeSigner(), successful_auth_http(), clock=lambda: NOW
+            authority(),
+            identity(),
+            FakeSigner(),
+            successful_auth_http(),
+            clock=lambda: NOW,
         ).mint(mint_request())
         self.assertEqual(NOW + timedelta(minutes=59, seconds=30), normal.expires_at)
 
-    def test_every_adapter_rejects_noncanonical_api_url_before_credentials_or_http(self) -> None:
+    def test_every_adapter_rejects_noncanonical_api_url_before_credentials_or_http(
+        self,
+    ) -> None:
         bad_urls = (
             "http://api.github.com",
             "https://api.github.com/",
@@ -271,40 +334,93 @@ class GitHubAppAuthenticationTests(unittest.TestCase):
                 signer = FakeSigner()
                 http = FakeHTTP()
                 with self.assertRaises(ControlFailure):
-                    GitHubAppAuthenticator(authority(), identity(), signer, http, api_url=api_url)
+                    GitHubAppAuthenticator(
+                        authority(), identity(), signer, http, api_url=api_url
+                    )
                 with self.assertRaises(ControlFailure):
-                    ActionsDispatchTransport(actions_token(), identity(), http, api_url=api_url)
+                    ActionsDispatchTransport(
+                        actions_token(), identity(), http, api_url=api_url
+                    )
                 with self.assertRaises(ControlFailure):
-                    GitHubCheckTransport(installation_token(), authority(), http, api_url=api_url, clock=lambda: NOW)
+                    GitHubCheckTransport(
+                        installation_token(),
+                        authority(),
+                        http,
+                        api_url=api_url,
+                        clock=lambda: NOW,
+                    )
                 self.assertEqual([], signer.inputs)
                 self.assertEqual([], http.requests)
 
 
 class DispatchTransportTests(unittest.TestCase):
-    def test_observe_exact_job_polls_until_unique_named_labeled_job_exists(self) -> None:
+    def test_observe_exact_job_polls_until_unique_named_labeled_job_exists(
+        self,
+    ) -> None:
         run = response(200, {"id": 777, "run_attempt": 2, "head_sha": "f" * 40})
-        pending = response(200, {"total_count": 1, "jobs": [
-            {"id": 1, "run_id": 777, "name": "validate trusted dispatch package", "labels": ["ubuntu-24.04"]},
-        ]})
-        ready = response(200, {"total_count": 2, "jobs": [
-            {"id": 1, "run_id": 777, "name": "validate trusted dispatch package", "labels": ["ubuntu-24.04"]},
-            {"id": 888, "run_id": 777, "name": "local-quality", "labels": ["self-hosted", "wsl-jit-" + "1" * 32]},
-        ]})
+        pending = response(
+            200,
+            {
+                "total_count": 1,
+                "jobs": [
+                    {
+                        "id": 1,
+                        "run_id": 777,
+                        "name": "validate trusted dispatch package",
+                        "labels": ["ubuntu-24.04"],
+                    },
+                ],
+            },
+        )
+        ready = response(
+            200,
+            {
+                "total_count": 2,
+                "jobs": [
+                    {
+                        "id": 1,
+                        "run_id": 777,
+                        "name": "validate trusted dispatch package",
+                        "labels": ["ubuntu-24.04"],
+                    },
+                    {
+                        "id": 888,
+                        "run_id": 777,
+                        "name": "local-quality",
+                        "labels": ["self-hosted", "wsl-jit-" + "1" * 32],
+                    },
+                ],
+            },
+        )
         sleeps: list[float] = []
         http = FakeHTTP(run, pending, run, ready)
         adapter = ActionsDispatchTransport(
-            actions_token(), identity(), http, observation_timeout_seconds=5,
-            observation_poll_seconds=.25, monotonic=lambda: 0, sleeper=sleeps.append,
+            actions_token(),
+            identity(),
+            http,
+            observation_timeout_seconds=5,
+            observation_poll_seconds=0.25,
+            monotonic=lambda: 0,
+            sleeper=sleeps.append,
         )
         observed = adapter.observe_exact_job(
             DispatchRequest(REPOSITORY, "child.yml", "main", "main"),
-            777, "wsl-jit-" + "1" * 32,
+            777,
+            "wsl-jit-" + "1" * 32,
         )
-        self.assertEqual((777, 2, 888, "local-quality"), (
-            observed.run_id, observed.run_attempt, observed.job_id, observed.job_name,
-        ))
-        self.assertEqual([.25], sleeps)
-        self.assertTrue(http.requests[-1][1].endswith("/jobs?filter=latest&per_page=100"))
+        self.assertEqual(
+            (777, 2, 888, "local-quality"),
+            (
+                observed.run_id,
+                observed.run_attempt,
+                observed.job_id,
+                observed.job_name,
+            ),
+        )
+        self.assertEqual([0.25], sleeps)
+        self.assertTrue(
+            http.requests[-1][1].endswith("/jobs?filter=latest&per_page=100")
+        )
 
     def test_observe_exact_job_has_a_hard_timeout(self) -> None:
         http = FakeHTTP(
@@ -313,45 +429,70 @@ class DispatchTransportTests(unittest.TestCase):
         )
         clock = iter((0.0, 2.0))
         adapter = ActionsDispatchTransport(
-            actions_token(), identity(), http, observation_timeout_seconds=1,
-            monotonic=lambda: next(clock), sleeper=lambda _seconds: None,
+            actions_token(),
+            identity(),
+            http,
+            observation_timeout_seconds=1,
+            monotonic=lambda: next(clock),
+            sleeper=lambda _seconds: None,
         )
         with self.assertRaisesRegex(ControlFailure, "timed out"):
             adapter.observe_exact_job(
                 DispatchRequest(REPOSITORY, "child.yml", "main", "main"),
-                777, "wsl-jit-" + "1" * 32,
+                777,
+                "wsl-jit-" + "1" * 32,
             )
         self.assertEqual(2, len(http.requests))
 
     def test_dispatch_uses_only_actions_token_and_consumes_exact_run_id(self) -> None:
-        http = FakeHTTP(response(200, {
-            "workflow_run_id": 777,
-            "run_url": "https://api.github.com/repos/example-owner/example-repo/actions/runs/777",
-            "html_url": "https://github.com/example-owner/example-repo/actions/runs/777",
-        }))
+        http = FakeHTTP(
+            response(
+                200,
+                {
+                    "workflow_run_id": 777,
+                    "run_url": "https://api.github.com/repos/example-owner/example-repo/actions/runs/777",
+                    "html_url": "https://github.com/example-owner/example-repo/actions/runs/777",
+                },
+            )
+        )
         adapter = ActionsDispatchTransport(actions_token(), identity(), http)
         request = DispatchRequest(REPOSITORY, "child workflow.yml", "main", "main")
         self.assertEqual(777, adapter.dispatch(request, {"package": "signed"}))
         method, url, headers, body = http.requests[0]
         self.assertEqual("POST", method)
-        self.assertTrue(url.endswith("/actions/workflows/child%20workflow.yml/dispatches"))
+        self.assertTrue(
+            url.endswith("/actions/workflows/child%20workflow.yml/dispatches")
+        )
         self.assertEqual("Bearer ghs_actions_secret", headers["Authorization"])
         self.assertEqual(
-            {"ref": "main", "inputs": {"package": "signed"}}, body
+            {
+                "ref": "main",
+                "inputs": {"package": "signed"},
+                "return_run_details": True,
+            },
+            body,
         )
         self.assertEqual("2026-03-10", headers["X-GitHub-Api-Version"])
 
-    def test_dispatch_rejects_crossed_token_identity_repo_inputs_and_response(self) -> None:
+    def test_dispatch_rejects_crossed_token_identity_repo_inputs_and_response(
+        self,
+    ) -> None:
         with self.assertRaises(ControlFailure):
             ActionsDispatchTransport(installation_token(), identity(), FakeHTTP())  # type: ignore[arg-type]
         with self.assertRaises(ControlFailure):
-            ActionsDispatchTransport(actions_token(), identity(workflow_ref="refs/heads/other"), FakeHTTP())
+            ActionsDispatchTransport(
+                actions_token(), identity(workflow_ref="refs/heads/other"), FakeHTTP()
+            )
         http = FakeHTTP()
         adapter = ActionsDispatchTransport(actions_token(), identity(), http)
         with self.assertRaises(ControlFailure):
-            adapter.dispatch(DispatchRequest("example-owner/other", "child.yml", "main", "main"), {})
+            adapter.dispatch(
+                DispatchRequest("example-owner/other", "child.yml", "main", "main"), {}
+            )
         with self.assertRaises(ProtocolFailure):
-            adapter.dispatch(DispatchRequest(REPOSITORY, "child.yml", "main", "main"), {"bad": 1})  # type: ignore[dict-item]
+            adapter.dispatch(
+                DispatchRequest(REPOSITORY, "child.yml", "main", "main"), {"bad": 1}
+            )  # type: ignore[dict-item]
         self.assertEqual([], http.requests)
         valid_urls = {
             "run_url": "https://api.github.com/repos/example-owner/example-repo/actions/runs/1",
@@ -362,14 +503,27 @@ class DispatchTransportTests(unittest.TestCase):
             response(200, {}),
             response(200, {"workflow_run_id": 1, **valid_urls, "extra": True}),
             response(200, {"workflow_run_id": "1", **valid_urls}),
-            response(200, {"workflow_run_id": 1, **valid_urls, "html_url": "http://github.test/run/1"}),
+            response(
+                200,
+                {
+                    "workflow_run_id": 1,
+                    **valid_urls,
+                    "html_url": "http://github.test/run/1",
+                },
+            ),
         ):
             with self.subTest(result=result):
-                adapter = ActionsDispatchTransport(actions_token(), identity(), FakeHTTP(result))
+                adapter = ActionsDispatchTransport(
+                    actions_token(), identity(), FakeHTTP(result)
+                )
                 with self.assertRaises(ProtocolFailure):
-                    adapter.dispatch(DispatchRequest(REPOSITORY, "child.yml", "main", "main"), {})
+                    adapter.dispatch(
+                        DispatchRequest(REPOSITORY, "child.yml", "main", "main"), {}
+                    )
 
-    def test_productive_request_rejects_legacy_version_ref_and_path_workflow(self) -> None:
+    def test_productive_request_rejects_legacy_version_ref_and_path_workflow(
+        self,
+    ) -> None:
         for changes in (
             {"api_version": "2022-11-28"},
             {"ref": "feature"},
@@ -391,37 +545,70 @@ class CheckTransportTests(unittest.TestCase):
         http = FakeHTTP(
             response(201, {"id": 333, "name": "ci-gate"}),
             response(200, {"id": 333, "head_sha": "a" * 40}),
-            response(200, {
-                "id": 333,
-                "head_sha": "a" * 40,
-                "external_id": "evidence",
-                "conclusion": "success",
-                "status": "completed",
-            }),
+            response(
+                200,
+                {
+                    "id": 333,
+                    "head_sha": "a" * 40,
+                    "external_id": "evidence",
+                    "conclusion": "success",
+                    "status": "completed",
+                },
+            ),
         )
-        adapter = GitHubCheckTransport(installation_token(), authority(), http, clock=lambda: NOW)
-        self.assertEqual(333, adapter.create_exact({"name": "ci-gate", "head_sha": "a" * 40})["id"])
+        adapter = GitHubCheckTransport(
+            installation_token(), authority(), http, clock=lambda: NOW
+        )
+        self.assertEqual(
+            333, adapter.create_exact({"name": "ci-gate", "head_sha": "a" * 40})["id"]
+        )
         self.assertEqual(333, adapter.get_exact(333)["id"])
-        self.assertIsNone(adapter.patch_exact(333, {
-            "conclusion": "success", "head_sha": "a" * 40, "external_id": "evidence"
-        }))
+        self.assertIsNone(
+            adapter.patch_exact(
+                333,
+                {
+                    "conclusion": "success",
+                    "head_sha": "a" * 40,
+                    "external_id": "evidence",
+                },
+            )
+        )
         self.assertEqual(["POST", "GET", "PATCH"], [call[0] for call in http.requests])
-        self.assertTrue(all(call[1].startswith(f"https://api.github.com/repos/{REPOSITORY}/check-runs") for call in http.requests))
-        self.assertTrue(all(call[2]["Authorization"] == "Bearer ghs_installation_secret" for call in http.requests))
+        self.assertTrue(
+            all(
+                call[1].startswith(
+                    f"https://api.github.com/repos/{REPOSITORY}/check-runs"
+                )
+                for call in http.requests
+            )
+        )
+        self.assertTrue(
+            all(
+                call[2]["Authorization"] == "Bearer ghs_installation_secret"
+                for call in http.requests
+            )
+        )
         self.assertEqual(
             {"conclusion": "success", "external_id": "evidence"},
             http.requests[2][3],
         )
 
-    def test_check_transport_rejects_crossed_expired_drifted_and_revoked_authority(self) -> None:
+    def test_check_transport_rejects_crossed_expired_drifted_and_revoked_authority(
+        self,
+    ) -> None:
         with self.assertRaises(ControlFailure):
-            GitHubCheckTransport(actions_token(), authority(), FakeHTTP(), clock=lambda: NOW)  # type: ignore[arg-type]
+            GitHubCheckTransport(
+                actions_token(), authority(), FakeHTTP(), clock=lambda: NOW
+            )  # type: ignore[arg-type]
         for token, auth in (
             (installation_token(expires_at=NOW), authority()),
             (installation_token(repository_id=999), authority()),
             (installation_token(), authority(key_state="revoked")),
         ):
-            with self.subTest(token=token, auth=auth), self.assertRaises(ControlFailure):
+            with (
+                self.subTest(token=token, auth=auth),
+                self.assertRaises(ControlFailure),
+            ):
                 GitHubCheckTransport(token, auth, FakeHTTP(), clock=lambda: NOW)
 
     def test_every_operation_rechecks_expiry_and_exact_ids(self) -> None:
@@ -436,48 +623,91 @@ class CheckTransportTests(unittest.TestCase):
         self.assertEqual([], http.requests)
         for check_id in (0, -1, True, "1"):
             with self.subTest(check_id=check_id), self.assertRaises(ControlFailure):
-                GitHubCheckTransport(installation_token(), authority(), FakeHTTP(), clock=lambda: NOW).get_exact(check_id)  # type: ignore[arg-type]
+                GitHubCheckTransport(
+                    installation_token(), authority(), FakeHTTP(), clock=lambda: NOW
+                ).get_exact(check_id)  # type: ignore[arg-type]
 
     def test_read_and_patch_reject_wrong_id_or_ambiguous_write(self) -> None:
-        adapter = GitHubCheckTransport(installation_token(), authority(), FakeHTTP(response(200, {"id": 999})), clock=lambda: NOW)
+        adapter = GitHubCheckTransport(
+            installation_token(),
+            authority(),
+            FakeHTTP(response(200, {"id": 999})),
+            clock=lambda: NOW,
+        )
         with self.assertRaises(GitHubAdapterError):
             adapter.get_exact(333)
         exact_payload = {
-            "conclusion": "failure", "head_sha": "a" * 40, "external_id": "evidence"
+            "conclusion": "failure",
+            "head_sha": "a" * 40,
+            "external_id": "evidence",
         }
         mismatches = (
-            {"id": 999, "head_sha": "a" * 40, "external_id": "evidence", "conclusion": "failure"},
-            {"id": 333, "head_sha": "b" * 40, "external_id": "evidence", "conclusion": "failure"},
-            {"id": 333, "head_sha": "a" * 40, "external_id": "other", "conclusion": "failure"},
-            {"id": 333, "head_sha": "a" * 40, "external_id": "evidence", "conclusion": "success"},
+            {
+                "id": 999,
+                "head_sha": "a" * 40,
+                "external_id": "evidence",
+                "conclusion": "failure",
+            },
+            {
+                "id": 333,
+                "head_sha": "b" * 40,
+                "external_id": "evidence",
+                "conclusion": "failure",
+            },
+            {
+                "id": 333,
+                "head_sha": "a" * 40,
+                "external_id": "other",
+                "conclusion": "failure",
+            },
+            {
+                "id": 333,
+                "head_sha": "a" * 40,
+                "external_id": "evidence",
+                "conclusion": "success",
+            },
         )
         results = [response(500, {}), HTTPResponse(200, b"not-json")]
         results.extend(response(200, value) for value in mismatches)
         for result in results:
             with self.subTest(result=result):
-                adapter = GitHubCheckTransport(installation_token(), authority(), FakeHTTP(result), clock=lambda: NOW)
+                adapter = GitHubCheckTransport(
+                    installation_token(),
+                    authority(),
+                    FakeHTTP(result),
+                    clock=lambda: NOW,
+                )
                 with self.assertRaises(AmbiguousCheckWrite):
                     adapter.patch_exact(333, exact_payload)
 
         http = FakeHTTP()
-        adapter = GitHubCheckTransport(installation_token(), authority(), http, clock=lambda: NOW)
+        adapter = GitHubCheckTransport(
+            installation_token(), authority(), http, clock=lambda: NOW
+        )
         with self.assertRaises(ControlFailure):
             adapter.patch_exact(333, {"conclusion": "failure", "head_sha": "a" * 40})
         self.assertEqual([], http.requests)
 
-    def test_concrete_transport_supports_exact_ambiguous_write_reconciliation(self) -> None:
+    def test_concrete_transport_supports_exact_ambiguous_write_reconciliation(
+        self,
+    ) -> None:
         digest = "d" * 64
         head_sha = "a" * 40
         http = FakeHTTP(
             response(502, {}),
-            response(200, {
-                "id": 333,
-                "external_id": f"github-automation-evidence:{digest}",
-                "head_sha": head_sha,
-                "conclusion": "success",
-            }),
+            response(
+                200,
+                {
+                    "id": 333,
+                    "external_id": f"github-automation-evidence:{digest}",
+                    "head_sha": head_sha,
+                    "conclusion": "success",
+                },
+            ),
         )
-        adapter = GitHubCheckTransport(installation_token(), authority(), http, clock=lambda: NOW)
+        adapter = GitHubCheckTransport(
+            installation_token(), authority(), http, clock=lambda: NOW
+        )
         self.assertEqual(
             "reconciled",
             deliver_exact(CheckDelivery(333, digest, "success", head_sha), adapter),
@@ -506,8 +736,9 @@ class UrllibTransportTests(unittest.TestCase):
             OSError("socket failure"),
         )
         for failure in failures:
-            with self.subTest(failure=type(failure).__name__), patch(
-                "github_automation.github_adapter.urlopen", side_effect=failure
+            with (
+                self.subTest(failure=type(failure).__name__),
+                patch("github_automation.github_adapter.urlopen", side_effect=failure),
             ):
                 with self.assertRaises(GitHubAdapterError):
                     UrllibHTTPTransport().request(
@@ -517,9 +748,7 @@ class UrllibTransportTests(unittest.TestCase):
                     )
 
     def test_normalizes_failure_while_reading_http_error_body(self) -> None:
-        failure = HTTPError(
-            "https://api.github.com/app", 502, "bad gateway", {}, None
-        )
+        failure = HTTPError("https://api.github.com/app", 502, "bad gateway", {}, None)
         failure.read = lambda: (_ for _ in ()).throw(TimeoutError("read timeout"))
         try:
             with patch("github_automation.github_adapter.urlopen", side_effect=failure):

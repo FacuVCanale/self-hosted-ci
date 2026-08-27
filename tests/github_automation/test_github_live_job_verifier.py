@@ -63,33 +63,49 @@ class FakeOpener:
         body = json.loads(value.data) if value.data else None
         self.calls.append((value.method, value.full_url, dict(value.headers), body))
         expected = request()
-        repository = {"id": int(expected["repository_id"]), "full_name": expected["repository"]}
+        repository = {
+            "id": int(expected["repository_id"]),
+            "full_name": expected["repository"],
+        }
         if value.full_url.endswith("/access_tokens"):
             response = {
                 "token": "ghs_" + "x" * 36,
-                "expires_at": datetime.fromtimestamp(NOW, timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                "expires_at": datetime.fromtimestamp(NOW, timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z"),
                 "permissions": {"actions": "read", "metadata": "read"},
                 "repositories": [repository],
             }
             response["expires_at"] = (
-                datetime.fromtimestamp(NOW, timezone.utc) + timedelta(minutes=30)
-            ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                (datetime.fromtimestamp(NOW, timezone.utc) + timedelta(minutes=30))
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
             if self.mutate_token:
                 self.mutate_token(response)
             return Response(response)
         if "/actions/jobs/" in value.full_url:
             response = {
-                "id": 8002, "run_id": 8001,
-                "head_sha": "a" * 40, "name": "local-quality",
-                "labels": expected["labels"], "runner_name": "wsl-jit-runner-1",
-                "runner_group_name": None, "status": "in_progress",
+                "id": 8002,
+                "run_id": 8001,
+                "head_sha": "a" * 40,
+                "name": "local-quality",
+                "labels": expected["labels"],
+                "runner_name": "wsl-jit-runner-1",
+                "runner_group_name": None,
+                "status": "in_progress",
             }
             if self.mutate_job:
                 self.mutate_job(response)
             return Response(response)
         response = {
-            "id": 8001, "run_attempt": 2, "head_sha": "a" * 40,
-            "path": ".github/workflows/ci-gate.yml", "head_branch": "main",
+            "id": 8001,
+            "run_attempt": 2,
+            "head_sha": "a" * 40,
+            "path": ".github/workflows/ci-gate.yml",
+            "head_branch": "main",
             "repository": repository,
         }
         if self.mutate_run:
@@ -105,8 +121,12 @@ class GitHubLiveJobVerifierTests(unittest.TestCase):
     def verify(self, opener: FakeOpener, value: dict | None = None) -> dict:
         validated = VERIFIER.validate_request(value or request())
         return VERIFIER.verify_live_job(
-            validated, 123, 456, self.private_key,
-            api=VERIFIER.GitHubAPI(opener), now=NOW,
+            validated,
+            123,
+            456,
+            self.private_key,
+            api=VERIFIER.GitHubAPI(opener),
+            now=NOW,
         )
 
     def test_exact_live_job_emits_only_broker_contract_json(self) -> None:
@@ -152,7 +172,11 @@ class GitHubLiveJobVerifierTests(unittest.TestCase):
                 self.verify(FakeOpener(mutate_job=mutate))
         # GitHub's workflow-job endpoint does not contractually expose
         # run_attempt; attempt authority comes from the exact run endpoint.
-        self.assertTrue(self.verify(FakeOpener(mutate_job=lambda value: value.update(run_attempt=999)))["verified"])
+        self.assertTrue(
+            self.verify(
+                FakeOpener(mutate_job=lambda value: value.update(run_attempt=999))
+            )["verified"]
+        )
         run_drifts = {
             "run": lambda value: value.update(id=999),
             "attempt": lambda value: value.update(run_attempt=3),
@@ -169,7 +193,9 @@ class GitHubLiveJobVerifierTests(unittest.TestCase):
         mutations = {
             "write": lambda value: value["permissions"].update(actions="write"),
             "extra_read": lambda value: value["permissions"].update(contents="read"),
-            "broad": lambda value: value["repositories"].append({"id": 2, "full_name": "o/r"}),
+            "broad": lambda value: value["repositories"].append(
+                {"id": 2, "full_name": "o/r"}
+            ),
             "wrong_repo": lambda value: value["repositories"][0].update(id=2),
             "expired": lambda value: value.update(expires_at="2020-01-01T00:00:00Z"),
             "long": lambda value: value.update(expires_at="2030-01-01T00:00:00Z"),
@@ -179,10 +205,12 @@ class GitHubLiveJobVerifierTests(unittest.TestCase):
                 self.verify(FakeOpener(mutate_token=mutate))
 
     def test_request_schema_duplicate_keys_and_types_fail_closed(self) -> None:
-        invalid = request(); invalid["extra"] = True
+        invalid = request()
+        invalid["extra"] = True
         with self.assertRaises(VERIFIER.VerificationError):
             VERIFIER.validate_request(invalid)
-        invalid = request(); invalid["labels"] = [["unhashable"]]
+        invalid = request()
+        invalid["labels"] = [["unhashable"]]
         with self.assertRaises(VERIFIER.VerificationError):
             VERIFIER.validate_request(invalid)
         with self.assertRaisesRegex(VERIFIER.VerificationError, "duplicate"):
@@ -191,7 +219,10 @@ class GitHubLiveJobVerifierTests(unittest.TestCase):
     def test_endpoint_and_secret_surfaces_are_fixed(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('API_ROOT = "https://api.github.com"', source)
-        self.assertIn('CONFIG_PATH = Path("/etc/self-hosted-ci/github-live-job-verifier.json")', source)
+        self.assertIn(
+            'CONFIG_PATH = Path("/etc/self-hosted-ci/github-live-job-verifier.json")',
+            source,
+        )
         self.assertNotIn("os.environ", source)
         self.assertNotIn("add_argument", source)
         self.assertIn("HTTP_TIMEOUT_SECONDS = 5", source)

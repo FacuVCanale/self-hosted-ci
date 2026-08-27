@@ -11,7 +11,16 @@ import socketserver
 import urllib.parse
 
 MAX_BODY = 1024 * 1024
-HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"}
+HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
 
 
 def allowed(method: str, raw_path: str) -> bool:
@@ -74,9 +83,15 @@ class CallbackProxy(http.server.BaseHTTPRequestHandler):
             self.send_error(413)
             return
         body = self.rfile.read(length) if length else None
-        headers = {key: value for key, value in self.headers.items() if key.lower() not in HOP_HEADERS and key.lower() != "host"}
+        headers = {
+            key: value
+            for key, value in self.headers.items()
+            if key.lower() not in HOP_HEADERS and key.lower() != "host"
+        }
         headers["Host"] = f"{self.upstream_host}:{self.upstream_port}"
-        upstream = http.client.HTTPConnection(self.upstream_host, self.upstream_port, timeout=15)
+        upstream = http.client.HTTPConnection(
+            self.upstream_host, self.upstream_port, timeout=15
+        )
         try:
             upstream.request(self.command, self.path, body=body, headers=headers)
             response = upstream.getresponse()

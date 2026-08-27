@@ -5,13 +5,12 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import re
 import stat
 import sys
 import urllib.error
 import urllib.request
-
+from pathlib import Path
 
 BROKER_URL = "http://10.254.0.1:8079/v1/job-started"
 ALLOCATION_ID_FILE = Path("/etc/self-hosted-ci/allocation-id")
@@ -40,7 +39,8 @@ def required_env(name: str) -> str:
 def main() -> int:
     try:
         allocation_id = read_root_binding(
-            ALLOCATION_ID_FILE, r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+            ALLOCATION_ID_FILE,
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
         )
         scale_set_name = read_root_binding(SCALE_SET_NAME_FILE, r"wsl-jit-[0-9a-f]{32}")
         attempt = required_env("GITHUB_RUN_ATTEMPT")
@@ -61,19 +61,26 @@ def main() -> int:
                 "scale_set_name": scale_set_name,
             },
         }
-        body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         request = urllib.request.Request(
             BROKER_URL,
             data=body,
             method="POST",
-            headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+            headers={
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+            },
         )
         with urllib.request.urlopen(request, timeout=10) as response:
             response_body = response.read(4097)
             if response.status != 204 or response_body:
                 raise ValueError("allocation broker returned an unexpected response")
     except (OSError, ValueError, UnicodeError, urllib.error.URLError) as exc:
-        print(f"self-hosted-ci job-started hook blocked execution: {exc}", file=sys.stderr)
+        print(
+            f"self-hosted-ci job-started hook blocked execution: {exc}", file=sys.stderr
+        )
         return 1
     return 0
 

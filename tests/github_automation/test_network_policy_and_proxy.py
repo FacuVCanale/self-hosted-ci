@@ -41,41 +41,75 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
 class NetworkPolicyAndProxyTests(unittest.TestCase):
     def test_shell_scripts_are_syntactically_valid(self) -> None:
         for path in (NETWORK_SCRIPT, RUNNER_SCRIPT, INSTALL_SCRIPT):
-            result = subprocess.run(["bash", "-n", str(path)], text=True, capture_output=True)
+            result = subprocess.run(
+                ["bash", "-n", str(path)], text=True, capture_output=True
+            )
             self.assertEqual(0, result.returncode, result.stderr)
 
     def test_nft_policy_is_scoped_atomic_and_fail_closed(self) -> None:
         source = NETWORK_SCRIPT.read_text()
         self.assertIn("nft -f -", source)
-        self.assertIn('table ${table_family} ${table_name}', source)
+        self.assertIn("table ${table_family} ${table_name}", source)
         self.assertIn('iifname "${bridge}" ip saddr != ${runner_subnet}', source)
-        self.assertIn('udp sport 68 udp dport 67', source)
-        self.assertLess(source.index('udp sport 68 udp dport 67'), source.index('ip saddr != ${runner_subnet}'))
-        self.assertIn('tcp dport { 3128, 8079, 8080 }', source)
+        self.assertIn("udp sport 68 udp dport 67", source)
+        self.assertLess(
+            source.index("udp sport 68 udp dport 67"),
+            source.index("ip saddr != ${runner_subnet}"),
+        )
+        self.assertIn("tcp dport { 3128, 8079, 8080 }", source)
         self.assertIn('iifname "${bridge}" counter drop', source)
         self.assertIn('oifname "${bridge}" counter drop', source)
         self.assertIn("quarantine_policy", source)
-        self.assertIn("ExecStop=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh quarantine", (ROOT / "packaging/systemd/self-hosted-ci-network-policy.service").read_text())
+        self.assertIn(
+            "ExecStop=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh quarantine",
+            (
+                ROOT / "packaging/systemd/self-hosted-ci-network-policy.service"
+            ).read_text(),
+        )
 
     def test_squid_is_connect_only_allowlisted_and_rebinding_safe(self) -> None:
         source = SQUID.read_text()
         self.assertIn("http_port 10.254.0.1:3128", source)
         self.assertIn("acl CONNECT method CONNECT", source)
         self.assertIn("acl tls_port port 443", source)
-        for network in ("10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7", "fe80::/10"):
+        for network in (
+            "10.0.0.0/8",
+            "100.64.0.0/10",
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "fc00::/7",
+            "fe80::/10",
+        ):
             self.assertIn(network, source)
-        for domain in (".actions.githubusercontent.com", ".blob.core.windows.net", "objects.githubusercontent.com", "release-assets.githubusercontent.com"):
+        for domain in (
+            ".actions.githubusercontent.com",
+            ".blob.core.windows.net",
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+        ):
             self.assertIn(domain, source)
         self.assertNotIn(" .githubusercontent.com", source)
-        self.assertLess(source.index("http_access deny forbidden_v4"), source.index("http_access allow github_domains"))
-        self.assertIn("access_log stdio:/var/log/self-hosted-ci/squid-access.log", source)
+        self.assertLess(
+            source.index("http_access deny forbidden_v4"),
+            source.index("http_access allow github_domains"),
+        )
+        self.assertIn(
+            "access_log stdio:/var/log/self-hosted-ci/squid-access.log", source
+        )
         self.assertTrue(source.rstrip().endswith("pinger_enable off"))
         self.assertIn("http_access deny all", source)
 
     def test_units_remain_sentinel_gated_and_are_no_longer_placeholders(self) -> None:
-        for name in ("self-hosted-ci-network-policy.service", "self-hosted-ci-egress-proxy.service"):
+        for name in (
+            "self-hosted-ci-network-policy.service",
+            "self-hosted-ci-egress-proxy.service",
+        ):
             source = (ROOT / "packaging/systemd" / name).read_text()
-            self.assertIn("ConditionPathExists=/etc/self-hosted-ci/ACTIVATION_APPROVED", source)
+            self.assertIn(
+                "ConditionPathExists=/etc/self-hosted-ci/ACTIVATION_APPROVED", source
+            )
             self.assertNotIn("ExecStart=/usr/bin/false", source)
 
     def test_installer_is_inert_and_installs_every_runtime_file(self) -> None:
@@ -84,7 +118,14 @@ class NetworkPolicyAndProxyTests(unittest.TestCase):
         self.assertNotIn("systemctl enable", source)
         self.assertIn("systemctl disable --now", source)
         self.assertNotIn("curl ", source)
-        for filename in ("squid.conf", "apply-runner-network-policy.sh", "run-egress-proxies.sh", "garm-callback-proxy.py", "self-hosted-ci-network-policy.service", "self-hosted-ci-egress-proxy.service"):
+        for filename in (
+            "squid.conf",
+            "apply-runner-network-policy.sh",
+            "run-egress-proxies.sh",
+            "garm-callback-proxy.py",
+            "self-hosted-ci-network-policy.service",
+            "self-hosted-ci-egress-proxy.service",
+        ):
             self.assertIn(filename, source)
 
     def test_callback_proxy_forwards_only_metadata_and_callbacks(self) -> None:
@@ -98,7 +139,10 @@ class NetworkPolicyAndProxyTests(unittest.TestCase):
         module.CallbackProxy.upstream_port = upstream.server_port
         module.CallbackProxy.client_network = module.ipaddress.ip_network("127.0.0.0/8")
         proxy = module.Server(("127.0.0.1", 0), module.CallbackProxy)
-        threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (upstream, proxy)]
+        threads = [
+            threading.Thread(target=server.serve_forever, daemon=True)
+            for server in (upstream, proxy)
+        ]
         for thread in threads:
             thread.start()
         try:
@@ -107,7 +151,12 @@ class NetworkPolicyAndProxyTests(unittest.TestCase):
             response = conn.getresponse()
             self.assertEqual(200, response.status)
             response.read()
-            conn.request("POST", "/api/v1/callbacks/runner-id", body=b"{}", headers={"Content-Length": "2"})
+            conn.request(
+                "POST",
+                "/api/v1/callbacks/runner-id",
+                body=b"{}",
+                headers={"Content-Length": "2"},
+            )
             response = conn.getresponse()
             self.assertEqual(204, response.status)
             response.read()
@@ -115,12 +164,23 @@ class NetworkPolicyAndProxyTests(unittest.TestCase):
             response = conn.getresponse()
             self.assertEqual(404, response.status)
             response.read()
-            for path in ("/api/v1/metadata/../admin", "/api/v1/metadata/%2e%2e/admin", "/api/v1/metadata/%2fadmin", "/api/v1/callbacks/%5cadmin"):
+            for path in (
+                "/api/v1/metadata/../admin",
+                "/api/v1/metadata/%2e%2e/admin",
+                "/api/v1/metadata/%2fadmin",
+                "/api/v1/callbacks/%5cadmin",
+            ):
                 conn.request("GET", path)
                 response = conn.getresponse()
                 self.assertIn(response.status, (400, 404))
                 response.read()
-            self.assertEqual(["/api/v1/metadata/runner-id?token=opaque", "/api/v1/callbacks/runner-id"], [item[1] for item in _Upstream.seen[-2:]])
+            self.assertEqual(
+                [
+                    "/api/v1/metadata/runner-id?token=opaque",
+                    "/api/v1/callbacks/runner-id",
+                ],
+                [item[1] for item in _Upstream.seen[-2:]],
+            )
             conn.close()
         finally:
             proxy.shutdown()

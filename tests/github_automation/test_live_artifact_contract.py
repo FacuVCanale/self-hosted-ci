@@ -15,7 +15,9 @@ STAGER = ROOT / "scripts/host/stage-wsl-jit-live-contract.py"
 
 
 def load_verifier():
-    spec = importlib.util.spec_from_file_location("verify_live_artifact_contract", VERIFIER)
+    spec = importlib.util.spec_from_file_location(
+        "verify_live_artifact_contract", VERIFIER
+    )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader
     spec.loader.exec_module(module)
@@ -35,7 +37,10 @@ class LiveArtifactContractTests(unittest.TestCase):
 
     def verify_fixture(self, verifier, bundle, measurement, prefix):
         return verifier.verify_contract(
-            bundle, measurement, prefix, required_targets={self.TARGET},
+            bundle,
+            measurement,
+            prefix,
+            required_targets={self.TARGET},
         )
 
     def fixture(self, root: Path):
@@ -52,13 +57,18 @@ class LiveArtifactContractTests(unittest.TestCase):
         data = source.read_bytes()
         contract = {
             "live_artifact_contract_version": 1,
-            "artifacts": [{
-                "target": self.TARGET,
-                "source_ref": "live/source/runtime.sh",
-                "sha256": hashlib.sha256(data).hexdigest(), "size": len(data),
-                "mode": "0755", "uid": os.stat(target).st_uid,
-                "gid": os.stat(target).st_gid, "kind": "script",
-            }],
+            "artifacts": [
+                {
+                    "target": self.TARGET,
+                    "source_ref": "live/source/runtime.sh",
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "size": len(data),
+                    "mode": "0755",
+                    "uid": os.stat(target).st_uid,
+                    "gid": os.stat(target).st_gid,
+                    "kind": "script",
+                }
+            ],
         }
         contract_path = measurement / verifier.CONTRACT_REF
         contract_path.parent.mkdir(parents=True, exist_ok=True)
@@ -67,18 +77,37 @@ class LiveArtifactContractTests(unittest.TestCase):
 
         def record(path: Path, ref: str):
             info, payload = os.stat(path), path.read_bytes()
-            return {"ref": ref, "sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload), "mode": f"{info.st_mode & 0o7777:04o}", "uid": info.st_uid, "gid": info.st_gid}
+            return {
+                "ref": ref,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+                "mode": f"{info.st_mode & 0o7777:04o}",
+                "uid": info.st_uid,
+                "gid": info.st_gid,
+            }
 
         bundle = root / "boundary.json"
-        bundle.write_text(json.dumps({"measurements": {"artifacts": [
-            record(contract_path, verifier.CONTRACT_REF), record(source, "live/source/runtime.sh")
-        ]}}), encoding="utf-8")
+        bundle.write_text(
+            json.dumps(
+                {
+                    "measurements": {
+                        "artifacts": [
+                            record(contract_path, verifier.CONTRACT_REF),
+                            record(source, "live/source/runtime.sh"),
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
         return verifier, bundle, measurement, root / "installed", target
 
     def test_exact_live_artifact_contract_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
             verifier, bundle, measurement, prefix, _ = self.fixture(Path(tmp))
-            self.assertEqual(self.verify_fixture(verifier, bundle, measurement, prefix), 1)
+            self.assertEqual(
+                self.verify_fixture(verifier, bundle, measurement, prefix), 1
+            )
 
     def test_hash_mode_and_symlink_drift_fail_closed(self):
         for mutation in ("hash", "mode", "symlink"):
@@ -89,7 +118,8 @@ class LiveArtifactContractTests(unittest.TestCase):
                 elif mutation == "mode":
                     os.chmod(target, 0o777)
                 else:
-                    target.unlink(); target.symlink_to("/bin/true")
+                    target.unlink()
+                    target.symlink_to("/bin/true")
                 with self.assertRaises(verifier.ContractError):
                     self.verify_fixture(verifier, bundle, measurement, prefix)
 
@@ -103,9 +133,12 @@ class LiveArtifactContractTests(unittest.TestCase):
             info, payload = os.stat(contract_path), contract_path.read_bytes()
             value = json.loads(bundle.read_text())
             value["measurements"]["artifacts"][0] = {
-                "ref": verifier.CONTRACT_REF, "sha256": hashlib.sha256(payload).hexdigest(),
-                "size": len(payload), "mode": f"{info.st_mode & 0o7777:04o}",
-                "uid": info.st_uid, "gid": info.st_gid,
+                "ref": verifier.CONTRACT_REF,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+                "mode": f"{info.st_mode & 0o7777:04o}",
+                "uid": info.st_uid,
+                "gid": info.st_gid,
             }
             bundle.write_text(json.dumps(value), encoding="utf-8")
             with self.assertRaisesRegex(verifier.ContractError, "live artifact drift"):
@@ -132,12 +165,17 @@ class LiveArtifactContractTests(unittest.TestCase):
         activation = (ROOT / "scripts/host/activate-garm-jit.sh").read_text()
         library = (ROOT / "scripts/host/garm-jit-transaction-lib.sh").read_text()
         self.assertIn("verify-live-artifact-contract.py", provision)
-        self.assertIn("installed live runtime artifacts failed signed-contract verification", provision)
+        self.assertIn(
+            "installed live runtime artifacts failed signed-contract verification",
+            provision,
+        )
         self.assertIn("require_live_artifact_contract", activation)
         self.assertIn("signed live artifact contract is invalid or drifted", library)
         for name in (
-            "self-hosted-ci-boundary-verify.service", "self-hosted-ci-garm.service",
-            "self-hosted-ci-network-policy.service", "self-hosted-ci-egress-proxy.service",
+            "self-hosted-ci-boundary-verify.service",
+            "self-hosted-ci-garm.service",
+            "self-hosted-ci-network-policy.service",
+            "self-hosted-ci-egress-proxy.service",
         ):
             unit = (ROOT / "packaging/systemd" / name).read_text()
             self.assertIn("verify-live-artifact-contract.py", unit)
@@ -149,14 +187,18 @@ class LiveArtifactContractTests(unittest.TestCase):
         staged_targets.update(item[0] for item in stager.PINNED_BINARIES)
         self.assertEqual(verifier.REQUIRED_LIVE_TARGETS, staged_targets)
         for token in (
-            "packaging/network/squid.conf", "garm-provider-incus.toml",
-            "prepare-incus-runner-image.sh", "configure-garm-jit.sh",
-            "/usr/local/bin/garm", "/usr/local/bin/garm-cli",
-            "/usr/local/libexec/garm/garm-provider-incus", "live/live-artifacts-v1.json",
+            "packaging/network/squid.conf",
+            "garm-provider-incus.toml",
+            "prepare-incus-runner-image.sh",
+            "configure-garm-jit.sh",
+            "/usr/local/bin/garm",
+            "/usr/local/bin/garm-cli",
+            "/usr/local/libexec/garm/garm-provider-incus",
+            "live/live-artifacts-v1.json",
         ):
             self.assertIn(token, source)
         self.assertNotIn('"/etc/self-hosted-ci/garm/config.toml",', source)
-        self.assertNotIn("incus-client.key\",", source)
+        self.assertNotIn('incus-client.key",', source)
 
 
 if __name__ == "__main__":

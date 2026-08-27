@@ -78,13 +78,15 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
             "previous_manifest_digest": None,
             "issued_at": utc(NOW - timedelta(minutes=30)),
             "offline_root_public_fingerprint": self.root_fingerprint,
-            "keys": [{
-                "key_id": "runtime-online",
-                "key_version": 1,
-                "algorithm": "Ed25519",
-                "public_key_fingerprint": self.online_fingerprint,
-                "state": "active",
-            }],
+            "keys": [
+                {
+                    "key_id": "runtime-online",
+                    "key_version": 1,
+                    "algorithm": "Ed25519",
+                    "public_key_fingerprint": self.online_fingerprint,
+                    "state": "active",
+                }
+            ],
         }
         envelope = {
             "payload": manifest_payload,
@@ -113,9 +115,7 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
             {("runtime-online", 1): self.online_key.public_key()},
             now=NOW,
         )
-        self.store = GateStore(
-            Path(self.temp.name) / "gate.db", clock=self.clock
-        )
+        self.store = GateStore(Path(self.temp.name) / "gate.db", clock=self.clock)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -150,32 +150,39 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
         }
         return {
             "payload": payload,
-            "signature": sign_detached(payload, self.online_key, domain=ATTESTATION_DOMAIN),
+            "signature": sign_detached(
+                payload, self.online_key, domain=ATTESTATION_DOMAIN
+            ),
         }
 
     def _registry(self) -> Registry:
-        return Registry.from_mapping({
-            "registry_schema_version": 1,
-            "repositories": {
-                self.fixture["repository"]: {
-                    "ci_runner": "local-with-github-fallback",
-                    "ai_reviewer": "disabled",
-                    "execution_trust": {
-                        "policy_version": 1,
-                        "mode": "exact-sha-attestation",
-                        "attestation_authority_version": 1,
-                        "key_manifest_version": 1,
-                        "key_manifest_generation": 1,
-                        "key_manifest_digest": self.chain.current.digest,
-                        "offline_root_public_fingerprint": self.root_fingerprint,
-                        "public_key_id": "runtime-online",
-                        "public_key_fingerprint": self.online_fingerprint,
-                        "inventory_drift_guard": "enabled",
-                    },
-                    "authority": {"kind": "personal-repository", "installation_id": 41},
-                }
-            },
-        })
+        return Registry.from_mapping(
+            {
+                "registry_schema_version": 1,
+                "repositories": {
+                    self.fixture["repository"]: {
+                        "ci_runner": "local-with-github-fallback",
+                        "ai_reviewer": "disabled",
+                        "execution_trust": {
+                            "policy_version": 1,
+                            "mode": "exact-sha-attestation",
+                            "attestation_authority_version": 1,
+                            "key_manifest_version": 1,
+                            "key_manifest_generation": 1,
+                            "key_manifest_digest": self.chain.current.digest,
+                            "offline_root_public_fingerprint": self.root_fingerprint,
+                            "public_key_id": "runtime-online",
+                            "public_key_fingerprint": self.online_fingerprint,
+                            "inventory_drift_guard": "enabled",
+                        },
+                        "authority": {
+                            "kind": "personal-repository",
+                            "installation_id": 41,
+                        },
+                    }
+                },
+            }
+        )
 
     def _protocol(self, *, generation: int, admission=None) -> ProtocolPackage:
         f = self.fixture
@@ -227,8 +234,12 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
             "local_result_kind": None,
             "local_child_run_id": f["child_run_id"],
             "local_child_job_id": f["child_job_id"],
-            "started_test_marker_digest": admission.marker_digest if admission else None,
-            "canonical_command_digest": f["canonical_command_digest"] if admission else None,
+            "started_test_marker_digest": admission.marker_digest
+            if admission
+            else None,
+            "canonical_command_digest": f["canonical_command_digest"]
+            if admission
+            else None,
             "terminal_at": None,
             "ci_gate_check_run_id": f["check_run_id"],
             "check_outbox_idempotency_key": None,
@@ -255,23 +266,39 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
             lease_ttl=timedelta(hours=1),
         )
         envelope_digest = attestation_envelope_digest(self.attestation)
-        self.assertEqual("bound", self.store.bind_attestation_nonce(
-            attestation_id=self.attestation_payload["attestation_id"],
-            nonce_hash=hashlib.sha256(self.attestation_payload["nonce"].encode()).hexdigest(),
-            logical_key=gate.logical_key,
-            generation=gate.generation,
-            expected_head_generation=head_generation,
-            envelope_digest=envelope_digest,
-            target={key: self.attestation_payload[key] for key in (
-                "repository_id", "repository", "pr_number", "head_sha", "head_generation"
-            )},
-        ))
+        self.assertEqual(
+            "bound",
+            self.store.bind_attestation_nonce(
+                attestation_id=self.attestation_payload["attestation_id"],
+                nonce_hash=hashlib.sha256(
+                    self.attestation_payload["nonce"].encode()
+                ).hexdigest(),
+                logical_key=gate.logical_key,
+                generation=gate.generation,
+                expected_head_generation=head_generation,
+                envelope_digest=envelope_digest,
+                target={
+                    key: self.attestation_payload[key]
+                    for key in (
+                        "repository_id",
+                        "repository",
+                        "pr_number",
+                        "head_sha",
+                        "head_generation",
+                    )
+                },
+            ),
+        )
         admission = self.store.create_local_admission_after_pre_marker_verify(
             logical_key=gate.logical_key,
             generation=gate.generation,
             owner=gate.owner,
             lease_epoch=gate.lease_epoch,
-            verifier_decision={"valid": True, "boundary": "pre-marker", "decision_id": "verify-runtime-1"},
+            verifier_decision={
+                "valid": True,
+                "boundary": "pre-marker",
+                "decision_id": "verify-runtime-1",
+            },
             authority={
                 "attestation_id": self.attestation_payload["attestation_id"],
                 "envelope_digest": envelope_digest,
@@ -311,11 +338,16 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
             lease_epoch=gate.lease_epoch,
             admission_id=admission.admission_id,
             admission_digest=admission.admission_digest,
-            evidence={"conclusion": "success", "tested_sha": self.fixture["tested_merge_sha"]},
+            evidence={
+                "conclusion": "success",
+                "tested_sha": self.fixture["tested_merge_sha"],
+            },
             attestation_valid=True,
             attestation_expires_at=NOW + timedelta(minutes=60),
         )
-        self.assertEqual(("local", "success"), (completion.winner, completion.result_kind))
+        self.assertEqual(
+            ("local", "success"), (completion.winner, completion.result_kind)
+        )
         self.assertEqual(1, len(self.store.pending_outbox()))
 
     def test_s01_s25_s48_s58_default_hosted_and_reviewer_remain_inert(self) -> None:
@@ -350,13 +382,16 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
         self.assertEqual(ActionKind.NOOP, reconcile(state, now=NOW).kind)
         timed_out = reconcile(state, now=NOW + timedelta(seconds=1))
         self.assertEqual(ActionKind.SELECT_GITHUB, timed_out.kind)
-        self.assertEqual("selected", self.store.select_github_winner(
-            logical_key=gate.logical_key,
-            generation=gate.generation,
-            owner=gate.owner,
-            lease_epoch=gate.lease_epoch,
-            reason=timed_out.reason,
-        ))
+        self.assertEqual(
+            "selected",
+            self.store.select_github_winner(
+                logical_key=gate.logical_key,
+                generation=gate.generation,
+                owner=gate.owner,
+                lease_epoch=gate.lease_epoch,
+                reason=timed_out.reason,
+            ),
+        )
         completion = self.store.complete_hosted_winner(
             logical_key=gate.logical_key,
             generation=gate.generation,
@@ -422,19 +457,24 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
             {"result": "pass", "private_key": "never-exported"},
             occurred_at=NOW,
         )
-        readiness = ReadinessMatrix(self.fixture["repository"], (
-            ReadinessCriterion("reference_integration", "pass", ("hermetic integration passed",)),
-            ReadinessCriterion(
-                "github_sandbox",
-                "unverified",
-                blocker="GitHub App credentials and disposable private sandbox are absent",
+        readiness = ReadinessMatrix(
+            self.fixture["repository"],
+            (
+                ReadinessCriterion(
+                    "reference_integration", "pass", ("hermetic integration passed",)
+                ),
+                ReadinessCriterion(
+                    "github_sandbox",
+                    "unverified",
+                    blocker="GitHub App credentials and disposable private sandbox are absent",
+                ),
+                ReadinessCriterion(
+                    "dedicated_wsl",
+                    "unverified",
+                    blocker="dedicated Windows/WSL authority and host evidence are absent",
+                ),
             ),
-            ReadinessCriterion(
-                "dedicated_wsl",
-                "unverified",
-                blocker="dedicated Windows/WSL authority and host evidence are absent",
-            ),
-        ))
+        )
         bundle = evidence_bundle(
             repository=self.fixture["repository"],
             audit=audit,
@@ -446,7 +486,9 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
         self.assertEqual(2, len(bundle["readiness"]["external_blockers"]))
         self.assertEqual("[REDACTED]", bundle["artifacts"]["token"])
 
-    def test_external_launcher_blocks_every_unprovisioned_suite_instead_of_skipping(self) -> None:
+    def test_external_launcher_blocks_every_unprovisioned_suite_instead_of_skipping(
+        self,
+    ) -> None:
         launcher = ROOT / "scripts/run-github-automation-external-tests.py"
         for suite in ("SANDBOX", "WSL", "PILOT"):
             with self.subTest(suite=suite):
@@ -460,7 +502,9 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(3, completed.returncode)
                 result = json.loads(completed.stdout)
-                self.assertEqual((suite, "blocked"), (result["suite"], result["status"]))
+                self.assertEqual(
+                    (suite, "blocked"), (result["suite"], result["status"])
+                )
                 self.assertTrue(result["missing"])
 
 

@@ -26,23 +26,37 @@ class BoundarySigningCliTests(unittest.TestCase):
             key_path = root / "reviewer.pem"
             unsigned.write_text('{"activation_requested":false}', encoding="utf-8")
             key = ed25519.Ed25519PrivateKey.generate()
-            key_path.write_bytes(key.private_bytes(
-                serialization.Encoding.PEM,
-                serialization.PrivateFormat.PKCS8,
-                serialization.NoEncryption(),
-            ))
+            key_path.write_bytes(
+                key.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.PKCS8,
+                    serialization.NoEncryption(),
+                )
+            )
             key_path.chmod(0o600)
             result = subprocess.run(
-                [str(SCRIPT), "--input", str(unsigned), "--output", str(signed),
-                 "--reviewer-private-key", str(key_path)],
-                text=True, capture_output=True,
+                [
+                    str(SCRIPT),
+                    "--input",
+                    str(unsigned),
+                    "--output",
+                    str(signed),
+                    "--reviewer-private-key",
+                    str(key_path),
+                ],
+                text=True,
+                capture_output=True,
             )
             self.assertEqual(0, result.returncode, result.stderr)
             value = json.loads(signed.read_text(encoding="utf-8"))
             fingerprint = value["attestation"]["signer_fingerprint"]
-            verify_runner_boundary_attestation(value, key.public_key(), pinned_fingerprint=fingerprint)
+            verify_runner_boundary_attestation(
+                value, key.public_key(), pinned_fingerprint=fingerprint
+            )
             self.assertEqual(0o600, os.stat(signed).st_mode & 0o777)
-            self.assertNotIn("attestation", json.loads(unsigned.read_text(encoding="utf-8")))
+            self.assertNotIn(
+                "attestation", json.loads(unsigned.read_text(encoding="utf-8"))
+            )
 
     def test_rejects_repository_key_and_permissive_key(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")

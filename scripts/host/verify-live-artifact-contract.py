@@ -7,12 +7,10 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
-import stat
 import subprocess
 import sys
+from pathlib import Path, PurePosixPath
 from typing import Any
-
 
 CONTRACT_REF = "live/live-artifacts-v1.json"
 ALLOWED_TARGET_PREFIXES = (
@@ -107,6 +105,7 @@ def _load_exact_json(path: Path) -> Any:
                 raise ContractError(f"duplicate JSON key in {path}: {key}")
             value[key] = item
         return value
+
     return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=exact_object)
 
 
@@ -126,17 +125,29 @@ def _safe_ref(root: Path, ref: str) -> Path:
         raise ContractError(f"unsafe evidence ref: {ref!r}")
     path = root.joinpath(*relative.parts)
     resolved_root = root.resolve()
-    if path.is_symlink() or not path.is_file() or resolved_root not in path.resolve().parents:
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or resolved_root not in path.resolve().parents
+    ):
         raise ContractError(f"evidence ref escapes its root: {ref}")
     return path
 
 
 def _validate_target_name(target: str) -> None:
-    if not isinstance(target, str) or not target.startswith("/") or ".." in PurePosixPath(target).parts:
+    if (
+        not isinstance(target, str)
+        or not target.startswith("/")
+        or ".." in PurePosixPath(target).parts
+    ):
         raise ContractError(f"unsafe live target: {target!r}")
     if target in FORBIDDEN_PUBLIC_TARGETS or target.endswith((".key", ".crt", ".pem")):
-        raise ContractError(f"secret or credential target is forbidden in public contract: {target}")
-    if target not in ALLOWED_BINARY_TARGETS and not target.startswith(ALLOWED_TARGET_PREFIXES):
+        raise ContractError(
+            f"secret or credential target is forbidden in public contract: {target}"
+        )
+    if target not in ALLOWED_BINARY_TARGETS and not target.startswith(
+        ALLOWED_TARGET_PREFIXES
+    ):
         raise ContractError(f"live target is outside managed roots: {target}")
 
 
@@ -152,16 +163,29 @@ def _target_path(prefix: Path, target: str) -> Path:
 
 
 def verify_contract(
-    bundle_path: Path, measurement_root: Path, target_prefix: Path = Path("/"), *,
+    bundle_path: Path,
+    measurement_root: Path,
+    target_prefix: Path = Path("/"),
+    *,
     required_targets: set[str] | None = None,
 ) -> int:
-    if bundle_path.is_symlink() or measurement_root.is_symlink() or target_prefix.is_symlink():
-        raise ContractError("bundle, measurement root, and target prefix must not be symlinks")
+    if (
+        bundle_path.is_symlink()
+        or measurement_root.is_symlink()
+        or target_prefix.is_symlink()
+    ):
+        raise ContractError(
+            "bundle, measurement root, and target prefix must not be symlinks"
+        )
     bundle = _load_exact_json(bundle_path)
     measurements = bundle.get("measurements", {}).get("artifacts", [])
-    measured = {item.get("ref"): item for item in measurements if isinstance(item, dict)}
+    measured = {
+        item.get("ref"): item for item in measurements if isinstance(item, dict)
+    }
     if len(measured) != len(measurements) or CONTRACT_REF not in measured:
-        raise ContractError("signed live artifact contract measurement is absent or duplicated")
+        raise ContractError(
+            "signed live artifact contract measurement is absent or duplicated"
+        )
     contract_path = _safe_ref(measurement_root, CONTRACT_REF)
     contract_hash, contract_size, contract_stat = _digest(contract_path)
     expected_contract = measured[CONTRACT_REF]
@@ -177,14 +201,30 @@ def verify_contract(
         raise ContractError("live artifact contract drifted from signed measurement")
 
     contract = _load_exact_json(contract_path)
-    if not isinstance(contract, dict) or set(contract) != {"live_artifact_contract_version", "artifacts"}:
+    if not isinstance(contract, dict) or set(contract) != {
+        "live_artifact_contract_version",
+        "artifacts",
+    }:
         raise ContractError("live artifact contract has unexpected fields")
-    if contract["live_artifact_contract_version"] != 1 or not isinstance(contract["artifacts"], list) or not contract["artifacts"]:
+    if (
+        contract["live_artifact_contract_version"] != 1
+        or not isinstance(contract["artifacts"], list)
+        or not contract["artifacts"]
+    ):
         raise ContractError("live artifact contract v1 is invalid or empty")
     seen_targets: set[str] = set()
     seen_sources: set[str] = set()
     for item in contract["artifacts"]:
-        required = {"target", "source_ref", "sha256", "size", "mode", "uid", "gid", "kind"}
+        required = {
+            "target",
+            "source_ref",
+            "sha256",
+            "size",
+            "mode",
+            "uid",
+            "gid",
+            "kind",
+        }
         if not isinstance(item, dict) or set(item) != required:
             raise ContractError("live artifact record has unexpected fields")
         target, source_ref = item["target"], item["source_ref"]
@@ -193,25 +233,38 @@ def verify_contract(
             raise ContractError(f"duplicate live target: {target}")
         seen_targets.add(target)
         if (
-            not isinstance(item["sha256"], str) or len(item["sha256"]) != 64
+            not isinstance(item["sha256"], str)
+            or len(item["sha256"]) != 64
             or any(ch not in "0123456789abcdef" for ch in item["sha256"])
-            or not isinstance(item["size"], int) or item["size"] < 0
-            or not isinstance(item["mode"], str) or len(item["mode"]) != 4
+            or not isinstance(item["size"], int)
+            or item["size"] < 0
+            or not isinstance(item["mode"], str)
+            or len(item["mode"]) != 4
             or any(ch not in "01234567" for ch in item["mode"])
-            or not isinstance(item["uid"], int) or item["uid"] < 0
+            or not isinstance(item["uid"], int)
+            or item["uid"] < 0
             or (target_prefix == Path("/") and item["uid"] != 0)
-            or not isinstance(item["gid"], int) or item["gid"] < 0
-            or item["kind"] not in {"script", "python-module", "unit", "public-config", "pinned-binary"}
+            or not isinstance(item["gid"], int)
+            or item["gid"] < 0
+            or item["kind"]
+            not in {"script", "python-module", "unit", "public-config", "pinned-binary"}
         ):
             raise ContractError(f"invalid live artifact metadata: {target}")
         mode_value = int(item["mode"], 8)
         if mode_value & 0o7022:
-            raise ContractError(f"live artifact mode grants unsafe write or special permissions: {target}")
-        if item["kind"] in {"python-module", "unit", "public-config"} and mode_value & 0o111:
+            raise ContractError(
+                f"live artifact mode grants unsafe write or special permissions: {target}"
+            )
+        if (
+            item["kind"] in {"python-module", "unit", "public-config"}
+            and mode_value & 0o111
+        ):
             raise ContractError(f"non-executable live artifact is executable: {target}")
         if source_ref is not None:
             if not isinstance(source_ref, str) or source_ref in seen_sources:
-                raise ContractError(f"invalid or duplicate live source ref: {source_ref!r}")
+                raise ContractError(
+                    f"invalid or duplicate live source ref: {source_ref!r}"
+                )
             seen_sources.add(source_ref)
             source = _safe_ref(measurement_root, source_ref)
             source_hash, source_size, source_stat = _digest(source)
@@ -224,11 +277,17 @@ def verify_contract(
                 "gid": source_stat.st_gid,
             }
             if measured.get(source_ref) != source_actual:
-                raise ContractError(f"live source is not an exact signed measurement: {source_ref}")
+                raise ContractError(
+                    f"live source is not an exact signed measurement: {source_ref}"
+                )
             if source_hash != item["sha256"] or source_size != item["size"]:
-                raise ContractError(f"live source does not match target contract: {source_ref}")
+                raise ContractError(
+                    f"live source does not match target contract: {source_ref}"
+                )
         elif target not in ALLOWED_BINARY_TARGETS or item["kind"] != "pinned-binary":
-            raise ContractError(f"only pinned binaries may omit a measured source: {target}")
+            raise ContractError(
+                f"only pinned binaries may omit a measured source: {target}"
+            )
 
         destination = _target_path(target_prefix, target)
         actual_hash, actual_size, info = _digest(destination)
@@ -242,11 +301,15 @@ def verify_contract(
         expected = {key: item[key] for key in ("sha256", "size", "mode", "uid", "gid")}
         if actual != expected:
             raise ContractError(f"live artifact drift: {target}")
-    expected_targets = REQUIRED_LIVE_TARGETS if required_targets is None else required_targets
+    expected_targets = (
+        REQUIRED_LIVE_TARGETS if required_targets is None else required_targets
+    )
     if seen_targets != expected_targets:
         missing = sorted(expected_targets - seen_targets)
         extra = sorted(seen_targets - expected_targets)
-        raise ContractError(f"live artifact inventory is not exact; missing={missing}, extra={extra}")
+        raise ContractError(
+            f"live artifact inventory is not exact; missing={missing}, extra={extra}"
+        )
     return len(seen_targets)
 
 
@@ -264,10 +327,16 @@ def main(argv: list[str] | None = None) -> int:
         fingerprint = args.pinned_fingerprint_file.read_text(encoding="ascii").strip()
     readiness = Path(__file__).with_name("verify-wsl-jit-readiness.py")
     command = [
-        sys.executable, str(readiness), "--evidence", str(args.evidence),
-        "--measurement-root", str(args.measurement_root),
-        "--reviewer-public-key", str(args.reviewer_public_key),
-        "--pinned-fingerprint", fingerprint or "",
+        sys.executable,
+        str(readiness),
+        "--evidence",
+        str(args.evidence),
+        "--measurement-root",
+        str(args.measurement_root),
+        "--reviewer-public-key",
+        str(args.reviewer_public_key),
+        "--pinned-fingerprint",
+        fingerprint or "",
     ]
     try:
         subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
@@ -275,7 +344,11 @@ def main(argv: list[str] | None = None) -> int:
     except (ContractError, OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"live artifact verification blocked: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps({"status": "verified", "live_artifacts": count}, separators=(",", ":")))
+    print(
+        json.dumps(
+            {"status": "verified", "live_artifacts": count}, separators=(",", ":")
+        )
+    )
     return 0
 
 

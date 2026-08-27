@@ -4,23 +4,26 @@
 from __future__ import annotations
 
 import argparse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
-from pathlib import Path
 import stat
 import sys
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 
+from github_automation.coordinator import ReservePartialFailure
 from github_automation.crypto import spki_fingerprint
 from github_automation.runner_jit import RunnerJitError, SqliteAllocationLedger
 from github_automation.runner_jit_broker import (
-    AllocationBroker, ExternalLiveWorkflowJobVerifier, GarmCliAllocationDriver, JobStartedContext, utc_now,
+    AllocationBroker,
+    ExternalLiveWorkflowJobVerifier,
+    GarmCliAllocationDriver,
+    JobStartedContext,
+    utc_now,
 )
-from github_automation.coordinator import ReservePartialFailure
-
 
 CONFIG = Path("/etc/self-hosted-ci/garm/allocation-broker.json")
 PUBLIC_KEY = Path("/etc/self-hosted-ci/garm/allocation-authority-public-key.pem")
@@ -43,10 +46,14 @@ def load_broker() -> AllocationBroker:
     fingerprint = spki_fingerprint(public_key)
     configured_fingerprint = config.pop("allocation_signer_fingerprint", None)
     live_job_verifier = config.pop("live_job_verifier", None)
-    if not isinstance(live_job_verifier, str) or not live_job_verifier.startswith("/usr/local/libexec/self-hosted-ci/"):
+    if not isinstance(live_job_verifier, str) or not live_job_verifier.startswith(
+        "/usr/local/libexec/self-hosted-ci/"
+    ):
         raise RunnerJitError("live workflow-job verifier path is not exact")
     if configured_fingerprint != fingerprint:
-        raise RunnerJitError("allocation authority public key is not pinned by broker config")
+        raise RunnerJitError(
+            "allocation authority public key is not pinned by broker config"
+        )
     LEDGER.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
     return AllocationBroker(
         SqliteAllocationLedger(LEDGER),
@@ -96,20 +103,31 @@ def serve(broker: AllocationBroker) -> None:
 
         def do_POST(self):
             try:
-                if self.path != "/v1/job-started" or self.headers.get("Content-Type") != "application/json":
+                if (
+                    self.path != "/v1/job-started"
+                    or self.headers.get("Content-Type") != "application/json"
+                ):
                     raise RunnerJitError("unknown broker operation")
                 length = self.headers.get("Content-Length", "")
                 if not length.isdigit() or not 1 <= int(length) <= 16384:
                     raise RunnerJitError("invalid broker request length")
                 value = json.loads(self.rfile.read(int(length)))
-                if not isinstance(value, dict) or set(value) != {"allocation_id", "context"}:
+                if not isinstance(value, dict) or set(value) != {
+                    "allocation_id",
+                    "context",
+                }:
                     raise RunnerJitError("job-started request requires exact fields")
                 broker.job_started(
-                    value["allocation_id"], JobStartedContext.from_mapping(value["context"]), now=utc_now()
+                    value["allocation_id"],
+                    JobStartedContext.from_mapping(value["context"]),
+                    now=utc_now(),
                 )
-                self.send_response(204); self.end_headers()
+                self.send_response(204)
+                self.end_headers()
             except (OSError, ValueError, RunnerJitError, json.JSONDecodeError):
-                self.send_response(403); self.send_header("Content-Length", "0"); self.end_headers()
+                self.send_response(403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
 
     server = BoundedThreadingHTTPServer(("10.254.0.1", 8079), Handler, max_workers=4)
     server.serve_forever()
@@ -124,7 +142,11 @@ def main(argv=None) -> int:
     finalize.add_argument("--envelope", required=True, type=Path)
     finish = sub.add_parser("finish")
     finish.add_argument("--allocation-id", required=True)
-    finish.add_argument("--outcome", required=True, choices=("success", "failure", "cancel", "timeout", "force-cancel"))
+    finish.add_argument(
+        "--outcome",
+        required=True,
+        choices=("success", "failure", "cancel", "timeout", "force-cancel"),
+    )
     finish.add_argument("--normal-cancel-attempted", action="store_true")
     prove = sub.add_parser("prove-clean")
     prove.add_argument("--allocation-id", required=True)
@@ -134,31 +156,68 @@ def main(argv=None) -> int:
     sub.add_parser("serve")
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
-        print("allocation broker must run as root", file=sys.stderr); return 2
+        print("allocation broker must run as root", file=sys.stderr)
+        return 2
     try:
         broker = load_broker()
         if args.command == "reserve":
-            print(json.dumps(broker.reserve(load_json(args.reservation), now=utc_now()), sort_keys=True, separators=(",", ":")))
+            print(
+                json.dumps(
+                    broker.reserve(load_json(args.reservation), now=utc_now()),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
         elif args.command == "finalize":
-            print(json.dumps(broker.finalize(load_json(args.envelope), now=utc_now()), sort_keys=True, separators=(",", ":")))
+            print(
+                json.dumps(
+                    broker.finalize(load_json(args.envelope), now=utc_now()),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
         elif args.command == "finish":
-            print(json.dumps(broker.finish(
-                args.allocation_id, outcome=args.outcome,
-                normal_cancel_attempted=args.normal_cancel_attempted,
-            ), sort_keys=True, separators=(",", ":")))
+            print(
+                json.dumps(
+                    broker.finish(
+                        args.allocation_id,
+                        outcome=args.outcome,
+                        normal_cancel_attempted=args.normal_cancel_attempted,
+                    ),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
         elif args.command == "prove-clean":
-            print(json.dumps(broker.prove_clean(args.allocation_id, args.runner_label), sort_keys=True, separators=(",", ":")))
+            print(
+                json.dumps(
+                    broker.prove_clean(args.allocation_id, args.runner_label),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
         elif args.command == "recover":
-            value = broker.recover(args.allocation_id) if args.allocation_id else {"recovered": broker.recover_all(), "runtime_empty": True}
+            value = (
+                broker.recover(args.allocation_id)
+                if args.allocation_id
+                else {"recovered": broker.recover_all(), "runtime_empty": True}
+            )
             print(json.dumps(value, sort_keys=True, separators=(",", ":")))
         else:
             broker.recover_all()
             serve(broker)
     except ReservePartialFailure as exc:
-        print(json.dumps({"error": "partial-reserve", "allocation_id": exc.allocation_id}, separators=(",", ":")), file=sys.stderr)
+        print(
+            json.dumps(
+                {"error": "partial-reserve", "allocation_id": exc.allocation_id},
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+        )
         return 21
     except (OSError, ValueError, RunnerJitError, json.JSONDecodeError) as exc:
-        print(f"allocation broker blocked: {exc}", file=sys.stderr); return 1
+        print(f"allocation broker blocked: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -41,7 +41,11 @@ def _root_secret(path: Path, *, maximum_size: int = 4096) -> bytes:
         details = path.lstat()
     except OSError as exc:
         raise SessionError(f"required credential file is unavailable: {path}") from exc
-    if not stat.S_ISREG(details.st_mode) or details.st_uid != 0 or details.st_nlink != 1:
+    if (
+        not stat.S_ISREG(details.st_mode)
+        or details.st_uid != 0
+        or details.st_nlink != 1
+    ):
         raise SessionError(f"credential metadata is unsafe: {path}")
     if stat.S_IMODE(details.st_mode) != 0o600 or details.st_size > maximum_size:
         raise SessionError(f"credential permissions or size are unsafe: {path}")
@@ -74,7 +78,13 @@ def _decode_segment(value: str) -> dict[str, object]:
     return decoded
 
 
-def validate_jwt(token: str, secret: bytes, *, now: int | None = None, minimum_valid: int = MIN_VALID_SECONDS) -> int:
+def validate_jwt(
+    token: str,
+    secret: bytes,
+    *,
+    now: int | None = None,
+    minimum_valid: int = MIN_VALID_SECONDS,
+) -> int:
     parts = token.split(".")
     if len(parts) != 3 or any(not part for part in parts):
         raise SessionError("GARM returned a malformed JWT")
@@ -86,13 +96,20 @@ def validate_jwt(token: str, secret: bytes, *, now: int | None = None, minimum_v
         signature = base64.urlsafe_b64decode(parts[2] + "=" * (-len(parts[2]) % 4))
     except ValueError as exc:
         raise SessionError("GARM returned a malformed JWT signature") from exc
-    expected = hmac.new(secret, f"{parts[0]}.{parts[1]}".encode("ascii"), hashlib.sha256).digest()
+    expected = hmac.new(
+        secret, f"{parts[0]}.{parts[1]}".encode("ascii"), hashlib.sha256
+    ).digest()
     if not hmac.compare_digest(signature, expected):
         raise SessionError("GARM JWT signature validation failed")
     current = int(time.time()) if now is None else now
     expires = claims.get("exp")
-    if type(expires) is not int or not current + minimum_valid < expires <= current + MAX_TOKEN_SECONDS:
-        raise SessionError("GARM JWT is expired, expires too soon, or exceeds the configured lifetime")
+    if (
+        type(expires) is not int
+        or not current + minimum_valid < expires <= current + MAX_TOKEN_SECONDS
+    ):
+        raise SessionError(
+            "GARM JWT is expired, expires too soon, or exceeds the configured lifetime"
+        )
     if claims.get("iss") != "garm" or claims.get("is_admin") is not True:
         raise SessionError("GARM JWT issuer or admin authority is invalid")
     if not isinstance(claims.get("user"), str) or not claims["user"]:
@@ -107,7 +124,11 @@ def validate_jwt(token: str, secret: bytes, *, now: int | None = None, minimum_v
 def _token_from_config(path: Path, secret: bytes) -> str | None:
     try:
         details = path.lstat()
-        if not stat.S_ISREG(details.st_mode) or details.st_uid != 0 or details.st_nlink != 1:
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or details.st_uid != 0
+            or details.st_nlink != 1
+        ):
             return None
         if stat.S_IMODE(details.st_mode) != 0o600 or details.st_size > 65536:
             return None
@@ -162,7 +183,11 @@ def _login(username: bytes, password: bytes, secret: bytes) -> str:
         value = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SessionError("GARM loopback login returned invalid JSON") from exc
-    if not isinstance(value, dict) or set(value) != {"token"} or not isinstance(value["token"], str):
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"token"}
+        or not isinstance(value["token"], str)
+    ):
         raise SessionError("GARM loopback login response schema drifted")
     validate_jwt(value["token"], secret)
     return value["token"]
@@ -202,10 +227,16 @@ def ensure_session() -> Path:
         raise SessionError("GARM CLI session helper must run as root")
     _secure_directory(RUNTIME_HOME)
     config_dir = RUNTIME_HOME / ".local" / "share" / "garm-cli"
-    for directory in (RUNTIME_HOME / ".local", RUNTIME_HOME / ".local" / "share", config_dir):
+    for directory in (
+        RUNTIME_HOME / ".local",
+        RUNTIME_HOME / ".local" / "share",
+        config_dir,
+    ):
         _secure_directory(directory)
     lock_path = RUNTIME_HOME / ".session.lock"
-    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    lock_fd = os.open(
+        lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600
+    )
     os.fchmod(lock_fd, 0o600)
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
     config = config_dir / "config.toml"
@@ -226,7 +257,11 @@ def main() -> int:
         if arguments.command == "ensure":
             if arguments.args:
                 raise SessionError("ensure does not accept command arguments")
-            print(json.dumps({"status": "ready", "config": str(config)}, separators=(",", ":")))
+            print(
+                json.dumps(
+                    {"status": "ready", "config": str(config)}, separators=(",", ":")
+                )
+            )
             return 0
         command = arguments.args
         if command and command[0] == "--":
