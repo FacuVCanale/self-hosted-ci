@@ -47,13 +47,31 @@ class WslMigrationScriptTests(unittest.TestCase):
 
     def test_script_imports_once_via_s4u_and_verifies_service_hkcu_registration(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("New-ScheduledTaskPrincipal -UserId $accountId -LogonType S4U -RunLevel Limited", source)
+        self.assertIn("function Register-S4UImportTask", source)
+        self.assertIn('$scheduler = New-Object -ComObject "Schedule.Service"', source)
+        self.assertIn("$definition.Principal.LogonType = $taskLogonS4U", source)
+        self.assertIn("$definition.Principal.RunLevel = $taskRunLevelLua", source)
+        self.assertIn("$folder.RegisterTaskDefinition(", source)
+        self.assertIn("Task Scheduler rejected the local-account S4U task before WSL was started", source)
         self.assertIn('"--import", $DistroName, $destination, $ExportPath, "--version", "2"', source)
         self.assertIn('"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss"', source)
         self.assertIn("Worker identity SID mismatch", source)
         self.assertIn("Imported distro BasePath mismatch", source)
         self.assertIn("Imported distro is not WSL2", source)
         self.assertIn("Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false", source)
+
+    def test_task_registration_is_fail_fast_and_has_exact_postconditions(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        register = source.index("$registeredTask = Register-S4UImportTask")
+        marked_registered = source.index("$registered = $true", register)
+        postcondition = source.index("Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop", marked_registered)
+        start = source.index("Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop", postcondition)
+        self.assertLess(register, marked_registered)
+        self.assertLess(marked_registered, postcondition)
+        self.assertLess(postcondition, start)
+        self.assertIn('Principal.LogonType -ne "S4U"', source)
+        self.assertIn('Principal.RunLevel -ne "Limited"', source)
+        self.assertIn("Principal.UserId", source)
 
     def test_script_contains_no_source_or_export_deletion_path(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")

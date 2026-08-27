@@ -142,6 +142,62 @@ function Assert-ProtectedAcl([string]$LiteralPath, [string[]]$AllowedSidValues) 
     }
 }
 
+function Register-S4UImportTask(
+    [string]$Name,
+    [string]$UserId,
+    [string]$Executable,
+    [string]$Arguments,
+    [int]$ExecutionTimeoutSeconds
+) {
+    # Use the Task Scheduler 2.0 API directly. TASK_LOGON_S4U is the supported
+    # passwordless logon for a local account and TASK_RUNLEVEL_LUA keeps the
+    # non-admin worker token limited.
+    $taskCreateOrUpdate = 6
+    $taskLogonS4U = 2
+    $taskRunLevelLua = 0
+    $taskActionExec = 0
+    $taskInstancesIgnoreNew = 2
+
+    try {
+        $scheduler = New-Object -ComObject "Schedule.Service"
+        $scheduler.Connect()
+        $folder = $scheduler.GetFolder("\")
+        $definition = $scheduler.NewTask(0)
+        $definition.RegistrationInfo.Description = "One-time preservative self-hosted-ci WSL import"
+        $definition.Principal.UserId = $UserId
+        $definition.Principal.LogonType = $taskLogonS4U
+        $definition.Principal.RunLevel = $taskRunLevelLua
+        $definition.Settings.Enabled = $true
+        $definition.Settings.AllowDemandStart = $true
+        $definition.Settings.DisallowStartIfOnBatteries = $false
+        $definition.Settings.StopIfGoingOnBatteries = $false
+        $definition.Settings.MultipleInstances = $taskInstancesIgnoreNew
+        $definition.Settings.ExecutionTimeLimit = "PT${ExecutionTimeoutSeconds}S"
+        $action = $definition.Actions.Create($taskActionExec)
+        $action.Path = $Executable
+        $action.Arguments = $Arguments
+
+        $registeredTask = $folder.RegisterTaskDefinition(
+            $Name,
+            $definition,
+            $taskCreateOrUpdate,
+            $UserId,
+            $null,
+            $taskLogonS4U,
+            $null
+        )
+        if ($null -eq $registeredTask) {
+            throw "Task Scheduler returned no registered task."
+        }
+        return $registeredTask
+    }
+    catch {
+        throw "Task Scheduler rejected the local-account S4U task before WSL was started. " +
+            "Confirm this is an elevated local console and that $UserId has 'Log on as a batch job' " +
+            "and is absent from 'Deny log on as a batch job'. Original error: $($_.Exception.Message)"
+    }
+}
+
 function Write-Plan(
     [object]$Account,
     [IO.FileInfo]$ExportFile,
@@ -182,7 +238,7 @@ function Write-Plan(
 
 Assert-Windows
 
-foreach ($command in @("wsl.exe", "Get-LocalUser", "Get-LocalGroup", "Get-LocalGroupMember", "Register-ScheduledTask")) {
+foreach ($command in @("wsl.exe", "Get-LocalUser", "Get-LocalGroup", "Get-LocalGroupMember", "Get-ScheduledTask")) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         throw "Required Windows command is unavailable: $command"
     }
@@ -387,18 +443,27 @@ $quotedArguments = @(
     '-StdoutPath', ('"{0}"' -f $StdoutPath),
     '-StderrPath', ('"{0}"' -f $StderrPath)
 ) -join ' '
-$action = New-ScheduledTaskAction -Execute $powerShellExe -Argument $quotedArguments
-$principal = New-ScheduledTaskPrincipal -UserId $accountId -LogonType S4U -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds $TimeoutSeconds) `
-    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
-$task = New-ScheduledTask -Action $action -Principal $principal -Settings $settings
-
 $registered = $false
 try {
-    Register-ScheduledTask -TaskName $TaskName -InputObject $task -Force | Out-Null
+    $registeredTask = Register-S4UImportTask `
+        -Name $TaskName `
+        -UserId $accountId `
+        -Executable $powerShellExe `
+        -Arguments $quotedArguments `
+        -ExecutionTimeoutSeconds $TimeoutSeconds
     $registered = $true
+    $taskPostcondition = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    if ($taskPostcondition.Principal.LogonType -ne "S4U") {
+        throw "Registered task failed the S4U logon-type postcondition."
+    }
+    if ($taskPostcondition.Principal.RunLevel -ne "Limited") {
+        throw "Registered task failed the limited run-level postcondition."
+    }
+    if (@($accountId, $serviceSid.Value) -notcontains $taskPostcondition.Principal.UserId) {
+        throw "Registered task failed the service-identity postcondition."
+    }
     $startedAt = Get-Date
-    Start-ScheduledTask -TaskName $TaskName
+    Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
 
     $deadline = $startedAt.AddSeconds($TimeoutSeconds)
     do {
