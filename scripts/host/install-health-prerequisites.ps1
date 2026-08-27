@@ -24,6 +24,7 @@ $WorkerStdoutPath = Join-Path $Root "worker.stdout.log"
 $WorkerStderrPath = Join-Path $Root "worker.stderr.log"
 $WorkerErrorPath = Join-Path $Root "worker-error.json"
 $WorkerContextPath = Join-Path $Root "worker-context.json"
+$ExpectedDistroBasePath = "C:\ProgramData\self-hosted-ci\wsl"
 $EvidenceRoot = "C:\ProgramData\self-hosted-ci\diagnostics\health-prerequisites"
 $AttemptId = [guid]::NewGuid().ToString("D")
 $PayloadTemplate = Join-Path $PSScriptRoot "install-health-wsl-payload.sh.in"
@@ -311,27 +312,46 @@ try {
     `$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     if (`$sid -ne '$ExpectedServiceAccountSid') { throw 'worker service SID mismatch' }
     if ('$FailureInjection' -eq 'worker-before-wsl') { throw 'injected failure before WSL' }
+    `$hkcuRegistration = Get-ExactRegistration 'Registry::HKEY_CURRENT_USER'
+    `$exactSidRegistration = Get-ExactRegistration 'Registry::HKEY_USERS\$ExpectedServiceAccountSid'
+    `$registrationValidated = `$false; `$registrationError = `$null; `$distroGuid = `$null
+    try {
+        if (-not `$hkcuRegistration.accessible -or -not `$exactSidRegistration.accessible) { throw 'WSL registration hive is not accessible' }
+        if (`$hkcuRegistration.exact_match_count -ne 1 -or `$exactSidRegistration.exact_match_count -ne 1) { throw 'expected exactly one WSL registration in both identity hives' }
+        `$hkcuMatch = `$hkcuRegistration.exact_matches[0]; `$exactSidMatch = `$exactSidRegistration.exact_matches[0]
+        if ([string]`$hkcuMatch.key -notmatch '^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$') { throw 'WSL registration key is not a canonical GUID' }
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals([string]`$hkcuMatch.key, [string]`$exactSidMatch.key)) { throw 'HKCU and exact-SID WSL registration GUIDs differ' }
+        foreach (`$match in @(`$hkcuMatch, `$exactSidMatch)) {
+            if (-not [StringComparer]::Ordinal.Equals([string]`$match.distribution_name, '$DistroName')) { throw 'WSL registration name is not exact' }
+            if ([int]`$match.version -ne 2) { throw 'WSL registration version is not 2' }
+            if ([IO.Path]::GetFullPath([string]`$match.base_path).TrimEnd('\') -ne [IO.Path]::GetFullPath('$ExpectedDistroBasePath').TrimEnd('\')) { throw 'WSL registration BasePath is not exact' }
+        }
+        `$distroGuid = [string]`$hkcuMatch.key; `$registrationValidated = `$true
+    }
+    catch { `$registrationError = `$_.Exception.Message }
     `$visibility = [Collections.Generic.List[object]]::new(); `$distroVisible = `$false
     for (`$attempt = 1; `$attempt -le 10; `$attempt++) {
         `$listRaw = @(& "`$env:SystemRoot\System32\wsl.exe" --list --quiet 2>&1)
         `$listExitCode = `$LASTEXITCODE
-        `$names = @(`$listRaw | ForEach-Object { ([string]`$_).Trim([char]0).Trim() } | Where-Object { `$_ })
+        `$names = @(`$listRaw | ForEach-Object { ([string]`$_).Replace([char]0, '').Trim() } | Where-Object { `$_ })
         `$visibility.Add([ordered]@{ attempt=`$attempt; observed_at=[DateTimeOffset]::UtcNow.ToString('o'); exit_code=`$listExitCode; names=`$names; raw=(`$listRaw -join "`n") })
-        if (`$listExitCode -eq 0 -and `$names -contains '$DistroName') { `$distroVisible = `$true; break }
+        `$exactNames = @(`$names | Where-Object { [StringComparer]::Ordinal.Equals([string]`$_, '$DistroName') })
+        if (`$listExitCode -eq 0 -and `$exactNames.Count -eq 1) { `$distroVisible = `$true; break }
         if (`$attempt -lt 10) { Start-Sleep -Seconds 2 }
     }
     `$context = [ordered]@{
         identity_sid=`$sid; process_session_id=[Diagnostics.Process]::GetCurrentProcess().SessionId
         user_profile_environment=[string]`$env:USERPROFILE; user_profile_folder=[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-        hkcu_registration=(Get-ExactRegistration 'Registry::HKEY_CURRENT_USER')
-        exact_sid_hku_registration=(Get-ExactRegistration 'Registry::HKEY_USERS\$ExpectedServiceAccountSid')
+        hkcu_registration=`$hkcuRegistration; exact_sid_hku_registration=`$exactSidRegistration
+        registration_validated=`$registrationValidated; registration_error=`$registrationError; selected_distribution_id=`$distroGuid
         visibility_attempts=`$visibility; exact_distro_visible=`$distroVisible
     }
     [IO.File]::WriteAllText('$WorkerContextPath', (`$context | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new(`$false))
+    if (-not `$registrationValidated) { throw "exact WSL registry validation failed: `$registrationError" }
     if (-not `$distroVisible) { throw 'exact WSL distro remained invisible after bounded preflight' }
     `$psi = [Diagnostics.ProcessStartInfo]::new()
     `$psi.FileName = "`$env:SystemRoot\System32\wsl.exe"
-    `$psi.Arguments = '--distribution "$DistroName" --user root -- bash -lc "base64 --decode | bash"'
+    `$psi.Arguments = '--distribution-id ' + `$distroGuid + ' --user root -- bash -lc "base64 --decode | bash"'
     `$psi.UseShellExecute = `$false; `$psi.CreateNoWindow = `$true
     `$psi.RedirectStandardInput = `$true; `$psi.RedirectStandardOutput = `$true; `$psi.RedirectStandardError = `$true
     `$process = [Diagnostics.Process]::new(); `$process.StartInfo = `$psi
