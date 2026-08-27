@@ -48,11 +48,11 @@ Create private repo `self-hosted-ci` and a reversible platform that keeps GitHub
 
 **A. GitHub-hosted Action coordinator — selected pilot.** Base-branch coordinator owns `ci-gate`, dispatches a default-branch child, applies the formal claim predicate and fallback. Pros: available while laptop is off; no new CI server. Cons: GitHub minutes; Check/Actions ownership needs proof and watchdog.
 
-**B. Worker/Durable Object coordinator — replacement boundary.** Same protocol and `GateStore`, atomic leases/CAS. Pros: durable/event-driven/scalable. Cons: extra service, credentials, cost, operations.
+**B. Host-local transactional coordinator — replacement boundary.** Same protocol and `GateStore`, backed by the existing file-based SQLite implementation under the dedicated service identity. Pros: no external control-plane vendor, atomic leases/CAS, and direct operator ownership. Cons: local availability must be paired with the GitHub-hosted fallback and watchdog.
 
 **C. Static dynamic `runs-on` — rejected.** GitHub cannot migrate an already queued job and cannot fence late results.
 
-Decision: A for the bounded pilot, with storage/ownership behind `GateStore` so B can replace it without changing child workflow, protocol, check name, policy, or operator commands.
+Decision: A for the bounded pilot, with storage/ownership behind `GateStore` so the host-local SQLite provider can replace it without changing child workflow, protocol, check name, policy, or operator commands. This repository intentionally contains no third-party edge runtime or deployment path.
 
 ## Architecture and trust package
 
@@ -279,7 +279,7 @@ Pilot provider:
 - Older/fenced generations cannot update current ownership.
 - No local Check update occurs before a committed local completion record. Transactional outbox delivery targets the pre-existing exact Check Run ID using dedicated-App credentials and `logical:generation:winner:evidence_digest`. On ambiguous response, read that Check Run and compare its embedded evidence marker before retry. Repeated PATCH may occur, but at most one logical conclusion/mutation exists; different evidence is conflict.
 
-The sandbox must prove GitHub Check update/branch-protection semantics. If they cannot satisfy ownership without ambiguity, required-check rollout is blocked until an atomic provider (preferred Worker/Durable Object) implements `GateStore`; guarantees are not weakened.
+The sandbox must prove GitHub Check update/branch-protection semantics. If it cannot satisfy ownership without ambiguity, required-check rollout is blocked until the host-local transactional SQLite provider implements the missing `GateStore` guarantees; guarantees are not weakened and no external edge runtime is introduced.
 
 ## State machine, formal claim, and failure taxonomy
 
@@ -616,7 +616,7 @@ Before winner, invalid proof selects GitHub/fences only at dispatch, claim, pre-
 
 **Consequences:** GitHub minutes whenever no fresh valid signature exists; trusted-agent procedure, bounded signer, offline-root ceremony, manifest rollback protection and four-gate verification become security-critical; inventory partiality is honestly tolerated only as a negative guard; App/ownership/status-collision semantics must be proven; org repos need their own authority/group; a bake-off can select no local manager; WSL isn't a hostile sandbox; reviewer/provider and public ingress remain explicit decisions.
 
-**Follow-ups:** implement and independently threat-review the bounded signer/verifier before any local pilot; rehearse key theft/rotation/revocation; measure cost/incidents; migrate GateStore to DO if needed; evaluate VM/microVM; calibrate reviewer; audit pins/App source/groups quarterly.
+**Follow-ups:** implement and independently threat-review the bounded signer/verifier before any local pilot; rehearse key theft/rotation/revocation; measure cost/incidents; harden and back up the host-local SQLite GateStore; evaluate VM/microVM; calibrate reviewer; audit pins/App source/groups quarterly.
 
 ## Future execution staffing
 

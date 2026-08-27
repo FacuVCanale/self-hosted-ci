@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import json
 import os
 import subprocess
 import re
@@ -264,25 +263,6 @@ class HostedReusableGateWorkflowTests(unittest.TestCase):
             self.assertIn(field, finalize)
         self.assertIn("ci-gate-local-ort-evidence-v1", finalize)
         self.assertNotIn("inputs.tested_merge_sha", self.text)
-
-    def test_local_merge_uses_a_fresh_durable_object_namespace(self) -> None:
-        config = json.loads((ROOT / "gate-service" / "wrangler.jsonc").read_text(encoding="utf-8"))
-        binding = config["durable_objects"]["bindings"]
-        self.assertEqual([{"name": "RUNNER_POOLS_V2", "class_name": "LocalMergeRunnerPoolGate"}], binding)
-        self.assertNotIn("migrations", config)
-        self.assertEqual(
-            {"type": "durable-object", "storage": "sqlite"},
-            config["exports"]["RunnerPoolGate"],
-        )
-        self.assertEqual(
-            {"type": "durable-object", "storage": "sqlite"},
-            config["exports"]["LocalMergeRunnerPoolGate"],
-        )
-        self.assertNotIn("RunnerPoolGate", {item["class_name"] for item in binding})
-        worker_entrypoint = (ROOT / "gate-service" / "src" / "index.ts").read_text(encoding="utf-8")
-        self.assertIn('export { RunnerPoolGate } from "./legacy-runner-pool-gate"', worker_entrypoint)
-        self.assertNotIn("LocalMergeRunnerPoolGate as RunnerPoolGate", worker_entrypoint)
-
 
 if __name__ == "__main__":
     unittest.main()

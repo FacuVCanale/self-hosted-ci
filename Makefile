@@ -26,6 +26,7 @@ status: $(VENV)/.stamp
 
 distribution-check:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/check-public-distribution.py
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/check-local-only.py
 	PYTHONPYCACHEPREFIX=$(VENV)/pycache $(PYTHON) -m compileall -q actions scripts
 
 clean:
