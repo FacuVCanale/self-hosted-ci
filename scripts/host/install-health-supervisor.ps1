@@ -41,7 +41,7 @@ function Get-DedicatedReader([string]$Identity) {
     if (-not $match.Success -or $match.Groups['name'].Value -ne "selfhosted-ci-health") { throw "reader must be the dedicated selfhosted-ci-health local account" }
     if ($match.Groups['host'].Success -and $match.Groups['host'].Value -notin @(".", $env:COMPUTERNAME)) { throw "reader must be local to this Windows host" }
     $reader = Get-LocalUser -Name $match.Groups['name'].Value -ErrorAction Stop
-    if (-not $reader.Enabled -or [string]$reader.PrincipalSource -ne "Local") { throw "health reader must be enabled and local" }
+    if ([string]$reader.PrincipalSource -ne "Local") { throw "health reader must be local" }
     if ($reader.SID.Value -notmatch '^S-1-5-21-(?:[0-9]+-){3}[0-9]+$') { throw "health reader must not be a group or well-known identity" }
     return $reader
 }
@@ -249,6 +249,7 @@ $password = $null
 $registered = $false
 $passwordApplied = $false
 $sshdConfigured = $false
+$readerWasEnabled = [bool]$reader.Enabled
 $installNonce = [Guid]::NewGuid().ToString("D").ToLowerInvariant()
 $installStartedAt = [DateTimeOffset]::UtcNow
 try {
@@ -266,6 +267,7 @@ try {
     if (Test-Path -LiteralPath $SnapshotPath) { throw "previous snapshot could not be fenced" }
     $sshdConfigured = $true
     Set-SftpOnlyConfiguration $reader.Name
+    if (-not $readerWasEnabled) { Enable-LocalUser -Name $reader.Name -ErrorAction Stop }
 
     $password = New-CryptographicAccountPassword
     Set-LocalUser -Name $account.Name -Password $password -ErrorAction Stop
@@ -345,6 +347,10 @@ catch {
             if ((Get-Service -Name sshd).Status -ne "Running") { throw "sshd rollback did not return to Running" }
         }
         catch { $rollbackFailures.Add("sshd rollback failed: $($_.Exception.Message)") }
+    }
+    if (-not $readerWasEnabled) {
+        try { Disable-LocalUser -Name $reader.Name -ErrorAction Stop }
+        catch { $rollbackFailures.Add("reader disable rollback failed: $($_.Exception.Message)") }
     }
     foreach ($rollbackPath in @($HealthRoot, $ControlRoot)) {
         if (Test-Path -LiteralPath $rollbackPath) {

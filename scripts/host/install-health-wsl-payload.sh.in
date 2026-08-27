@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+readonly root=/usr/local/lib/self-hosted-ci state=/var/lib/self-hosted-ci/health
+readonly heartbeat="${state}/heartbeat.json" timer=self-hosted-ci-health-heartbeat.timer
+readonly collector_sha='@@COLLECTOR_SHA@@' writer_sha='@@WRITER_SHA@@' service_sha='@@SERVICE_SHA@@' timer_sha='@@TIMER_SHA@@'
+readonly failure_mode='@@FAILURE_MODE@@' tx="$(mktemp -d /var/tmp/self-hosted-ci-health.XXXXXX)"
+committed=false; snapshot_complete=false; timer_enabled=false; timer_active=false; heartbeat_existed=false; root_existed=false; state_existed=false
+declare -A destination=(
+  [collect-health-snapshot.py]="${root}/collect-health-snapshot.py"
+  [update-health-heartbeat.py]="${root}/update-health-heartbeat.py"
+  [self-hosted-ci-health-heartbeat.service]='/etc/systemd/system/self-hosted-ci-health-heartbeat.service'
+  [self-hosted-ci-health-heartbeat.timer]='/etc/systemd/system/self-hosted-ci-health-heartbeat.timer'
+)
+declare -A expected=(
+  [collect-health-snapshot.py]="${collector_sha}" [update-health-heartbeat.py]="${writer_sha}"
+  [self-hosted-ci-health-heartbeat.service]="${service_sha}" [self-hosted-ci-health-heartbeat.timer]="${timer_sha}"
+)
+restore_previous() {
+  trap - ERR; set +e; systemctl disable --now "${timer}" >/dev/null 2>&1
+  for name in "${!destination[@]}"; do
+    path="${destination[${name}]}"
+    if [[ -f "${tx}/before/${name}" ]]; then
+      staging="$(mktemp "${path}.restore.XXXXXX")"; cp -a -- "${tx}/before/${name}" "${staging}"; mv -f -- "${staging}" "${path}"
+      printf '%s  %s\n' "$(cat "${tx}/before/${name}.sha256")" "${path}" | sha256sum --check --status || exit 91
+    else rm -f -- "${path}"; [[ ! -e "${path}" ]] || exit 92; fi
+  done
+  systemctl daemon-reload || exit 93
+  if ${timer_enabled}; then systemctl enable "${timer}" >/dev/null || exit 94; else systemctl disable "${timer}" >/dev/null 2>&1 || true; fi
+  if ${timer_active}; then systemctl start "${timer}" || exit 95; else systemctl stop "${timer}" >/dev/null 2>&1 || true; fi
+  if ${timer_enabled}; then systemctl is-enabled "${timer}" >/dev/null || exit 100; else ! systemctl is-enabled "${timer}" >/dev/null 2>&1 || exit 101; fi
+  if ${timer_active}; then systemctl is-active "${timer}" >/dev/null || exit 102; else ! systemctl is-active "${timer}" >/dev/null 2>&1 || exit 103; fi
+  if ${heartbeat_existed}; then
+    install -o root -g root -m 0600 "${tx}/before/heartbeat.json" "${heartbeat}"
+    printf '%s  %s\n' "$(cat "${tx}/before/heartbeat.sha256")" "${heartbeat}" | sha256sum --check --status || exit 96
+  else rm -f -- "${heartbeat}"; [[ ! -e "${heartbeat}" ]] || exit 97; fi
+  if ! ${state_existed}; then rmdir -- "${state}" 2>/dev/null || exit 98; fi
+  if ! ${root_existed}; then rmdir -- "${root}" 2>/dev/null || exit 99; fi
+  rm -rf -- "${tx}"
+}
+cleanup() { if ${committed} || ! ${snapshot_complete}; then rm -rf -- "${tx}"; else restore_previous; fi; }
+trap cleanup EXIT; trap 'exit 90' ERR
+[[ -d "${root}" && ! -L "${root}" ]] && root_existed=true
+[[ -d "${state}" && ! -L "${state}" ]] && state_existed=true
+[[ ! -e "${root}" || ( -d "${root}" && ! -L "${root}" ) ]] || { printf 'unsafe install root\n' >&2; exit 1; }
+[[ ! -e "${state}" || ( -d "${state}" && ! -L "${state}" ) ]] || { printf 'unsafe state root\n' >&2; exit 1; }
+install -d -o root -g root -m 0700 "${tx}/decoded" "${tx}/before"
+systemctl is-enabled "${timer}" >/dev/null 2>&1 && timer_enabled=true
+systemctl is-active "${timer}" >/dev/null 2>&1 && timer_active=true
+for name in "${!destination[@]}"; do
+  path="${destination[${name}]}"
+  if [[ -e "${path}" ]]; then
+    [[ -f "${path}" && ! -L "${path}" ]] || { printf 'unsafe preexisting managed path: %s\n' "${path}" >&2; exit 1; }
+    cp -a -- "${path}" "${tx}/before/${name}"; sha256sum "${path}" | cut -d' ' -f1 >"${tx}/before/${name}.sha256"
+  fi
+done
+if [[ -e "${heartbeat}" ]]; then
+  [[ -f "${heartbeat}" && ! -L "${heartbeat}" ]] || { printf 'unsafe preexisting heartbeat\n' >&2; exit 1; }
+  heartbeat_existed=true; cp -a -- "${heartbeat}" "${tx}/before/heartbeat.json"; sha256sum "${heartbeat}" | cut -d' ' -f1 >"${tx}/before/heartbeat.sha256"
+fi
+snapshot_complete=true
+install -d -o root -g root -m 0755 "${root}"; install -d -o root -g root -m 0700 "${state}"
+decode() { printf '%s' "$2" | base64 --decode >"${tx}/decoded/$1"; printf '%s  %s\n' "$3" "${tx}/decoded/$1" | sha256sum --check --status; }
+decode collect-health-snapshot.py '@@COLLECTOR_B64@@' "${collector_sha}"
+decode update-health-heartbeat.py '@@WRITER_B64@@' "${writer_sha}"
+decode self-hosted-ci-health-heartbeat.service '@@SERVICE_B64@@' "${service_sha}"
+decode self-hosted-ci-health-heartbeat.timer '@@TIMER_B64@@' "${timer_sha}"
+for name in "${!destination[@]}"; do
+  path="${destination[${name}]}"; mode=0644; [[ "${name}" == *.py ]] && mode=0755
+  staging="$(mktemp "${path}.install.XXXXXX")"; install -o root -g root -m "${mode}" "${tx}/decoded/${name}" "${staging}"; mv -f -- "${staging}" "${path}"
+  printf '%s  %s\n' "${expected[${name}]}" "${path}" | sha256sum --check --status
+done
+[[ "${failure_mode}" != payload-after-install ]] || { printf 'injected failure after atomic install\n' >&2; false; }
+systemctl daemon-reload; systemctl enable --now "${timer}"; systemctl start self-hosted-ci-health-heartbeat.service
+first="$(python3 -c 'import json; print(json.load(open("/var/lib/self-hosted-ci/health/heartbeat.json"))["written_at"])')"
+deadline=$((SECONDS + 75)); second=''
+while (( SECONDS < deadline )); do sleep 2; second="$(python3 -c 'import json; print(json.load(open("/var/lib/self-hosted-ci/health/heartbeat.json"))["written_at"])')"; [[ "${second}" != "${first}" ]] && break; done
+[[ -n "${second}" && "${second}" != "${first}" ]]; [[ "$(systemctl is-active "${timer}")" == active ]]; [[ "$(systemctl is-enabled "${timer}")" == enabled ]]
+prior_digest="$(find "${tx}/before" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+[[ "${failure_mode}" != payload-evidence-failure ]] || { printf 'injected failure during evidence step\n' >&2; false; }
+printf '{"status":"installed","first_heartbeat":"%s","second_heartbeat":"%s","prior_state_digest":"%s","runner_registration_changed":false}\n' "${first}" "${second}" "${prior_digest}"
+committed=true
