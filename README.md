@@ -59,6 +59,10 @@ make evidence
 See [`docs/github-automation-operations.md`](docs/github-automation-operations.md)
 for the generic operating model. Never commit generated operational evidence.
 
+For the reproducible local sandbox bootstrap, prerequisites, rollback, and
+return to GitHub-hosted execution, see
+[`docs/runbook-bootstrap-local-ci.md`](docs/runbook-bootstrap-local-ci.md).
+
 The inert WSL host contract, read-only Mac-to-Windows health command, and the
 activation stop conditions are documented in
 [`docs/wsl-jit-runner-mvp.md`](docs/wsl-jit-runner-mvp.md). The dedicated CI
