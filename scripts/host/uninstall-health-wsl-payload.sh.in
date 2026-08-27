@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+declare -A managed=(
+  [/usr/local/lib/self-hosted-ci/collect-health-snapshot.py]='@@COLLECTOR_SHA@@'
+  [/usr/local/lib/self-hosted-ci/update-health-heartbeat.py]='@@WRITER_SHA@@'
+  [/etc/systemd/system/self-hosted-ci-health-heartbeat.service]='@@SERVICE_SHA@@'
+  [/etc/systemd/system/self-hosted-ci-health-heartbeat.timer]='@@TIMER_SHA@@'
+)
+for path in "${!managed[@]}"; do
+  [[ -f "${path}" && ! -L "${path}" ]] || { printf 'expected managed file is absent or unsafe: %s\n' "${path}" >&2; exit 1; }
+  printf '%s  %s\n' "${managed[${path}]}" "${path}" | sha256sum --check --status
+done
+heartbeat=/var/lib/self-hosted-ci/health/heartbeat.json
+[[ ! -e "${heartbeat}" || ( -f "${heartbeat}" && ! -L "${heartbeat}" ) ]] || { printf 'heartbeat artifact is unsafe\n' >&2; exit 1; }
+systemctl disable --now self-hosted-ci-health-heartbeat.timer
+rm -- "${!managed[@]}"
+rm -f -- "${heartbeat}"
+rmdir --ignore-fail-on-non-empty /var/lib/self-hosted-ci/health /usr/local/lib/self-hosted-ci
+systemctl daemon-reload
+for path in "${!managed[@]}"; do [[ ! -e "${path}" ]] || exit 1; done
+printf '{"status":"uninstalled","runner_registration_changed":false}\n'

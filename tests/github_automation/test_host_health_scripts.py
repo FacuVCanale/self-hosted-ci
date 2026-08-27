@@ -18,6 +18,10 @@ VALIDATOR = HOST / "validate-health-snapshot.py"
 SUPERVISOR = HOST / "run-health-supervisor.ps1"
 INSTALLER = HOST / "install-health-supervisor.ps1"
 UNINSTALLER = HOST / "uninstall-health-supervisor.ps1"
+PREREQUISITE_INSTALLER = HOST / "install-health-prerequisites.ps1"
+PREREQUISITE_UNINSTALLER = HOST / "uninstall-health-prerequisites.ps1"
+WSL_INSTALL_PAYLOAD = HOST / "install-health-wsl-payload.sh.in"
+WSL_UNINSTALL_PAYLOAD = HOST / "uninstall-health-wsl-payload.sh.in"
 SPEC = importlib.util.spec_from_file_location("health_validator", VALIDATOR)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -46,7 +50,7 @@ class HostHealthScriptTests(unittest.TestCase):
         powershell = next((name for name in ("pwsh", "powershell") if subprocess.run(["bash", "-lc", f"command -v {name}"], capture_output=True).returncode == 0), None)
         if powershell is None:
             self.skipTest("PowerShell is not installed")
-        for script in (SUPERVISOR, INSTALLER, UNINSTALLER):
+        for script in (SUPERVISOR, INSTALLER, UNINSTALLER, PREREQUISITE_INSTALLER, PREREQUISITE_UNINSTALLER):
             with self.subTest(script=script.name):
                 command = f"$e=$null; [void][Management.Automation.Language.Parser]::ParseFile('{script}',[ref]$null,[ref]$e); if($e.Count){{$e|Out-String;exit 1}}"
                 result = subprocess.run([powershell, "-NoProfile", "-Command", command], text=True, capture_output=True)
@@ -125,6 +129,65 @@ class HostHealthScriptTests(unittest.TestCase):
             self.assertIn(token, source)
         self.assertLess(source.index("if (-not $Apply) { return }"), source.index("Set-LocalUser -Name $account.Name -Password $password"))
         self.assertNotIn("config.sh", source)
+
+    def test_prerequisite_bootstrap_is_separate_plan_only_and_fail_closed(self) -> None:
+        source = PREREQUISITE_INSTALLER.read_text(encoding="utf-8")
+        for token in (
+            "[switch]$Apply", "AcknowledgeCreateDisabledReader", "AcknowledgeOneTimePasswordRotation",
+            'ReaderAccount = "selfhosted-ci-health"', 'DistroName = "Ubuntu-24.04-CI"',
+            "Disable-LocalUser -Name $ReaderAccount", "Set-ExactAuthorizedKey", "TASK_LOGON_PASSWORD",
+            "TASK_RUNLEVEL_LUA", "SecureStringToBSTR", "ZeroFreeBSTR", "payload_sha256",
+            'persistent supervisor must not exist; bootstrap must run first', "two-heartbeat postcondition failed",
+            "Unregister-ScheduledTask", "stored_task_credential_invalidated=$true",
+            '[ValidateSet("none", "worker-before-wsl", "payload-after-install", "payload-evidence-failure")]',
+        ):
+            self.assertIn(token, source)
+        self.assertLess(source.index("if (-not $Apply) { return }"), source.index("New-LocalUser -Name $ReaderAccount"))
+        self.assertLess(source.index("Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false; $registered = $false"), source.index("$finalPassword = New-RandomPassword"))
+        for token in ("Test-GroupContainsSid", "cannot resolve nested administrator group", "preexisting health reader must be disabled and have exact managed provenance", "reader profile path is not canonical", "Assert-NoReparseTree", "reparse descendant is forbidden", "one-shot task reappeared before completion evidence"):
+            self.assertIn(token, source)
+        for token in ('health bootstrap staging root is not canonical', 'Assert-NoReparseTree "C:\\ProgramData"', 'Assert-NoReparseTree (Split-Path -Parent $Root) $true'):
+            self.assertIn(token, source)
+        self.assertLess(source.index('Assert-NoReparseTree $Root $true'), source.index('New-Item -ItemType Directory -Path $Root'))
+        self.assertLess(source.index('New-Item -ItemType Directory -Path $Root'), source.index('Assert-NoReparseTree $Root\n'))
+        for forbidden in ("config.sh", "github.com", "Invoke-WebRequest", "incus", "garm", "boundary-verify"):
+            self.assertNotIn(forbidden, source.lower())
+
+    def test_prerequisite_payload_is_bounded_hash_pinned_and_has_two_heartbeats(self) -> None:
+        source = WSL_INSTALL_PAYLOAD.read_text(encoding="utf-8")
+        syntax = subprocess.run(["bash", "-n", str(WSL_INSTALL_PAYLOAD)], text=True, capture_output=True)
+        self.assertEqual(0, syntax.returncode, syntax.stderr)
+        for token in ("sha256sum --check --status", 'systemctl enable --now "${timer}"', "first=", "second=", '[[ -n "${second}" && "${second}" != "${first}" ]]', "restore_previous", "snapshot_complete=true", "payload-after-install", ".restore.XXXXXX", ".install.XXXXXX"):
+            self.assertIn(token, source)
+        for forbidden in ("/mnt/", "powershell.exe", "cmd.exe", "config.sh", "github"):
+            self.assertNotIn(forbidden, source.lower())
+        self.assertEqual(4, len(set(__import__("re").findall(r"@@(?:COLLECTOR|WRITER|SERVICE|TIMER)_B64@@", source))))
+        self.assertLess(source.index("snapshot_complete=true"), source.index('install -d -o root -g root -m 0755 "${root}"'))
+        self.assertLess(source.index("restore_previous()"), source.index("payload-after-install"))
+        self.assertIn("payload-evidence-failure", source)
+        self.assertLess(source.index("payload-evidence-failure"), source.index("committed=true"))
+        self.assertLess(source.index("printf '{\"status\":\"installed\""), source.index("committed=true"))
+
+    def test_exact_prerequisite_uninstall_requires_supervisor_first(self) -> None:
+        source = PREREQUISITE_UNINSTALLER.read_text(encoding="utf-8")
+        for token in ("persistent supervisor must be uninstalled first", "health reader must be disabled", "unexpected reader profile artifact blocks exact uninstall", "Remove-LocalUser", "stored_task_credential_invalidated=$true"):
+            self.assertIn(token, source)
+        payload = WSL_UNINSTALL_PAYLOAD.read_text(encoding="utf-8")
+        self.assertEqual(0, subprocess.run(["bash", "-n", str(WSL_UNINSTALL_PAYLOAD)], capture_output=True).returncode)
+        self.assertIn("expected managed file is absent or unsafe", payload)
+        self.assertIn("sha256sum --check --status", payload)
+        self.assertNotIn("config.sh", payload)
+        for token in ("Cleanup failures:", "task absence postcondition failed", "health reader remains after exact uninstall", "one-shot task reappeared before completion evidence"):
+            self.assertIn(token, source)
+        for token in ('health bootstrap staging root is not canonical', 'Assert-NoReparseTree "C:\\ProgramData"', 'Assert-NoReparseTree $Root $true', 'Assert-NoReparseTree $Root\n    Remove-Item -LiteralPath $Root'):
+            self.assertIn(token, source)
+
+    def test_supervisor_enables_reader_only_after_sftp_fence_and_uninstall_disables_it(self) -> None:
+        install = INSTALLER.read_text(encoding="utf-8")
+        self.assertLess(install.index("Set-SftpOnlyConfiguration $reader.Name"), install.index("Enable-LocalUser -Name $reader.Name"))
+        uninstall = UNINSTALLER.read_text(encoding="utf-8")
+        self.assertIn('if ($ReaderAccount -ne "selfhosted-ci-health")', uninstall)
+        self.assertLess(uninstall.rindex("Disable-LocalUser -Name $ReaderAccount"), uninstall.rindex("Remove-ManagedSftpConfiguration"))
 
     def test_installer_checks_nested_admin_membership_for_both_accounts_independently(self) -> None:
         source = INSTALLER.read_text(encoding="utf-8")

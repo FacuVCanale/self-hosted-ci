@@ -3,6 +3,7 @@ param(
     [string]$ServiceAccount = "selfhosted-ci-svc",
     [Parameter(Mandatory = $true)][string]$ExpectedServiceAccountSid,
     [string]$DistroName = "Ubuntu-24.04-CI",
+    [string]$ReaderAccount = "selfhosted-ci-health",
     [switch]$Apply,
     [switch]$AcknowledgeTaskRemoval,
     [switch]$AcknowledgeFinalPasswordRotation,
@@ -69,6 +70,7 @@ function Remove-ManagedSftpConfiguration {
 }
 
 if ($env:OS -ne "Windows_NT" -or -not (Test-IsAdministrator)) { throw "uninstaller requires an elevated Windows console" }
+if ($ReaderAccount -ne "selfhosted-ci-health") { throw "reader account name is pinned" }
 $account = Get-LocalUser -Name $ServiceAccount -ErrorAction Stop
 if ($account.SID.Value -ne $ExpectedServiceAccountSid) { throw "service-account SID mismatch" }
 [ordered]@{ mode = "plan"; apply_requested = [bool]$Apply; task_name = $TaskName; remove = @($ControlRoot, $HealthRoot); rotate_service_password = $true } | ConvertTo-Json -Compress
@@ -100,6 +102,8 @@ try {
     Set-LocalUser -Name $account.Name -Password $password -ErrorAction Stop
 }
 finally { if ($null -ne $password) { $password.Dispose() } }
+Disable-LocalUser -Name $ReaderAccount -ErrorAction Stop
+if ((Get-LocalUser -Name $ReaderAccount -ErrorAction Stop).Enabled) { throw "health reader did not remain disabled" }
 Remove-ManagedSftpConfiguration
 foreach ($path in @($ControlRoot, $HealthRoot)) {
     if (Test-Path -LiteralPath $path) {

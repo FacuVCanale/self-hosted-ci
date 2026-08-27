@@ -120,12 +120,41 @@ the fixed snapshot path with one batch-mode SFTP `get`, then performs strict
 local schema, SID, distro, timestamp, label, heartbeat, and eligibility
 validation:
 
-Plan the Windows installation from an elevated local console. `ReaderAccount`
-must already be a dedicated non-admin account with its SSH public key
-configured; administrator and service identities are rejected. Apply also
-requires the WSL health collector and timer previously installed through the
-verified `provision-wsl-jit-contract.sh` Apply path; a missing collector, stale
-heartbeat, inactive timer, or probe error rolls back the Windows task and
+The health prerequisites are deliberately separate from the persistent Windows
+supervisor. Run their plan first from an elevated local console. The plan does
+not create an account, mutate WSL, rotate a password, or register a task:
+
+```powershell
+.\scripts\host\install-health-prerequisites.ps1 `
+  -ExpectedServiceAccountSid 'S-1-5-21-...' `
+  -AuthorizedKey 'ssh-ed25519 AAAA... mac-health-watchdog'
+```
+
+Apply creates or verifies only the pinned local `selfhosted-ci-health` reader,
+stores one exact public key, and leaves the account disabled. It rotates the
+service account to an in-memory random password, registers one LUA/Limited
+`TASK_LOGON_PASSWORD` task, and streams a base64 payload to WSL stdin. The WSL
+payload has exact SHA-256 pins and installs only the collector, heartbeat
+writer, systemd service, and timer. It never uses `/mnt`, Windows interop,
+personal files, GitHub, a runner, Incus, GARM, or boundary components. Apply
+requires two distinct heartbeats, deletes the one-shot task, and then rotates
+the service account again to invalidate Task Scheduler's stored credential:
+
+```powershell
+.\scripts\host\install-health-prerequisites.ps1 `
+  -ExpectedServiceAccountSid 'S-1-5-21-...' `
+  -AuthorizedKey 'ssh-ed25519 AAAA... mac-health-watchdog' `
+  -Apply `
+  -AcknowledgeCreateDisabledReader `
+  -AcknowledgeOneTimePasswordRotation
+```
+
+Only after that succeeds, install the persistent supervisor. It first applies
+the SFTP-only sshd fence and only then enables the reader. This ordering is
+mandatory: installing prerequisites after the persistent password task would
+rotate and invalidate that task's credential, so the prerequisite installer
+refuses when `SelfHostedCI-Health-Supervisor` exists. A missing collector,
+stale heartbeat, inactive timer, or probe error rolls back the Windows task and
 invalidates its credential:
 
 ```powershell
@@ -148,7 +177,7 @@ The explicit Apply form requires all three acknowledgements:
 
 Removal is independently plan-only. Apply deletes the exact task, rotates the
 service account to invalidate its stored credential, and then removes only the
-health/control artifacts:
+health/control artifacts. It also disables the reader before returning:
 
 ```powershell
 .\scripts\host\uninstall-health-supervisor.ps1 `
@@ -157,6 +186,21 @@ health/control artifacts:
   -AcknowledgeTaskRemoval `
   -AcknowledgeFinalPasswordRotation `
   -AcknowledgeHealthArtifactRemoval
+```
+
+The final prerequisite uninstall must run after the persistent supervisor
+uninstall. It refuses an enabled reader, a remaining persistent task, or any
+unexpected reader-profile artifact; then it removes exactly the four WSL health
+files through another one-shot service-identity task, invalidates that task's
+credential, and deletes the disabled reader:
+
+```powershell
+.\scripts\host\uninstall-health-prerequisites.ps1 `
+  -ExpectedServiceAccountSid 'S-1-5-21-...' `
+  -Apply `
+  -AcknowledgeRemoveDisabledReader `
+  -AcknowledgeRemoveWslHealthPackage `
+  -AcknowledgeOneTimePasswordRotation
 ```
 
 ```bash
