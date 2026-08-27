@@ -214,14 +214,17 @@ Match all
         $sshd = (Get-Command sshd.exe -ErrorAction Stop).Source
         & $sshd -t -f $SshdConfig
         if ($LASTEXITCODE -ne 0) { throw "sshd rejected managed SFTP configuration" }
-        Restart-Service -Name sshd -ErrorAction Stop
-        if ((Get-Service -Name sshd).Status -ne "Running") { throw "sshd did not return to Running" }
-        $effective = @(& $sshd -T -f $SshdConfig -C "user=$ReaderName,host=localhost,addr=127.0.0.1" 2>&1) -join "`n"
-        if ($LASTEXITCODE -ne 0 -or $effective -notmatch '(?im)^forcecommand internal-sftp$' -or $effective -notmatch '(?im)^disableforwarding yes$' -or $effective -notmatch '(?im)^permittty no$' -or $effective -notmatch '(?im)^x11forwarding no$') {
-            throw "effective sshd configuration is not SFTP-only"
-        }
     }
     finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
+}
+
+function Assert-SftpOnlyConfiguration([string]$ReaderName) {
+    if ((Get-Service -Name sshd -ErrorAction Stop).Status -ne "Running") { throw "sshd did not return to Running" }
+    $sshd = (Get-Command sshd.exe -ErrorAction Stop).Source
+    $effective = @(& $sshd -T -f $SshdConfig -C "user=$ReaderName,host=localhost,addr=127.0.0.1" 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $effective -notmatch '(?im)^forcecommand internal-sftp$' -or $effective -notmatch '(?im)^disableforwarding yes$' -or $effective -notmatch '(?im)^permittty no$' -or $effective -notmatch '(?im)^x11forwarding no$') {
+        throw "effective sshd configuration is not SFTP-only"
+    }
 }
 
 if ($env:OS -ne "Windows_NT") { throw "installer requires Windows" }
@@ -233,6 +236,7 @@ if ($account.SID.Value -ne $ExpectedServiceAccountSid) { throw "service-account 
 $serviceSid = $account.SID
 $reader = Get-DedicatedReader $ReaderAccount
 $readerSid = $reader.SID
+if ($reader.Enabled) { throw "health reader must be disabled before SFTP activation" }
 if ($readerSid.Value -eq $serviceSid.Value) { throw "reader identity must be separate from service identity" }
 $administratorGroup = Get-LocalGroup -SID "S-1-5-32-544" -ErrorAction Stop
 $serviceVisitedGroups = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -265,6 +269,7 @@ $registered = $false
 $passwordApplied = $false
 $sshdConfigured = $false
 $readerWasEnabled = [bool]$reader.Enabled
+$readerDisabledForRollback = $readerWasEnabled
 $installNonce = [Guid]::NewGuid().ToString("D").ToLowerInvariant()
 $installStartedAt = [DateTimeOffset]::UtcNow
 try {
@@ -280,9 +285,13 @@ try {
     Assert-ExactAcl $HealthRoot @("S-1-5-18", "S-1-5-32-544", $serviceSid.Value, $readerSid.Value) $readerSid.Value $true "S-1-5-32-544"
     if (Test-Path -LiteralPath $SnapshotPath) { Remove-Item -LiteralPath $SnapshotPath -Force }
     if (Test-Path -LiteralPath $SnapshotPath) { throw "previous snapshot could not be fenced" }
-    $sshdConfigured = $true
     Set-SftpOnlyConfiguration $reader.Name
+    $sshdConfigured = $true
+    Stop-Service -Name sshd -ErrorAction Stop
+    if ((Get-Service -Name sshd -ErrorAction Stop).Status -ne "Stopped") { throw "sshd did not stop before reader activation" }
     if (-not $readerWasEnabled) { Enable-LocalUser -Name $reader.Name -ErrorAction Stop }
+    Start-Service -Name sshd -ErrorAction Stop
+    Assert-SftpOnlyConfiguration $reader.Name
 
     $password = New-CryptographicAccountPassword
     Set-LocalUser -Name $account.Name -Password $password -ErrorAction Stop
@@ -355,17 +364,33 @@ catch {
         catch { $rollbackFailures.Add("credential invalidation failed: $($_.Exception.Message)") }
         finally { if ($null -ne $recoveryPassword) { $recoveryPassword.Dispose() } }
     }
-    if ($sshdConfigured -and (Test-Path -LiteralPath $SshdBackup -PathType Leaf)) {
+    $sshdRollbackRequired = $sshdConfigured -or (Test-Path -LiteralPath $SshdBackup -PathType Leaf)
+    if ($sshdRollbackRequired) {
         try {
+            Stop-Service -Name sshd -ErrorAction SilentlyContinue
+            if ((Get-Service -Name sshd -ErrorAction Stop).Status -ne "Stopped") { throw "sshd did not stop for rollback" }
+        }
+        catch { $rollbackFailures.Add("sshd stop rollback failed: $($_.Exception.Message)") }
+    }
+    if (-not $readerWasEnabled) {
+        try {
+            Disable-LocalUser -Name $reader.Name -ErrorAction Stop
+            if ((Get-LocalUser -Name $reader.Name -ErrorAction Stop).Enabled) { throw "reader remains enabled" }
+            $readerDisabledForRollback = $true
+        }
+        catch { $rollbackFailures.Add("reader disable rollback failed: $($_.Exception.Message)") }
+    }
+    if ($sshdRollbackRequired -and (Test-Path -LiteralPath $SshdBackup -PathType Leaf)) {
+        try {
+            if (-not $readerDisabledForRollback) { throw "refusing to restore unrestricted sshd configuration while reader is enabled" }
             Copy-Item -LiteralPath $SshdBackup -Destination $SshdConfig -Force
-            Restart-Service -Name sshd -ErrorAction Stop
+            Start-Service -Name sshd -ErrorAction Stop
             if ((Get-Service -Name sshd).Status -ne "Running") { throw "sshd rollback did not return to Running" }
         }
         catch { $rollbackFailures.Add("sshd rollback failed: $($_.Exception.Message)") }
     }
-    if (-not $readerWasEnabled) {
-        try { Disable-LocalUser -Name $reader.Name -ErrorAction Stop }
-        catch { $rollbackFailures.Add("reader disable rollback failed: $($_.Exception.Message)") }
+    elseif ($sshdRollbackRequired) {
+        $rollbackFailures.Add("sshd rollback required but backup is missing; service remains stopped")
     }
     foreach ($rollbackPath in @($HealthRoot, $ControlRoot)) {
         if (Test-Path -LiteralPath $rollbackPath) {
