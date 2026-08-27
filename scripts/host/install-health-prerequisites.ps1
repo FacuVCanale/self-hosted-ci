@@ -57,18 +57,32 @@ function Assert-NonAdmin([object]$Account, [string]$Description) {
     $visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     if (Test-GroupContainsSid $admins $Account.SID.Value $visited) { throw "$Description must be effectively non-admin" }
 }
-function Assert-NoReparseTree([string]$Path, [bool]$AllowMissingLeaf = $false) {
+function Assert-NoReparsePath([string]$Path, [bool]$AllowMissingLeaf = $false) {
     $full = [IO.Path]::GetFullPath($Path)
+    $leafExists = Test-Path -LiteralPath $full
+    if (-not $AllowMissingLeaf -and -not $leafExists) { throw "expected path is absent: $full" }
     $cursor = $full
-    while ($cursor -and (Test-Path -LiteralPath $cursor)) {
-        $item = Get-Item -LiteralPath $cursor -Force
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "reparse point is forbidden: $cursor" }
+    while ($cursor) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "reparse point is forbidden: $cursor" }
+        }
         $parent = Split-Path -Parent $cursor
         if ($parent -eq $cursor) { break }; $cursor = $parent
     }
-    if (-not $AllowMissingLeaf -and -not (Test-Path -LiteralPath $full)) { throw "expected path is absent: $full" }
-    if (Test-Path -LiteralPath $full -PathType Container) {
-        foreach ($item in @(Get-ChildItem -LiteralPath $full -Force -Recurse)) { if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "reparse descendant is forbidden: $($item.FullName)" } }
+}
+function Assert-NoReparseDescendants([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path)
+    Assert-NoReparsePath $full
+    if (-not (Test-Path -LiteralPath $full -PathType Container)) { return }
+    $pending = [Collections.Generic.Queue[string]]::new()
+    $pending.Enqueue($full)
+    while ($pending.Count -gt 0) {
+        $cursor = $pending.Dequeue()
+        foreach ($item in @(Get-ChildItem -LiteralPath $cursor -Force -ErrorAction Stop)) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "reparse descendant is forbidden: $($item.FullName)" }
+            if ($item.PSIsContainer) { $pending.Enqueue($item.FullName) }
+        }
     }
 }
 
@@ -91,11 +105,15 @@ function Set-ExactAuthorizedKey([object]$Reader, [string]$Key) {
     if ([IO.Path]::GetFullPath($profile) -ne $expectedProfile) { throw "reader profile path is not canonical" }
     $ssh = Join-Path $profile ".ssh"
     $file = Join-Path $ssh "authorized_keys"
-    Assert-NoReparseTree "C:\Users"
-    Assert-NoReparseTree $profile $true
-    foreach ($path in @($profile, $ssh)) { if (-not (Test-Path -LiteralPath $path)) { [void](New-Item -ItemType Directory -Path $path) } }
-    Assert-NoReparseTree $profile
+    Assert-NoReparsePath "C:\Users"
+    Assert-NoReparsePath $profile $true
+    foreach ($path in @($profile, $ssh)) {
+        if (-not (Test-Path -LiteralPath $path)) { [void](New-Item -ItemType Directory -Path $path) }
+        Assert-NoReparsePath $path
+    }
+    Assert-NoReparsePath $file $true
     [IO.File]::WriteAllText($file, $Key.Trim() + "`n", [Text.UTF8Encoding]::new($false))
+    Assert-NoReparsePath $file
     $admins = [Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
     $system = [Security.Principal.SecurityIdentifier]::new("S-1-5-18")
     foreach ($entry in @(@($profile, $true), @($ssh, $true), @($file, $false))) {
@@ -150,9 +168,10 @@ if ($null -ne $existingReader) {
     Assert-NonAdmin $existingReader "health reader"
     if ($existingReader.Enabled -or [string]$existingReader.Description -ne $ReaderDescription) { throw "preexisting health reader must be disabled and have exact managed provenance" }
     $existingProfile = [IO.Path]::GetFullPath("C:\Users\selfhosted-ci-health")
-    Assert-NoReparseTree $existingProfile
+    Assert-NoReparsePath $existingProfile
+    Assert-NoReparseDescendants $existingProfile
     $existingKey = Join-Path $existingProfile ".ssh\authorized_keys"
-    Assert-NoReparseTree $existingKey
+    Assert-NoReparsePath $existingKey
     if ((Get-Content -LiteralPath $existingKey -Raw).Trim() -ne $AuthorizedKey.Trim()) { throw "preexisting health reader authorized key is not exact" }
 }
 $payload = Render-Payload
@@ -166,9 +185,9 @@ if (Get-ScheduledTask -TaskName $PersistentTaskName -ErrorAction SilentlyContinu
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task already exists" }
 $expectedStagingRoot = [IO.Path]::GetFullPath("C:\ProgramData\self-hosted-ci\health-bootstrap")
 if ([IO.Path]::GetFullPath($Root) -ne $expectedStagingRoot) { throw "health bootstrap staging root is not canonical" }
-Assert-NoReparseTree "C:\ProgramData"
-Assert-NoReparseTree (Split-Path -Parent $Root) $true
-Assert-NoReparseTree $Root $true
+Assert-NoReparsePath "C:\ProgramData"
+Assert-NoReparsePath (Split-Path -Parent $Root) $true
+Assert-NoReparsePath $Root $true
 
 $createdReader = $false; $registered = $false; $passwordApplied = $false; $password = $null
 try {
@@ -181,7 +200,8 @@ try {
     Disable-LocalUser -Name $ReaderAccount
     Set-ExactAuthorizedKey $existingReader $AuthorizedKey
     if (-not (Test-Path -LiteralPath $Root)) { [void](New-Item -ItemType Directory -Path $Root) }
-    Assert-NoReparseTree $Root
+    Assert-NoReparsePath $Root
+    Assert-NoReparseDescendants $Root
     Set-Acl -LiteralPath $Root -AclObject (New-ProtectedAcl $service.SID)
     $payloadB64 = [Convert]::ToBase64String($payloadBytes)
     $worker = @"
@@ -225,7 +245,8 @@ if (`$document.status -ne 'installed' -or `$document.first_heartbeat -eq `$docum
     try { Set-LocalUser -Name $service.Name -Password $finalPassword }
     finally { $finalPassword.Dispose() }
     $passwordApplied = $false
-    Assert-NoReparseTree $Root
+    Assert-NoReparsePath $Root
+    Assert-NoReparseDescendants $Root
     Remove-Item -LiteralPath $Root -Recurse -Force
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task reappeared before completion evidence" }
     [ordered]@{ status="installed"; reader_account=$ReaderAccount; reader_enabled=$false; two_distinct_heartbeats=$true; one_shot_task_absent=$true; stored_task_credential_invalidated=$true; runner_registration_changed=$false } | ConvertTo-Json -Compress
@@ -242,12 +263,12 @@ catch {
         catch { $rollback.Add("task cleanup: $($_.Exception.Message)") }
     }
     if ($passwordApplied) { $recovery = New-RandomPassword; try { Set-LocalUser -Name $service.Name -Password $recovery } catch { $rollback.Add("credential invalidation: $($_.Exception.Message)") } finally { $recovery.Dispose() } }
-    if (Test-Path -LiteralPath $Root) { try { Assert-NoReparseTree $Root; Remove-Item -LiteralPath $Root -Recurse -Force } catch { $rollback.Add("staging cleanup: $($_.Exception.Message)") } }
+    if (Test-Path -LiteralPath $Root) { try { Assert-NoReparsePath $Root; Assert-NoReparseDescendants $Root; Remove-Item -LiteralPath $Root -Recurse -Force } catch { $rollback.Add("staging cleanup: $($_.Exception.Message)") } }
     if ($createdReader) {
         try {
             Remove-LocalUser -Name $ReaderAccount
             $readerProfile = [IO.Path]::GetFullPath("C:\Users\selfhosted-ci-health")
-            if (Test-Path -LiteralPath $readerProfile) { Assert-NoReparseTree $readerProfile; Remove-Item -LiteralPath $readerProfile -Recurse -Force }
+            if (Test-Path -LiteralPath $readerProfile) { Assert-NoReparsePath $readerProfile; Assert-NoReparseDescendants $readerProfile; Remove-Item -LiteralPath $readerProfile -Recurse -Force }
             if ((Get-LocalUser -Name $ReaderAccount -ErrorAction SilentlyContinue) -or (Test-Path -LiteralPath $readerProfile)) { throw "reader rollback postcondition failed" }
         }
         catch { $rollback.Add("reader rollback: $($_.Exception.Message)") }

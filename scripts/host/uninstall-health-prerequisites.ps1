@@ -42,16 +42,32 @@ function New-ProtectedAcl([Security.Principal.SecurityIdentifier]$ServiceSid) {
     foreach ($sid in @([Security.Principal.SecurityIdentifier]::new("S-1-5-18"), $admins, $ServiceSid)) { [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]::FullControl, $inherit, [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)) }
     return $acl
 }
-function Assert-NoReparseTree([string]$Path, [bool]$AllowMissingLeaf = $false) {
-    $full = [IO.Path]::GetFullPath($Path); $cursor = $full
-    while ($cursor -and (Test-Path -LiteralPath $cursor)) {
-        $item = Get-Item -LiteralPath $cursor -Force
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "reparse point is forbidden: $cursor" }
-        $parent = Split-Path -Parent $cursor; if ($parent -eq $cursor) { break }; $cursor = $parent
+function Assert-NoReparsePath([string]$Path, [bool]$AllowMissingLeaf = $false) {
+    $full = [IO.Path]::GetFullPath($Path)
+    $leafExists = Test-Path -LiteralPath $full
+    if (-not $AllowMissingLeaf -and -not $leafExists) { throw "expected path is absent: $full" }
+    $cursor = $full
+    while ($cursor) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "reparse point is forbidden: $cursor" }
+        }
+        $parent = Split-Path -Parent $cursor
+        if ($parent -eq $cursor) { break }; $cursor = $parent
     }
-    if (-not $AllowMissingLeaf -and -not (Test-Path -LiteralPath $full)) { throw "expected path is absent: $full" }
-    if (Test-Path -LiteralPath $full -PathType Container) {
-        foreach ($item in @(Get-ChildItem -LiteralPath $full -Force -Recurse)) { if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "reparse descendant is forbidden: $($item.FullName)" } }
+}
+function Assert-NoReparseDescendants([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path)
+    Assert-NoReparsePath $full
+    if (-not (Test-Path -LiteralPath $full -PathType Container)) { return }
+    $pending = [Collections.Generic.Queue[string]]::new()
+    $pending.Enqueue($full)
+    while ($pending.Count -gt 0) {
+        $cursor = $pending.Dequeue()
+        foreach ($item in @(Get-ChildItem -LiteralPath $cursor -Force -ErrorAction Stop)) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "reparse descendant is forbidden: $($item.FullName)" }
+            if ($item.PSIsContainer) { $pending.Enqueue($item.FullName) }
+        }
     }
 }
 function Register-OneShot([string]$UserId, [Security.SecureString]$Password) {
@@ -94,9 +110,9 @@ if (Get-ScheduledTask -TaskName $PersistentTaskName -ErrorAction SilentlyContinu
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task already exists" }
 $expectedStagingRoot = [IO.Path]::GetFullPath("C:\ProgramData\self-hosted-ci\health-bootstrap")
 if ([IO.Path]::GetFullPath($Root) -ne $expectedStagingRoot) { throw "health bootstrap staging root is not canonical" }
-Assert-NoReparseTree "C:\ProgramData"
-Assert-NoReparseTree (Split-Path -Parent $Root) $true
-Assert-NoReparseTree $Root $true
+Assert-NoReparsePath "C:\ProgramData"
+Assert-NoReparsePath (Split-Path -Parent $Root) $true
+Assert-NoReparsePath $Root $true
 foreach ($path in @($profile, $ssh, $key)) { if (-not (Test-Path -LiteralPath $path)) { throw "expected reader artifact is absent: $path" } }
 if ([IO.Path]::GetFullPath($profile) -ne [IO.Path]::GetFullPath("C:\Users\selfhosted-ci-health")) { throw "reader profile path is not canonical" }
 foreach ($path in @("C:\Users", $profile, $ssh, $key)) {
@@ -110,7 +126,8 @@ $payloadBytes = [Text.Encoding]::UTF8.GetBytes((Render-Payload)); $payloadB64 = 
 $registered = $false; $passwordApplied = $false; $password = $null
 try {
     if (-not (Test-Path -LiteralPath $Root)) { [void](New-Item -ItemType Directory -Path $Root) }
-    Assert-NoReparseTree $Root
+    Assert-NoReparsePath $Root
+    Assert-NoReparseDescendants $Root
     Set-Acl -LiteralPath $Root -AclObject (New-ProtectedAcl $service.SID)
     $worker = @"
 `$ErrorActionPreference = 'Stop'
@@ -144,7 +161,8 @@ if (`$document.status -ne 'uninstalled') { throw 'WSL uninstall postcondition fa
     $final = New-RandomPassword; try { Set-LocalUser -Name $service.Name -Password $final } finally { $final.Dispose() }; $passwordApplied = $false
     Remove-LocalUser -Name $ReaderAccount
     Remove-Item -LiteralPath $profile -Recurse -Force
-    Assert-NoReparseTree $Root
+    Assert-NoReparsePath $Root
+    Assert-NoReparseDescendants $Root
     Remove-Item -LiteralPath $Root -Recurse -Force
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task reappeared before completion evidence" }
     if (Get-LocalUser -Name $ReaderAccount -ErrorAction SilentlyContinue) { throw "health reader remains after exact uninstall" }
