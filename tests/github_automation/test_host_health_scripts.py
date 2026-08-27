@@ -144,12 +144,12 @@ class HostHealthScriptTests(unittest.TestCase):
             self.assertIn(token, source)
         self.assertLess(source.index("if (-not $Apply) { return }"), source.index("New-LocalUser -Name $ReaderAccount"))
         self.assertLess(source.index("Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false; $registered = $false"), source.index("$finalPassword = New-RandomPassword"))
-        for token in ("Test-GroupContainsSid", "cannot resolve nested administrator group", "preexisting health reader must be disabled and have exact managed provenance", "reader profile path is not canonical", "Assert-NoReparseTree", "reparse descendant is forbidden", "one-shot task reappeared before completion evidence"):
+        for token in ("Test-GroupContainsSid", "cannot resolve nested administrator group", "preexisting health reader must be disabled and have exact managed provenance", "reader profile path is not canonical", "Assert-NoReparsePath", "Assert-NoReparseDescendants", "reparse descendant is forbidden", "one-shot task reappeared before completion evidence"):
             self.assertIn(token, source)
-        for token in ('health bootstrap staging root is not canonical', 'Assert-NoReparseTree "C:\\ProgramData"', 'Assert-NoReparseTree (Split-Path -Parent $Root) $true'):
+        for token in ('health bootstrap staging root is not canonical', 'Assert-NoReparsePath "C:\\ProgramData"', 'Assert-NoReparsePath (Split-Path -Parent $Root) $true'):
             self.assertIn(token, source)
-        self.assertLess(source.index('Assert-NoReparseTree $Root $true'), source.index('New-Item -ItemType Directory -Path $Root'))
-        self.assertLess(source.index('New-Item -ItemType Directory -Path $Root'), source.index('Assert-NoReparseTree $Root\n'))
+        self.assertLess(source.index('Assert-NoReparsePath $Root $true'), source.index('New-Item -ItemType Directory -Path $Root'))
+        self.assertLess(source.index('New-Item -ItemType Directory -Path $Root'), source.index('Assert-NoReparseDescendants $Root'))
         for forbidden in ("config.sh", "github.com", "Invoke-WebRequest", "incus", "garm", "boundary-verify"):
             self.assertNotIn(forbidden, source.lower())
 
@@ -179,8 +179,23 @@ class HostHealthScriptTests(unittest.TestCase):
         self.assertNotIn("config.sh", payload)
         for token in ("Cleanup failures:", "task absence postcondition failed", "health reader remains after exact uninstall", "one-shot task reappeared before completion evidence"):
             self.assertIn(token, source)
-        for token in ('health bootstrap staging root is not canonical', 'Assert-NoReparseTree "C:\\ProgramData"', 'Assert-NoReparseTree $Root $true', 'Assert-NoReparseTree $Root\n    Remove-Item -LiteralPath $Root'):
+        for token in ('health bootstrap staging root is not canonical', 'Assert-NoReparsePath "C:\\ProgramData"', 'Assert-NoReparsePath $Root $true', 'Assert-NoReparseDescendants $Root\n    Remove-Item -LiteralPath $Root'):
             self.assertIn(token, source)
+
+    def test_prerequisite_reparse_fence_never_recurses_programdata_ancestors(self) -> None:
+        for path in (PREREQUISITE_INSTALLER, PREREQUISITE_UNINSTALLER):
+            with self.subTest(script=path.name):
+                source = path.read_text(encoding="utf-8")
+                path_fence = source[source.index("function Assert-NoReparsePath"):source.index("function Assert-NoReparseDescendants")]
+                descendant_fence = source[source.index("function Assert-NoReparseDescendants"):source.index("function ", source.index("function Assert-NoReparseDescendants") + 1)]
+                self.assertNotIn("Get-ChildItem", path_fence)
+                self.assertNotIn("-Recurse", descendant_fence)
+                self.assertIn("while ($cursor)", path_fence)
+                self.assertIn("if (Test-Path -LiteralPath $cursor)", path_fence)
+                self.assertIn('Assert-NoReparsePath "C:\\ProgramData"', source)
+                self.assertNotIn('Get-ChildItem -LiteralPath "C:\\ProgramData"', source)
+                create = source.index("New-Item -ItemType Directory -Path $Root")
+                self.assertGreater(source.index("Assert-NoReparseDescendants $Root", create), create)
 
     def test_supervisor_enables_reader_only_after_sftp_fence_and_uninstall_disables_it(self) -> None:
         install = INSTALLER.read_text(encoding="utf-8")
