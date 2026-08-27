@@ -4,15 +4,15 @@
   "artifacts": [
     {
       "path": "docs/spec/spec-self-hosted-github-automation.md",
-      "bytes": 48864,
+      "bytes": 48919,
       "lines": 470,
-      "sha256": "43bc833f8e1d80fa22c003d484aa56f81eb71fff0b4707e1c686c0fcaf07ab4b"
+      "sha256": "4b5fae1f8ed31b9abfb3ab28cfb4958cfdee41f43041646d36e85c9f760aff8a"
     },
     {
       "path": "docs/spec/prd-self-hosted-github-automation.md",
-      "bytes": 65326,
+      "bytes": 65680,
       "lines": 625,
-      "sha256": "14540ab8a4624bc299e44954fc620599150777a9e99c04fead92215b926299c8"
+      "sha256": "b4f965c05ad9fb24004589951f6cf64ccb9430cb3255653aa39f1096fc0f2244"
     },
     {
       "path": "docs/spec/review-self-hosted-github-automation.md",

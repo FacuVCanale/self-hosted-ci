@@ -35,12 +35,19 @@ reviews that adapter and provisions their
 own GitHub App, exact repository allowlist, runner group/JIT authority, signing
 keys, and isolated host.
 
+The control plane is deliberately limited to GitHub and the dedicated local
+host. Cloudflare runtime code, deployment configuration, credentials, bindings,
+dependencies, direct API calls, and deployment workflows are prohibited. The
+repository CI enforces this boundary through `scripts/check-local-only.py`;
+`make distribution-check` fails if any such capability is introduced.
+
 ## Desarrollo
 
 ```bash
 make setup
 make test
 make validate
+make distribution-check
 ```
 
 To generate local evidence (ignored by Git):

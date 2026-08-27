@@ -9,9 +9,6 @@ __pycache__/
 .env.*
 !.env.example
 node_modules/
-.wrangler/
-gate-service/.dev.vars
-gate-service/dist/
 
 # Operator-private configuration and credentials
 config/private/
