@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly expected_distro='Ubuntu-24.04-CI'
+readonly incus_version='@@INCUS_VERSION@@'
+readonly garm_version='0.2.1'
+readonly garm_sha256='11176acb8a725f914b9b947891b4837d374fb616195562cc0ad45a7be8b6c746'
+readonly garm_url='https://github.com/cloudbase/garm/releases/download/v0.2.1/garm-linux-amd64.tgz'
+readonly tx="$(mktemp -d /var/tmp/self-hosted-ci-jit-prereqs.XXXXXX)"
+
+cleanup() { rm -rf -- "${tx}"; }
+trap cleanup EXIT
+
+[[ "${EUID}" -eq 0 ]] || { printf 'payload requires WSL root\n' >&2; exit 1; }
+[[ "${WSL_DISTRO_NAME:-}" == "${expected_distro}" ]] || { printf 'unexpected WSL distro\n' >&2; exit 1; }
+. /etc/os-release
+[[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 24.04 ]] || { printf 'Ubuntu 24.04 is required\n' >&2; exit 1; }
+[[ -d /run/systemd/system ]] || { printf 'systemd is required\n' >&2; exit 1; }
+[[ "${incus_version}" =~ ^[0-9A-Za-z][0-9A-Za-z.+~:-]*$ ]] || { printf 'Incus version is not an exact apt version\n' >&2; exit 1; }
+
+# Any pre-existing manager is stopped first. This installer never supplies a
+# GARM config, GitHub credential, registration token, pool, or runner.
+systemctl disable --now garm.service self-hosted-ci-garm.service >/dev/null 2>&1 || true
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates curl "incus=${incus_version}"
+apt-mark hold incus >/dev/null
+[[ "$(dpkg-query -W -f='${Version}' incus)" == "${incus_version}" ]]
+[[ "$(apt-mark showhold incus)" == incus ]]
+
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output "${tx}/garm.tgz" "${garm_url}"
+printf '%s  %s\n' "${garm_sha256}" "${tx}/garm.tgz" | sha256sum --check --status
+[[ "$(tar -tzf "${tx}/garm.tgz")" == garm ]]
+tar -xzf "${tx}/garm.tgz" -C "${tx}" --no-same-owner --no-same-permissions
+[[ -f "${tx}/garm" && ! -L "${tx}/garm" ]]
+install -o root -g root -m 0755 "${tx}/garm" /usr/local/bin/garm
+[[ "$(/usr/local/bin/garm --version 2>&1)" == *"${garm_version}"* ]]
+
+if ! getent group incus-admin >/dev/null; then groupadd --system incus-admin; fi
+if ! id garm-manager >/dev/null 2>&1; then
+  useradd --system --create-home --home-dir /var/lib/garm --shell /usr/sbin/nologin garm-manager
+fi
+usermod --append --groups incus-admin garm-manager
+passwd --lock garm-manager >/dev/null
+for forbidden in sudo admin wheel; do
+  if getent group "${forbidden}" >/dev/null && id -nG garm-manager | tr ' ' '\n' | grep -Fxq "${forbidden}"; then
+    printf 'garm-manager is unexpectedly privileged through %s\n' "${forbidden}" >&2
+    exit 1
+  fi
+done
+
+systemctl disable --now garm.service self-hosted-ci-garm.service >/dev/null 2>&1 || true
+! systemctl is-enabled garm.service >/dev/null 2>&1
+! systemctl is-enabled self-hosted-ci-garm.service >/dev/null 2>&1
+! pgrep -x garm >/dev/null 2>&1
+if systemctl list-unit-files --no-legend --type=service --type=socket --type=timer 2>/dev/null \
+  | awk 'tolower($1) ~ /garm/ && $2 ~ /^enabled/ { print }' | grep -q .; then
+  printf 'an enabled GARM-related unit remains\n' >&2
+  exit 1
+fi
+[[ ! -e /var/lib/garm/.runner && ! -e /var/lib/garm/.credentials ]]
+
+printf '{"status":"installed","distro":"%s","incus_version":"%s","incus_held":true,"garm_version":"%s","garm_sha256":"%s","garm_manager_non_admin":true,"garm_enabled":false,"runner_registration_performed":false}\n' \
+  "${expected_distro}" "${incus_version}" "${garm_version}" "${garm_sha256}"
