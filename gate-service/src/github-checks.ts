@@ -4,6 +4,7 @@ import type { OidcActor, PreparedCheck } from "./contracts";
 
 const GITHUB_API = "https://api.github.com";
 const GITHUB_API_VERSION = "2026-03-10";
+const GITHUB_USER_AGENT = "self-hosted-ci-gate-service";
 const RESPONSE_LIMIT = 128 * 1024;
 const TOKEN_MAX_TTL_MS = 62 * 60 * 1_000;
 const TOKEN_MIN_TTL_MS = 30 * 1_000;
@@ -794,6 +795,7 @@ function tokenHeaders(token: string): HeadersInit {
     accept: "application/vnd.github+json",
     authorization: `Bearer ${token}`,
     "content-type": "application/json",
+    "user-agent": GITHUB_USER_AGENT,
     "x-github-api-version": GITHUB_API_VERSION,
   };
 }
@@ -802,7 +804,7 @@ function publicHeaders(): HeadersInit {
   return {
     accept: "application/vnd.github+json",
     "content-type": "application/json",
-    "user-agent": "self-hosted-ci-gate-service",
+    "user-agent": GITHUB_USER_AGENT,
     "x-github-api-version": GITHUB_API_VERSION,
   };
 }

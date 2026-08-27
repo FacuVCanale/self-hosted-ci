@@ -38,7 +38,9 @@ namespace. This release never dispatches or accepts local execution.
   App held by this Worker/DO boundary. The non-secret authority pins the App ID,
   selected installation ID, exact repository name and immutable ID, and the
   lowercase SHA-256 fingerprint of the App key's DER SubjectPublicKeyInfo.
-- `GITHUB_APP_PRIVATE_KEY_PEM` is a Cloudflare secret. It is imported only in
+- `GITHUB_APP_PRIVATE_KEY_PEM` is a Cloudflare secret and **must be unencrypted
+  PKCS#8 PEM** (`-----BEGIN PRIVATE KEY-----`), not PKCS#1
+  (`-----BEGIN RSA PRIVATE KEY-----`). It is imported only in
   memory for RS256 App JWT signing and is fingerprint-checked before any GitHub
   request. Installation tokens are minted for exactly one repository with
   exactly `checks:write` and `metadata:read`, validated against App,
@@ -185,6 +187,22 @@ OIDC and GitHub App authority values in `wrangler.jsonc` are non-secret
 configuration. Before activation, set every exact OIDC and GitHub App authority value and add
 the key interactively with `wrangler secret put GITHUB_APP_PRIVATE_KEY_PEM` for
 the target environment. Never commit the PEM or place it in `vars`.
+
+Preflight a downloaded GitHub App key before uploading it. Convert PKCS#1 to
+unencrypted PKCS#8 when necessary, verify the exact envelope, and compare the
+derived public-key fingerprint with `GITHUB_APP_KEY_FINGERPRINT`:
+
+```sh
+openssl pkcs8 -topk8 -nocrypt -in github-app-private-key.pem -out github-app-private-key.pkcs8.pem
+test "$(sed -n '1p' github-app-private-key.pkcs8.pem)" = "-----BEGIN PRIVATE KEY-----"
+test "$(tail -n 1 github-app-private-key.pkcs8.pem)" = "-----END PRIVATE KEY-----"
+openssl pkey -in github-app-private-key.pkcs8.pem -pubout -outform DER | openssl dgst -sha256
+wrangler secret put GITHUB_APP_PRIVATE_KEY_PEM < github-app-private-key.pkcs8.pem
+```
+
+The Worker repeats PKCS#8 parsing and DER SubjectPublicKeyInfo fingerprint
+validation before its first GitHub request. PKCS#1, encrypted or mismatched
+keys fail closed.
 
 The default, staging and production configurations remain explicitly `inert`.
 Inert HTTP mutations fail before authentication or DO invocation, and an inert

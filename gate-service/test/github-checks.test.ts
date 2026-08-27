@@ -1,5 +1,6 @@
 import { exportJWK, exportPKCS8, generateKeyPair } from "jose";
-import { beforeAll, describe, it, vi } from "vitest";
+import { createPrivateKey } from "node:crypto";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   deliverGitHubCheck,
   derivePreparationMarker,
@@ -137,6 +138,12 @@ function sequence(responses: Array<Response | Error>): { fetch: typeof fetch; ca
   return { fetch: mock as typeof fetch, calls };
 }
 
+function expectExactUserAgent(calls: Request[]): void {
+  for (const call of calls) {
+    expect(call.headers.get("user-agent")).toBe("self-hosted-ci-gate-service");
+  }
+}
+
 function preparedCheck(marker: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: 501,
@@ -176,6 +183,7 @@ describe("local-ort canonical Check preparation", () => {
       "/repos/example-owner/example-repository/pulls/7",
       "/repos/example-owner/example-repository/git/ref/heads/main",
     ]);
+    expectExactUserAgent(mock.calls);
   });
 
   it("retries the whole snapshot when the base ref moves between reads", async ({ expect }) => {
@@ -232,6 +240,23 @@ describe("local-ort canonical Check preparation", () => {
     const post = mock.calls.at(-1)!;
     await expect(post.json()).resolves.toMatchObject({ head_sha: preparation.headSha });
     expect(post.url.endsWith("/check-runs")).toBe(true);
+    expectExactUserAgent(mock.calls);
+  });
+
+  it("requires PKCS#8 private-key PEM and rejects PKCS#1 before any request", async ({ expect }) => {
+    const pkcs1 = createPrivateKey(authority.GITHUB_APP_PRIVATE_KEY_PEM)
+      .export({ format: "pem", type: "pkcs1" })
+      .toString();
+    expect(pkcs1).toContain("BEGIN RSA PRIVATE KEY");
+    expect(authority.GITHUB_APP_PRIVATE_KEY_PEM).toContain("BEGIN PRIVATE KEY");
+    const mock = sequence([]);
+    await expect(prepareGitHubCheck(
+      { ...authority, GITHUB_APP_PRIVATE_KEY_PEM: pkcs1 },
+      preparation,
+      mock.fetch,
+      now,
+    )).resolves.toEqual({ state: "blocked", error: "GitHub App private key is malformed" });
+    expect(mock.calls).toHaveLength(0);
   });
 
   it("derives one stable marker per exact tuple owner and changes it on run attempt", async ({ expect }) => {
