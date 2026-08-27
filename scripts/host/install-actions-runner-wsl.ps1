@@ -8,7 +8,7 @@ param(
     [ValidatePattern('^[0-9A-Fa-f]{64}$')]
     [string]$Sha256,
 
-    [string]$DistroName = "Ubuntu-24.04",
+    [string]$DistroName = "Ubuntu-24.04-CI",
     [string]$InstallerScript
 )
 
@@ -18,8 +18,8 @@ Set-StrictMode -Version Latest
 if ([string]::IsNullOrWhiteSpace($InstallerScript)) {
     $InstallerScript = Join-Path $PSScriptRoot "install-actions-runner.sh"
 }
-if ($DistroName -ne "Ubuntu-24.04") {
-    throw "DistroName must be Ubuntu-24.04."
+if ($DistroName -ne "Ubuntu-24.04-CI") {
+    throw "DistroName must be Ubuntu-24.04-CI."
 }
 if (-not (Test-Path -LiteralPath $InstallerScript -PathType Leaf)) {
     throw "Installer script not found: $InstallerScript"

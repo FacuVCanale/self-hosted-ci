@@ -58,7 +58,7 @@ class ActionsRunnerInstallScriptTests(unittest.TestCase):
     def test_powershell_wrapper_requires_pins_and_runs_only_as_wsl_root(self) -> None:
         source = POWERSHELL.read_text(encoding="utf-8")
         self.assertEqual(2, source.count("[Parameter(Mandatory = $true)]"))
-        self.assertIn('[string]$DistroName = "Ubuntu-24.04"', source)
+        self.assertIn('[string]$DistroName = "Ubuntu-24.04-CI"', source)
         self.assertIn('Join-Path $PSScriptRoot "install-actions-runner.sh"', source)
         self.assertIn("[Convert]::ToBase64String", source)
         self.assertIn("--version '$Version' --sha256 '$normalizedSha256'", source)

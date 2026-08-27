@@ -5,7 +5,7 @@ readonly RUNNER_USER="ci-runner"
 readonly INSTALL_DIR="/opt/self-hosted-ci/actions-runner"
 readonly METADATA_FILE="${INSTALL_DIR}/.self-hosted-ci-install"
 readonly RELEASE_BASE_URL="https://github.com/actions/runner/releases/download"
-readonly EXPECTED_DISTRO="Ubuntu-24.04"
+readonly EXPECTED_DISTRO="Ubuntu-24.04-CI"
 
 die() {
   printf 'actions-runner verification error: %s\n' "$*" >&2
