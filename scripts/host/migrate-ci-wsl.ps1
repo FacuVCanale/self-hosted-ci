@@ -3,9 +3,9 @@ param(
     [string]$ServiceAccount = "selfhosted-ci-svc",
     [string]$SourceDistroName = "Ubuntu-24.04",
     [string]$ImportedDistroName = "Ubuntu-24.04-CI",
-    [string]$ExportPath = "C:\ProgramData\self-hosted-ci\exports\Ubuntu-24.04-20260827.tar",
+    [Parameter(Mandatory = $true)][string]$ExportPath,
     [string]$DestinationPath = "C:\ProgramData\self-hosted-ci\wsl",
-    [string]$ExpectedExportSha256 = "ad9e329eadc4211182c32d71a2830b6a492efedb2dc94735f3dd5287925ca0e9",
+    [Parameter(Mandatory = $true)][string]$ExpectedExportSha256,
     [long]$ExpectedExportBytes = 0,
     [string]$ExpectedServiceAccountSid,
     [int]$TimeoutSeconds = 900,
@@ -21,7 +21,6 @@ Set-StrictMode -Version Latest
 
 $ExpectedSourceDistro = "Ubuntu-24.04"
 $ExpectedImportedDistro = "Ubuntu-24.04-CI"
-$ExpectedExport = "C:\ProgramData\self-hosted-ci\exports\Ubuntu-24.04-20260827.tar"
 $ExpectedDestination = "C:\ProgramData\self-hosted-ci\wsl"
 $TaskName = "SelfHostedCI-Import-Ubuntu-24.04-CI"
 $TaskRoot = "C:\ProgramData\self-hosted-ci\migration"
@@ -507,8 +506,8 @@ if ($SourceDistroName -ne $ExpectedSourceDistro) {
 if ($ImportedDistroName -ne $ExpectedImportedDistro) {
     throw "ImportedDistroName must be $ExpectedImportedDistro."
 }
-if ((Get-NormalizedPath $ExportPath) -ne (Get-NormalizedPath $ExpectedExport)) {
-    throw "ExportPath must be the pinned export: $ExpectedExport"
+if (-not (Get-NormalizedPath $ExportPath).StartsWith((Get-NormalizedPath "C:\ProgramData\self-hosted-ci\exports") + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "ExportPath must be an explicit file below C:\ProgramData\self-hosted-ci\exports"
 }
 if ((Get-NormalizedPath $DestinationPath) -ne (Get-NormalizedPath $ExpectedDestination)) {
     throw "DestinationPath must be the pinned dedicated location: $ExpectedDestination"

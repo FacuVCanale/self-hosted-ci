@@ -1,0 +1,495 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly expected_distro='Ubuntu-24.04-CI'
+readonly project='ci-jit'
+readonly pool='ci-jit-dedicated'
+readonly bridge='ci-jit-isolated'
+readonly profile='ci-jit'
+readonly storage_root='/var/lib/self-hosted-ci/incus-storage'
+readonly storage_image="${storage_root}/ci-jit.ext4"
+readonly storage_staging="${storage_root}/ci-jit.ext4.creating"
+readonly storage_mount="${storage_root}/ci-jit"
+readonly storage_pool_path="${storage_mount}/pool"
+readonly storage_bytes='17179869184'
+readonly canary_privileged='ci-jit-canary-privileged'
+readonly canary_nesting='ci-jit-canary-nesting'
+readonly canary_proxy='ci-jit-canary-proxy'
+readonly canary_idmap='ci-jit-canary-idmap'
+readonly canary_quota='ci-jit-canary-quota'
+readonly -a canary_names=("${canary_privileged}" "${canary_nesting}" "${canary_proxy}" "${canary_idmap}")
+
+[[ "${EUID}" -eq 0 ]] || { printf 'payload requires WSL root\n' >&2; exit 1; }
+[[ "${WSL_DISTRO_NAME:-}" == "${expected_distro}" ]] || { printf 'unexpected WSL distro\n' >&2; exit 1; }
+. /etc/os-release
+[[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 24.04 ]] || { printf 'Ubuntu 24.04 is required\n' >&2; exit 1; }
+[[ -d /run/systemd/system ]] || { printf 'systemd is required\n' >&2; exit 1; }
+command -v incus >/dev/null
+command -v mkfs.ext4 >/dev/null || { printf 'e2fsprogs is required for the bounded Incus pool\n' >&2; exit 1; }
+command -v tune2fs >/dev/null
+command -v findmnt >/dev/null
+command -v losetup >/dev/null
+command -v mountpoint >/dev/null
+command -v truncate >/dev/null
+command -v systemd-escape >/dev/null
+command -v blockdev >/dev/null
+command -v blkid >/dev/null
+grep -qw ext4 /proc/filesystems || { printf 'the WSL kernel does not expose ext4 support\n' >&2; exit 1; }
+grep -Eq '(^|[[:space:]])loop([[:space:]]|$)' /proc/devices || { printf 'the WSL kernel does not expose loop devices\n' >&2; exit 1; }
+losetup -f >/dev/null || { printf 'no free loop device is available\n' >&2; exit 1; }
+
+install -d -o root -g root -m 0700 "${storage_root}"
+if [[ -e "${storage_image}" ]]; then
+  [[ ! -e "${storage_staging}" ]] || { printf 'completed storage image coexists with staging state\n' >&2; exit 1; }
+  [[ -f "${storage_image}" && ! -L "${storage_image}" ]] || { printf 'storage image is not an exact regular file\n' >&2; exit 1; }
+  [[ "$(stat -c %u:%g:%a:%s:%h -- "${storage_image}")" == "0:0:600:${storage_bytes}:1" ]] || { printf 'storage image ownership, mode, size, or link-count drift\n' >&2; exit 1; }
+else
+  if [[ -e "${storage_staging}" ]]; then
+    [[ -f "${storage_staging}" && ! -L "${storage_staging}" ]] || { printf 'storage staging path is not an exact regular file\n' >&2; exit 1; }
+    [[ "$(stat -c %u:%g:%a:%s:%h -- "${storage_staging}")" == "0:0:600:${storage_bytes}:1" ]] || { printf 'storage staging ownership, mode, size, or link-count drift\n' >&2; exit 1; }
+    [[ -z "$(losetup -j "${storage_staging}")" ]] || { printf 'storage staging file is unexpectedly loop-attached\n' >&2; exit 1; }
+  else
+    install -o root -g root -m 0600 /dev/null "${storage_staging}"
+    truncate -s "${storage_bytes}" "${storage_staging}"
+  fi
+  # Reformatting is safe only on the installer-owned .creating path. A killed
+  # mkfs is therefore recoverable without ever accepting an ambiguous final file.
+  mkfs.ext4 -q -F -O project,quota -E lazy_itable_init=0,lazy_journal_init=0 -L ci-jit "${storage_staging}"
+  mv -T -- "${storage_staging}" "${storage_image}"
+fi
+[[ "$(stat -c %u:%g:%a:%s:%h -- "${storage_image}")" == "0:0:600:${storage_bytes}:1" ]] || { printf 'storage image postcondition drift\n' >&2; exit 1; }
+
+tune2fs -l "${storage_image}" | grep -E '^Filesystem features:' | grep -qw project || { printf 'ext4 project feature is absent\n' >&2; exit 1; }
+tune2fs -l "${storage_image}" | grep -E '^Filesystem features:' | grep -qw quota || { printf 'ext4 quota feature is absent\n' >&2; exit 1; }
+tune2fs -l "${storage_image}" | grep -Eq '^Filesystem volume name:[[:space:]]+ci-jit$' || { printf 'ext4 volume label drift\n' >&2; exit 1; }
+storage_filesystem_uuid="$(blkid -s UUID -o value -- "${storage_image}")"
+[[ "${storage_filesystem_uuid}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || { printf 'ext4 filesystem UUID is invalid\n' >&2; exit 1; }
+install -d -o root -g root -m 0700 "${storage_mount}"
+[[ -f /etc/fstab && ! -L /etc/fstab ]] || { printf '/etc/fstab is not an exact regular file\n' >&2; exit 1; }
+
+if awk -v image="${storage_image}" -v mountpoint="${storage_mount}" '$1 == image || $2 == mountpoint { found=1 } END { exit !found }' /etc/fstab; then
+  printf 'legacy fstab storage mount configuration is present\n' >&2
+  exit 1
+fi
+
+mount_unit="$(systemd-escape --path --suffix=mount "${storage_mount}")"
+readonly mount_unit
+readonly mount_unit_path="/etc/systemd/system/${mount_unit}"
+readonly incus_dropin_dir='/etc/systemd/system/incus.service.d'
+readonly incus_dropin_path="${incus_dropin_dir}/ci-jit-storage.conf"
+mount_unit_content="[Unit]
+Description=Self-hosted CI bounded ext4 storage
+Before=incus.service
+
+[Mount]
+What=${storage_image}
+Where=${storage_mount}
+Type=ext4
+Options=loop,prjquota,nodev
+
+[Install]
+WantedBy=multi-user.target"
+incus_dropin_content="[Unit]
+Requires=${mount_unit}
+After=${mount_unit}
+RequiresMountsFor=${storage_mount}"
+
+install_exact_systemd_file() {
+  local path="$1"
+  local content="$2"
+  local staging="${path}.creating"
+  if [[ -e "${path}" ]]; then
+    [[ ! -e "${staging}" ]] || { printf 'completed systemd file coexists with staging state: %s\n' "${path}" >&2; return 1; }
+    [[ -f "${path}" && ! -L "${path}" ]] || { printf 'managed systemd path is not an exact regular file: %s\n' "${path}" >&2; return 1; }
+    [[ "$(stat -c %u:%g:%a -- "${path}")" == '0:0:644' ]] || { printf 'managed systemd file ownership or mode drift: %s\n' "${path}" >&2; return 1; }
+    [[ "$(cat -- "${path}")" == "${content}" ]] || { printf 'managed systemd file content drift: %s\n' "${path}" >&2; return 1; }
+  else
+    if [[ -e "${staging}" ]]; then
+      [[ -f "${staging}" && ! -L "${staging}" ]] || { printf 'managed systemd staging path is not an exact regular file: %s\n' "${staging}" >&2; return 1; }
+    else
+      install -o root -g root -m 0644 /dev/null "${staging}"
+    fi
+    printf '%s\n' "${content}" > "${staging}"
+    chown root:root "${staging}"
+    chmod 0644 "${staging}"
+    mv -T -- "${staging}" "${path}"
+  fi
+}
+
+install -d -o root -g root -m 0755 "${incus_dropin_dir}"
+install_exact_systemd_file "${mount_unit_path}" "${mount_unit_content}"
+install_exact_systemd_file "${incus_dropin_path}" "${incus_dropin_content}"
+systemctl stop incus.socket incus.service
+systemctl daemon-reload
+systemctl enable --now "${mount_unit}"
+[[ "$(systemctl is-enabled "${mount_unit}")" == 'enabled' ]]
+[[ "$(systemctl is-active "${mount_unit}")" == 'active' ]]
+
+verify_storage_mount() {
+  mount_source="$(findmnt -n -o SOURCE --target "${storage_mount}")"
+  [[ "$(findmnt -n -o FSTYPE --target "${storage_mount}")" == 'ext4' && "$(findmnt -n -o TARGET --target "${storage_mount}")" == "${storage_mount}" ]] || { printf 'storage filesystem or target drift\n' >&2; return 1; }
+  [[ "${mount_source}" == /dev/loop* && -b "${mount_source}" ]] || { printf 'storage mount is not loop-backed\n' >&2; return 1; }
+  [[ "$(losetup -n -O BACK-FILE -- "${mount_source}")" == "${storage_image}" ]] || { printf 'storage loop backing file drift\n' >&2; return 1; }
+  [[ "$(blkid -s UUID -o value -- "${mount_source}")" == "${storage_filesystem_uuid}" ]] || { printf 'mounted ext4 UUID drift\n' >&2; return 1; }
+  mapfile -t image_loops < <(losetup -j "${storage_image}" | cut -d: -f1)
+  (( ${#image_loops[@]} == 1 )) && [[ "${image_loops[0]}" == "${mount_source}" ]] || { printf 'storage image has an ambiguous loop mapping\n' >&2; return 1; }
+  mount_options=",$(findmnt -n -o OPTIONS --target "${storage_mount}"),"
+  [[ "${mount_options}" == *,rw,* && "${mount_options}" == *,prjquota,* && "${mount_options}" == *,nodev,* && "${mount_options}" != *,nosuid,* ]] || { printf 'storage mount options drift\n' >&2; return 1; }
+  chown root:root "${storage_mount}"
+  chmod 0700 "${storage_mount}"
+  [[ "$(stat -c %u:%g:%a -- "${storage_mount}")" == '0:0:700' ]] || { printf 'storage mount ownership or mode drift\n' >&2; return 1; }
+}
+
+verify_storage_mount
+systemctl stop incus.socket incus.service
+systemctl stop "${mount_unit}"
+if systemctl is-active --quiet "${mount_unit}" || mountpoint -q "${storage_mount}"; then
+  printf 'storage mount did not stop for the ordering canary\n' >&2
+  exit 1
+fi
+systemctl start incus.service
+systemctl is-active incus.service >/dev/null
+[[ "$(systemctl is-active "${mount_unit}")" == 'active' ]]
+verify_storage_mount
+systemctl show incus.service --property=DropInPaths --value | tr ' ' '\n' | grep -Fxq -- "${incus_dropin_path}" || { printf 'Incus storage drop-in is not loaded\n' >&2; exit 1; }
+install -d -o root -g root -m 0700 "${storage_pool_path}"
+
+# Initialization is deliberately a one-time database transition. Existing
+# Incus state is never reinitialized or replaced by this installer.
+if [[ ! -e /var/lib/incus/database/global/db.bin ]]; then
+  incus admin init --preseed <<'EOF'
+config: {}
+networks: []
+storage_pools: []
+profiles: []
+projects: []
+cluster: null
+EOF
+fi
+[[ -f /var/lib/incus/database/global/db.bin && ! -L /var/lib/incus/database/global/db.bin ]]
+
+json_names() {
+  python3 -c 'import json,sys; [print(item["name"]) for item in json.load(sys.stdin)]'
+}
+json_has_name() {
+  local expected_name="$1"
+  EXPECTED_NAME="${expected_name}" python3 -c 'import json,os,sys; raise SystemExit(0 if any(item.get("name") == os.environ["EXPECTED_NAME"] for item in json.load(sys.stdin)) else 1)'
+}
+
+# Deterministic names make a killed canary recoverable on the next run. Only
+# installer-reserved exact names in the dedicated project/pool are removed.
+cleanup_owned_canaries() {
+  local name
+  if incus project list --format json | json_has_name "${project}"; then
+    for name in "${canary_names[@]}"; do
+      if incus info "${name}" --project "${project}" >/dev/null 2>&1; then
+        incus delete "${name}" --project "${project}" --force
+      fi
+    done
+    if incus storage list --format json | json_has_name "${pool}" && \
+       incus storage volume show "${pool}" "${canary_quota}" --project "${project}" >/dev/null 2>&1; then
+      incus storage volume delete "${pool}" "${canary_quota}" --project "${project}"
+    fi
+  fi
+}
+cleanup_owned_canaries
+
+storage_pool_csv="$(incus storage list --format json | json_names)"
+pool_exists=false
+if [[ -n "${storage_pool_csv}" ]]; then
+  mapfile -t storage_pools <<<"${storage_pool_csv}"
+  for existing_pool in "${storage_pools[@]}"; do
+    [[ "${existing_pool}" == "${pool}" ]] || { printf 'unexpected Incus storage pool: %s\n' "${existing_pool}" >&2; exit 1; }
+    pool_exists=true
+  done
+fi
+
+# This bootstrap owns an empty Incus daemon. Refuse to mutate its storage,
+# project, network, or profile model if any workload or volume already exists.
+[[ -z "$(incus list --all-projects --format csv)" ]] || { printf 'preflight found an existing Incus instance\n' >&2; exit 1; }
+if [[ -n "${storage_pool_csv}" ]]; then
+  for existing_pool in "${storage_pools[@]}"; do
+    [[ -z "$(incus storage volume list "${existing_pool}" --all-projects --format csv)" ]] || { printf 'preflight found an existing Incus storage volume\n' >&2; exit 1; }
+  done
+fi
+
+if [[ "${pool_exists}" == false ]]; then
+  # The dedicated ext4 filesystem has a fixed 16 GiB sparse backing file.
+  # Incus uses ext4 project quotas through the dir driver for per-volume caps.
+  [[ -z "$(find "${storage_pool_path}" -mindepth 1 -maxdepth 1 -print -quit)" ]] || { printf 'Incus pool source is not empty before creation\n' >&2; exit 1; }
+  incus storage create "${pool}" dir source="${storage_pool_path}"
+fi
+[[ "$(incus storage list --format json | json_names)" == "${pool}" ]]
+storage_json="$(incus query "/1.0/storage-pools/${pool}")"
+pool_source="$(STORAGE_JSON="${storage_json}" python3 -c 'import json,os; print(json.loads(os.environ["STORAGE_JSON"]).get("config", {}).get("source", ""))')"
+[[ "${pool_source}" == "${storage_pool_path}" ]]
+[[ -z "$(incus storage volume list "${pool}" --all-projects --format csv)" ]] || { printf 'new Incus pool is not volume-empty\n' >&2; exit 1; }
+
+if ! incus network list --format json | json_has_name "${bridge}"; then
+  incus network create "${bridge}" ipv4.address=10.254.0.1/28 ipv4.dhcp=true ipv4.dhcp.ranges=10.254.0.2-10.254.0.2 ipv4.dhcp.gateway=none ipv4.nat=false ipv4.firewall=false ipv6.address=none ipv6.nat=false ipv6.firewall=false dns.mode=none
+fi
+incus network set "${bridge}" ipv4.address=10.254.0.1/28 ipv4.dhcp=true ipv4.dhcp.ranges=10.254.0.2-10.254.0.2 ipv4.dhcp.gateway=none ipv4.nat=false ipv4.firewall=false ipv6.address=none ipv6.nat=false ipv6.firewall=false dns.mode=none
+[[ "$(incus network list --format json | json_names | sort)" == "${bridge}" ]] || { printf 'unexpected Incus network inventory\n' >&2; exit 1; }
+
+if ! incus project list --format json | json_has_name "${project}"; then
+  incus project create "${project}"
+fi
+[[ "$(incus project list --format json | json_names | sort)" == $'ci-jit\ndefault' ]] || { printf 'unexpected Incus project inventory\n' >&2; exit 1; }
+incus project set "${project}" \
+  features.images=false features.profiles=true features.storage.volumes=true \
+  restricted=true restricted.containers.privilege=isolated \
+  restricted.containers.nesting=block restricted.containers.lowlevel=block \
+  restricted.devices.disk=managed restricted.devices.nic=managed \
+  restricted.networks.access="${bridge}" \
+  limits.instances=1 limits.containers=1 limits.virtual-machines=0 \
+  limits.cpu=2 limits.memory=4GiB limits.processes=2048 limits.disk=12GiB
+
+verify_default_profile_neutral() {
+  local target_project="$1"
+  incus query "/1.0/profiles/default?project=${target_project}" | python3 -c '
+import json, sys
+profile = json.load(sys.stdin)
+if profile.get("config", {}) != {} or profile.get("devices", {}) != {}:
+    raise SystemExit("preexisting default profile is not neutral")
+'
+}
+verify_default_profile_neutral default
+verify_default_profile_neutral "${project}"
+
+if ! incus profile list --project "${project}" --format json | json_has_name "${profile}"; then
+  incus profile create "${profile}" --project "${project}"
+fi
+[[ "$(incus profile list --project "${project}" --format json | json_names | sort)" == $'ci-jit\ndefault' ]]
+existing_devices="$(incus query "/1.0/profiles/${profile}?project=${project}")"
+EXISTING_DEVICES="${existing_devices}" python3 - <<'PY'
+import json, os
+names = set(json.loads(os.environ["EXISTING_DEVICES"]).get("devices", {}))
+if not names.issubset({"root", "eth0"}):
+    raise SystemExit("ci-jit profile has unexpected preexisting devices")
+PY
+if ! incus profile device get "${profile}" root type --project "${project}" >/dev/null 2>&1; then
+  incus profile device add "${profile}" root disk path=/ pool="${pool}" size=12GiB --project "${project}"
+fi
+if ! incus profile device get "${profile}" eth0 type --project "${project}" >/dev/null 2>&1; then
+  incus profile device add "${profile}" eth0 nic network="${bridge}" name=eth0 security.mac_filtering=true security.ipv4_filtering=true security.ipv6_filtering=true --project "${project}"
+fi
+printf '%s\n' '{
+  "config": {
+    "security.privileged": "false",
+    "security.nesting": "false",
+    "security.idmap.isolated": "true",
+    "limits.cpu": "2",
+    "limits.memory": "4GiB",
+    "limits.processes": "2048"
+  },
+  "description": "",
+  "devices": {
+    "root": {"type":"disk","path":"/","pool":"ci-jit-dedicated","size":"12GiB"},
+    "eth0": {"type":"nic","network":"ci-jit-isolated","name":"eth0","security.mac_filtering":"true","security.ipv4_filtering":"true","security.ipv6_filtering":"true"}
+  }
+}' | incus profile edit "${profile}" --project "${project}"
+
+network_json="$(incus query "/1.0/networks/${bridge}")"
+profile_json="$(incus query "/1.0/profiles/${profile}?project=${project}")"
+project_json="$(incus query "/1.0/projects/${project}")"
+storage_json="$(incus query "/1.0/storage-pools/${pool}")"
+
+NETWORK_JSON="${network_json}" PROFILE_JSON="${profile_json}" PROJECT_JSON="${project_json}" STORAGE_JSON="${storage_json}" \
+python3 - <<'PY'
+import json
+import os
+
+network = json.loads(os.environ["NETWORK_JSON"])
+profile = json.loads(os.environ["PROFILE_JSON"])
+project = json.loads(os.environ["PROJECT_JSON"])
+storage = json.loads(os.environ["STORAGE_JSON"])
+
+if network.get("type") != "bridge":
+    raise SystemExit("ci-jit-isolated is not a bridge")
+network_config = network.get("config", {})
+required_network = {
+    "ipv4.address": "10.254.0.1/28", "ipv4.dhcp": "true",
+    "ipv4.dhcp.ranges": "10.254.0.2-10.254.0.2",
+    "ipv4.dhcp.gateway": "none", "ipv4.nat": "false",
+    "ipv4.firewall": "false", "ipv6.address": "none",
+    "ipv6.nat": "false", "ipv6.firewall": "false", "dns.mode": "none",
+}
+if any(network_config.get(key) != value for key, value in required_network.items()):
+    raise SystemExit("isolated bridge addressing or NAT drift")
+if network_config.get("bridge.external_interfaces") not in (None, ""):
+    raise SystemExit("isolated bridge has an external interface")
+
+if storage.get("driver") != "dir":
+    raise SystemExit("dedicated storage pool does not use the dir driver")
+if storage.get("config", {}).get("source") != "/var/lib/self-hosted-ci/incus-storage/ci-jit/pool":
+    raise SystemExit("dedicated storage pool source drift")
+project_config = project.get("config", {})
+required_project = {
+    "features.images": "false", "features.profiles": "true",
+    "features.storage.volumes": "true", "restricted": "true",
+    "restricted.containers.privilege": "isolated",
+    "restricted.containers.nesting": "block",
+    "restricted.containers.lowlevel": "block",
+    "restricted.devices.disk": "managed",
+    "restricted.devices.nic": "managed",
+    "restricted.networks.access": "ci-jit-isolated",
+    "limits.instances": "1", "limits.containers": "1",
+    "limits.virtual-machines": "0", "limits.cpu": "2",
+    "limits.memory": "4GiB", "limits.processes": "2048",
+    "limits.disk": "12GiB",
+}
+if any(project_config.get(key) != value for key, value in required_project.items()):
+    raise SystemExit("ci-jit project restriction or resource limit drift")
+for obsolete in ("limits.disk.pool.ci-jit-dedicated",):
+    if obsolete in project_config:
+        raise SystemExit(f"obsolete Incus project key remains: {obsolete}")
+
+config = profile.get("config", {})
+required_profile = {
+    "security.privileged": "false", "security.idmap.isolated": "true",
+    "security.nesting": "false", "limits.cpu": "2",
+    "limits.memory": "4GiB", "limits.processes": "2048",
+}
+if config != required_profile:
+    raise SystemExit("ci-jit profile security or resource limits drift")
+devices = profile.get("devices", {})
+if set(devices) != {"root", "eth0"}:
+    raise SystemExit("ci-jit profile has unexpected devices")
+root = devices["root"]
+if root != {"type": "disk", "path": "/", "pool": "ci-jit-dedicated", "size": "12GiB"}:
+    raise SystemExit("root is not the sole exact disk device")
+eth0 = devices["eth0"]
+if eth0 != {"type": "nic", "network": "ci-jit-isolated", "name": "eth0", "security.mac_filtering": "true", "security.ipv4_filtering": "true", "security.ipv6_filtering": "true"}:
+    raise SystemExit("eth0 is not bound only to the isolated bridge")
+for device in devices.values():
+    if device.get("type") in {"proxy", "unix-char", "unix-block"}:
+        raise SystemExit("forbidden host-facing device type")
+PY
+
+for required_flag in --empty --no-profiles --device; do
+  incus init --help | grep -Fq -- "${required_flag}" || { printf 'Incus init lacks required flag: %s\n' "${required_flag}" >&2; exit 1; }
+done
+
+cleanup_canaries() {
+  local name
+  local cleanup_failed=0
+  for name in "${canary_names[@]}"; do
+    if incus info "${name}" --project "${project}" >/dev/null 2>&1; then
+      incus delete "${name}" --project "${project}" --force >/dev/null 2>&1 || cleanup_failed=1
+    fi
+  done
+  if incus storage volume show "${pool}" "${canary_quota}" --project "${project}" >/dev/null 2>&1; then
+    incus storage volume delete "${pool}" "${canary_quota}" --project "${project}" >/dev/null 2>&1 || cleanup_failed=1
+  fi
+  [[ -z "$(incus list --all-projects --format csv)" ]] || cleanup_failed=1
+  [[ -z "$(incus storage volume list "${pool}" --all-projects --format csv)" ]] || cleanup_failed=1
+  return "${cleanup_failed}"
+}
+trap cleanup_canaries EXIT
+
+[[ -z "$(incus list --all-projects --format csv)" ]]
+[[ -z "$(incus storage volume list "${pool}" --all-projects --format csv)" ]]
+
+# Exercise quota enforcement through a real Incus-managed custom volume.
+# Incus 6.0 reports usage.total=0 for dir-backed custom volumes even when the
+# kernel quota is active, so that API field is not used as an oracle.
+incus storage volume create "${pool}" "${canary_quota}" size=8MiB --project "${project}"
+[[ "$(incus storage volume get "${pool}" "${canary_quota}" size --project "${project}")" == '8MiB' ]] || { printf 'custom-volume configured size drift\n' >&2; exit 1; }
+quota_volume_path="/var/lib/incus/storage-pools/${pool}/custom/${project}_${canary_quota}"
+quota_volume_source_path="${storage_pool_path}/custom/${project}_${canary_quota}"
+[[ -d "${quota_volume_path}" && ! -L "${quota_volume_path}" ]] || { printf 'quota canary volume path is not an exact directory\n' >&2; exit 1; }
+[[ -d "${quota_volume_source_path}" && ! -L "${quota_volume_source_path}" ]] || { printf 'quota canary source path is not an exact directory\n' >&2; exit 1; }
+[[ "$(stat -c %d:%i -- "${quota_volume_path}")" == "$(stat -c %d:%i -- "${quota_volume_source_path}")" ]] || { printf 'quota canary escaped the dedicated pool\n' >&2; exit 1; }
+QUOTA_VOLUME_PATH="${quota_volume_path}" python3 - <<'PY'
+import errno
+import os
+
+mib = 1024 * 1024
+path = os.environ["QUOTA_VOLUME_PATH"]
+vfs = os.statvfs(path)
+if vfs.f_bavail * vfs.f_frsize < 64 * mib:
+    raise SystemExit("insufficient free pool space for an unambiguous quota canary")
+
+def write_exact(target, byte_count):
+    fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        chunk = b"\0" * mib
+        remaining = byte_count
+        while remaining:
+            written = os.write(fd, chunk[:min(remaining, len(chunk))])
+            if written <= 0:
+                raise SystemExit("quota canary made no write progress")
+            remaining -= written
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+under = os.path.join(path, "under-quota.bin")
+over = os.path.join(path, "over-quota.bin")
+write_exact(under, 7 * mib)
+if os.stat(under).st_size != 7 * mib:
+    raise SystemExit("under-quota write size drift")
+try:
+    write_exact(over, 2 * mib)
+except OSError as exc:
+    if exc.errno != errno.EDQUOT:
+        raise SystemExit(f"quota crossing failed with unexpected errno {exc.errno}")
+else:
+    raise SystemExit("quota crossing unexpectedly succeeded")
+PY
+incus storage volume delete "${pool}" "${canary_quota}" --project "${project}"
+[[ ! -e "${quota_volume_path}" && ! -e "${quota_volume_source_path}" ]]
+
+expect_policy_rejection() {
+  local label="$1"
+  local subject_pattern="$2"
+  shift 2
+  local output
+  if output="$("$@" 2>&1)"; then
+    printf 'negative canary unexpectedly succeeded: %s\n' "${label}" >&2
+    return 1
+  fi
+  [[ -z "$(incus list --all-projects --format csv)" ]] || { printf 'negative canary left an instance (%s)\n' "${label}" >&2; return 1; }
+  [[ -z "$(incus storage volume list "${pool}" --all-projects --format csv)" ]] || { printf 'negative canary left a storage volume (%s)\n' "${label}" >&2; return 1; }
+  printf '%s' "${output}" | grep -Eiq 'restrict|not allowed|forbidden|project' || {
+    printf 'negative canary failed for an unrecognized reason (%s): %s\n' "${label}" "${output}" >&2
+    return 1
+  }
+  printf '%s' "${output}" | grep -Eiq "${subject_pattern}" || {
+    printf 'negative canary did not prove the requested restriction (%s): %s\n' "${label}" "${output}" >&2
+    return 1
+  }
+}
+
+expect_policy_rejection privileged 'privileg|security[.]privileged' \
+  incus init --empty "${canary_privileged}" --project "${project}" --no-profiles \
+  -c limits.cpu=1 -c limits.memory=64MiB -c limits.processes=64 \
+  -d root,type=disk,path=/,pool="${pool}",size=64MiB \
+  -c security.privileged=true
+expect_policy_rejection nesting 'nest|security[.]nesting' \
+  incus init --empty "${canary_nesting}" --project "${project}" --no-profiles \
+  -c limits.cpu=1 -c limits.memory=64MiB -c limits.processes=64 \
+  -d root,type=disk,path=/,pool="${pool}",size=64MiB \
+  -c security.nesting=true
+expect_policy_rejection proxy 'proxy' \
+  incus init --empty "${canary_proxy}" --project "${project}" --no-profiles \
+  -c limits.cpu=1 -c limits.memory=64MiB -c limits.processes=64 \
+  -d root,type=disk,path=/,pool="${pool}",size=64MiB \
+  -d proxy0,type=proxy,listen=tcp:127.0.0.1:1,connect=tcp:127.0.0.1:1
+expect_policy_rejection idmap 'idmap|isolat|security[.]idmap' \
+  incus init --empty "${canary_idmap}" --project "${project}" --no-profiles \
+  -c limits.cpu=1 -c limits.memory=64MiB -c limits.processes=64 \
+  -d root,type=disk,path=/,pool="${pool}",size=64MiB \
+  -c security.idmap.isolated=false
+
+cleanup_canaries
+trap - EXIT
+network_sha256="$(printf '%s' "${network_json}" | sha256sum | cut -d' ' -f1)"
+profile_sha256="$(printf '%s' "${profile_json}" | sha256sum | cut -d' ' -f1)"
+storage_image_apparent_bytes="$(stat -c %s -- "${storage_image}")"
+storage_image_allocated_bytes="$(( $(stat -c %b -- "${storage_image}") * $(stat -c %B -- "${storage_image}") ))"
+storage_filesystem_bytes="$(blockdev --getsize64 "${mount_source}")"
+[[ "${storage_image_apparent_bytes}" == "${storage_bytes}" && "${storage_filesystem_bytes}" == "${storage_bytes}" ]]
+(( storage_image_allocated_bytes > 0 && storage_image_allocated_bytes <= storage_image_apparent_bytes ))
+printf '{"status":"installed","distro":"%s","project":"%s","project_restricted":true,"project_instance_limit":1,"storage_pool":"%s","storage_driver":"dir","storage_filesystem":"ext4","storage_filesystem_uuid":"%s","storage_project_quota":true,"storage_quota_canary_passed":true,"storage_mount_persistent":true,"storage_mount_unit_enabled":true,"storage_mount_unit_active":true,"incus_mount_ordering_verified":true,"storage_mount_root_owned":true,"storage_pool_size":"16GiB","storage_image_apparent_bytes":%s,"storage_image_allocated_bytes":%s,"storage_filesystem_bytes":%s,"bridge":"%s","bridge_uplink":false,"ipv4_nat":false,"ipv6_nat":false,"profile":"%s","profile_unprivileged":true,"nesting":false,"idmap_isolated":true,"process_limit":2048,"root_disk_size":"12GiB","root_is_only_disk":true,"forbidden_devices":false,"negative_canaries_passed":true,"instances":0,"storage_volumes":0,"network_sha256":"%s","profile_sha256":"%s","external_services_configured":false}\n' \
+  "${expected_distro}" "${project}" "${pool}" "${storage_filesystem_uuid}" "${storage_image_apparent_bytes}" "${storage_image_allocated_bytes}" "${storage_filesystem_bytes}" "${bridge}" "${profile}" "${network_sha256}" "${profile_sha256}"

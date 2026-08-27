@@ -1,5 +1,28 @@
 # WSL JIT runner MVP
 
+## Control plane outbound de dos fases
+
+GitHub Actions no tiene ingress hacia el allocation broker local y nunca recibe
+la clave privada de allocations. La ruta local productiva debe ejecutarse desde
+un worker outbound instalado en el host:
+
+1. consume un pedido autorizado e idempotente del control plane;
+2. llama `reserve` localmente y obtiene `allocation_id` y el único
+   `runner_label` transitorio;
+3. despacha el child workflow con ese label;
+4. observa por la API de GitHub el `run_id`, `run_attempt` y `workflow_job_id`
+   exactos;
+5. entrega el binding final a un signer externo acotado cuya clave privada no
+   entra al workflow, repositorio, runner ni proceso del modelo;
+6. llama `finalize` localmente para habilitar el scale set;
+7. ante error posterior a `reserve`, llama recovery idempotente.
+
+Si el worker, broker o signer no están disponibles antes del dispatch, el
+control plane elimina todos los campos de autoridad local y despacha el backend
+GitHub-hosted. Este repositorio define y prueba los contratos de adapters, pero
+no instala un transporte de cola, credenciales GitHub ni un signer productivo;
+esas tres autoridades externas siguen siendo requisitos de despliegue.
+
 This repository contains an executable, fail-closed contract for a future
 opt-in local runner pool. It does **not** register a runner, enable GARM, alter
 WSL, or change any repository from GitHub-hosted execution.
@@ -233,6 +256,11 @@ repository is activated merely by cloning this repository.
   start (`expires_at` is exclusive);
 - strict `issued -> claimed -> running -> terminal -> cleaned` transitions;
 - exactly one job and idempotent cleanup;
+- an allocation-derived `wsl-jit-<128-bit digest>` scale-set name that is the
+  job's sole official label; a shared `wsl-jit` scale set is forbidden;
+- signed binding of repository ID/name, exact SHA, trusted default-branch
+  workflow ref, workflow run ID/attempt, workflow job ID/name, runner image
+  fingerprint, authority kind/group and exclusive expiry;
 - two-phase reboot recovery from issued/claimed (`jobs_started=0`) and running
   (`jobs_started=1`) allocations: the ledger first records
   `recovery_required + cleanup_pending` with a stable idempotency key, and only
@@ -241,6 +269,60 @@ repository is activated merely by cloning this repository.
   incomplete evidence is rejected.
 
 Broker and runner credentials never belong in the allocation or repository.
+
+`github_automation.runner_jit_broker` owns a two-phase operational sequence.
+Before dispatch it durably reserves `allocation_id + nonce + derived label` and
+creates the exact scale set disabled. The trusted child is dispatched with that
+label. Only after the exact run ID, run attempt and numeric `workflow_job_id`
+are observed does the authority issue the final signed allocation. Finalization
+must project exactly onto the immutable reservation, installs that signed
+binding into the still-disabled runner bootstrap, and only then enables the
+scale set. The remaining sequence is `claim -> disable -> drain -> delete`.
+The GARM adapter consumes an already-authenticated CLI profile; it
+does not create sessions, GitHub Apps, credentials or repository authority.
+Every allocation gets a new scale set with `max_runners=1`,
+`min_idle_runners=0`, shell disabled and the exact allocation label. Personal
+repositories are repository-scoped and cannot name a runner group.
+Organization allocations must match a preselected repository-ID allowlist and
+its exact GARM organization entity plus exact GitHub runner group.
+
+The provider pre-install payload installs a root-owned signed allocation copy,
+the fail-closed `ACTIONS_RUNNER_HOOK_JOB_STARTED` script and a systemd manager
+environment setting before the runner service is created. The hook sends the
+GitHub repository/SHA/workflow/run/job context and runner identity only to the
+bridge-local broker at `10.254.0.1:8079`; anything other than an empty HTTP 204
+stops the job before its first workflow step. The broker verifies the signed
+binding, sole GARM registration, and a separately authenticated GitHub live-job
+verifier for the exact numeric `workflow_job_id`, run ID/attempt, repository,
+SHA, workflow ref, requested label, runner name, runner group and `in_progress`
+status; it then records claim and disables the
+scale set. The hook's textual `GITHUB_JOB` is never treated as a substitute for
+the numeric workflow job identity.
+
+The installed live verifier is fixed at
+`/usr/local/libexec/self-hosted-ci/github-live-job-verifier.py`. It accepts the
+broker's exact JSON object only on stdin and has no credential arguments or
+environment-secret surface. As root it reads
+`/etc/self-hosted-ci/github-live-job-verifier.json` (root-owned mode `0600`)
+with exactly:
+
+```json
+{"app_id":123,"installation_id":456,"private_key_file":"/etc/self-hosted-ci/github-live-job-verifier.pem"}
+```
+
+The referenced PEM must also be a single-link root-owned regular file with
+mode `0600`. The verifier signs a short App JWT in memory, requests an
+installation token narrowed to the exact numeric repository ID with only
+`actions:read`, and calls the fixed `https://api.github.com` job and run
+endpoints. Repository ID/name, job/run IDs and attempt, SHA, workflow
+path/default-branch ref, job name, exact labels, runner name/group and
+`in_progress` must all match before it emits the broker's exact success JSON.
+Any HTTP, schema, scope, timeout or identity drift exits nonzero without
+printing credentials or GitHub response data.
+
+On broker/WSL restart, the durable ledger disables, drains and deletes every
+unfinished transient scale set with the existing idempotent reboot-cleanup
+acknowledgement contract.
 
 ## Readiness and activation
 
@@ -270,8 +352,12 @@ referenced by every component/check under a host-owned evidence directory,
 then content-address them:
 
 ```bash
+sudo python3 scripts/host/stage-wsl-jit-live-contract.py \
+  --input-boundary /path/to/runner-boundary-template-v2.json \
+  --output-boundary /path/to/runner-boundary-with-live-contract-v2.json \
+  --measurement-root /path/to/host-evidence
 python3 scripts/host/collect-wsl-jit-measurements.py \
-  --input /path/to/runner-boundary-template-v2.json \
+  --input /path/to/runner-boundary-with-live-contract-v2.json \
   --output /path/to/runner-boundary-v2.json \
   --measurement-root /path/to/host-evidence
 python3 scripts/host/verify-wsl-jit-readiness.py \
@@ -287,6 +373,15 @@ component pin, and the exact canonical network-policy bytes. Symlinks, path
 escape, missing references, changed binary/version output, changed ACL-mode or
 ownership, and policy drift all block activation. The collector never assigns
 pass/verified status and does not activate or provision anything.
+The staging step runs inside the dedicated WSL after pinned prerequisites are
+installed. It adds the non-secret `live/live-artifacts-v1.json` contract and
+inert copies of every public runtime script, systemd unit, Squid/provider
+template, and relevant pinned binary digest to the unsigned boundary. The
+reviewer therefore signs both the host claims and the exact code/configuration
+that may execute. Provisioning rehashes installed destinations, and activation
+plus every critical `ExecStartPre` repeats that verification. Private keys,
+certificates, GARM JWT/database secrets, and the materialized secret-bearing
+GARM config are forbidden contract targets.
 An independent reviewer signs the final canonical JCS payload with Ed25519;
 the verifier pins the reviewer's SPKI fingerprint and performs that signature
 check internally. Callers cannot replace cryptographic verification with a

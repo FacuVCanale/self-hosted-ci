@@ -13,11 +13,16 @@ SCRIPT = ROOT / "scripts/host/migrate-ci-wsl.ps1"
 
 
 class WslMigrationScriptTests(unittest.TestCase):
-    def test_script_has_plan_only_default_and_explicit_apply_acknowledgements(self) -> None:
+    def test_script_has_plan_only_default_and_explicit_apply_acknowledgements(
+        self,
+    ) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn("[switch]$Apply", source)
         self.assertIn("if (-not $Apply)", source)
-        self.assertIn("no ACL, scheduled-task, WSL registration, or filesystem changes were made", source)
+        self.assertIn(
+            "no ACL, scheduled-task, WSL registration, or filesystem changes were made",
+            source,
+        )
         self.assertIn("[switch]$AcknowledgeSourceAndExportWillBePreserved", source)
         self.assertIn("[switch]$AcknowledgeImportRunsAsServiceIdentity", source)
         self.assertIn("[switch]$AcknowledgeGrantBatchLogonRight", source)
@@ -31,19 +36,24 @@ class WslMigrationScriptTests(unittest.TestCase):
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('$ExpectedSourceDistro = "Ubuntu-24.04"', source)
         self.assertIn('$ExpectedImportedDistro = "Ubuntu-24.04-CI"', source)
+        self.assertIn("[Parameter(Mandatory = $true)][string]$ExportPath", source)
         self.assertIn(
-            '$ExpectedExport = "C:\\ProgramData\\self-hosted-ci\\exports\\Ubuntu-24.04-20260827.tar"', source
+            "[Parameter(Mandatory = $true)][string]$ExpectedExportSha256", source
         )
-        self.assertIn('$ExpectedDestination = "C:\\ProgramData\\self-hosted-ci\\wsl"', source)
-        self.assertIn("ad9e329eadc4211182c32d71a2830b6a492efedb2dc94735f3dd5287925ca0e9", source)
+        self.assertIn("ExportPath must be an explicit file below", source)
+        self.assertIn(
+            '$ExpectedDestination = "C:\\ProgramData\\self-hosted-ci\\wsl"', source
+        )
         self.assertIn("Get-FileHash -LiteralPath $ExportPath -Algorithm SHA256", source)
         self.assertIn("WSL export size mismatch", source)
         self.assertIn("Insufficient free disk space", source)
 
-    def test_script_requires_elevation_local_nonadmin_account_and_protected_acls(self) -> None:
+    def test_script_requires_elevation_local_nonadmin_account_and_protected_acls(
+        self,
+    ) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn("Test-IsAdministrator", source)
-        self.assertIn('[Environment]::UserInteractive', source)
+        self.assertIn("[Environment]::UserInteractive", source)
         self.assertIn('$Host.Name -ne "ConsoleHost"', source)
         self.assertIn('Get-LocalGroup -SID "S-1-5-32-544"', source)
         self.assertIn("must not be a member of the local Administrators group", source)
@@ -51,20 +61,27 @@ class WslMigrationScriptTests(unittest.TestCase):
         self.assertIn("Unexpected ACL identity", source)
         self.assertIn("Assert-NotReparsePoint", source)
 
-    def test_script_imports_once_via_password_task_and_verifies_service_hkcu_registration(self) -> None:
+    def test_script_imports_once_via_password_task_and_verifies_service_hkcu_registration(
+        self,
+    ) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn("function Register-PasswordImportTask", source)
         self.assertIn('$scheduler = New-Object -ComObject "Schedule.Service"', source)
         self.assertIn("$definition.Principal.LogonType = $taskLogonPassword", source)
         self.assertIn("$definition.Principal.RunLevel = $taskRunLevelLua", source)
         self.assertIn("$folder.RegisterTaskDefinition(", source)
-        self.assertIn("Task Scheduler rejected the one-time password task before WSL was started", source)
+        self.assertIn(
+            "Task Scheduler rejected the one-time password task before WSL was started",
+            source,
+        )
         self.assertIn(
             '$startInfo.Arguments = "--import ${quote}${DistroName}${quote} '
             '${quote}${destination}${quote} ${quote}${ExportPath}${quote} --version 2"',
             source,
         )
-        self.assertIn('"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss"', source)
+        self.assertIn(
+            '"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss"', source
+        )
         self.assertIn("Worker identity SID mismatch", source)
         self.assertIn("Imported distro BasePath mismatch", source)
         self.assertIn("Imported distro is not WSL2", source)
@@ -74,8 +91,12 @@ class WslMigrationScriptTests(unittest.TestCase):
         source = SCRIPT.read_text(encoding="utf-8")
         register = source.index("$registeredTask = Register-PasswordImportTask")
         marked_registered = source.index("$registered = $true", register)
-        postcondition = source.index("Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop", marked_registered)
-        start = source.index("Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop", postcondition)
+        postcondition = source.index(
+            "Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop", marked_registered
+        )
+        start = source.index(
+            "Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop", postcondition
+        )
         self.assertLess(register, marked_registered)
         self.assertLess(marked_registered, postcondition)
         self.assertLess(postcondition, start)
@@ -83,7 +104,9 @@ class WslMigrationScriptTests(unittest.TestCase):
         self.assertIn('Principal.RunLevel -ne "Limited"', source)
         self.assertIn("Principal.UserId", source)
 
-    def test_completion_does_not_depend_on_truncated_task_scheduler_timestamp(self) -> None:
+    def test_completion_does_not_depend_on_truncated_task_scheduler_timestamp(
+        self,
+    ) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         started_at = datetime(2026, 8, 27, 12, 34, 56, 742000)
         task_scheduler_last_run = started_at.replace(microsecond=0)
@@ -97,7 +120,9 @@ class WslMigrationScriptTests(unittest.TestCase):
         )
         self.assertLess(
             source.index("if ($taskInfo.LastTaskResult -ne 0)"),
-            source.index("$result = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json"),
+            source.index(
+                "$result = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json"
+            ),
         )
 
     def test_task_principal_identity_is_compared_semantically_by_sid(self) -> None:
@@ -107,7 +132,9 @@ class WslMigrationScriptTests(unittest.TestCase):
         self.assertIn("[Security.Principal.NTAccount]::new($candidate)", source)
         self.assertIn("Translate([Security.Principal.SecurityIdentifier])", source)
         self.assertIn('$candidates += "$env:COMPUTERNAME\\$UserId"', source)
-        self.assertIn("$actualTaskSid = Resolve-PrincipalSidValue $actualTaskUserId", source)
+        self.assertIn(
+            "$actualTaskSid = Resolve-PrincipalSidValue $actualTaskUserId", source
+        )
         self.assertIn("if ($actualTaskSid -ne $serviceSid.Value)", source)
         self.assertIn("actual_user_id='$actualTaskUserId'", source)
         self.assertNotIn("@($accountId, $serviceSid.Value) -notcontains", source)
@@ -119,17 +146,27 @@ class WslMigrationScriptTests(unittest.TestCase):
         self.assertIn("New-Object byte[] 48", source)
         self.assertIn("SecureStringToBSTR", source)
         self.assertIn("ZeroFreeBSTR", source)
-        self.assertIn("Set-LocalUser -Name $account.Name -Password $temporaryPassword", source)
+        self.assertIn(
+            "Set-LocalUser -Name $account.Name -Password $temporaryPassword", source
+        )
         self.assertNotIn("Read-Host", source)
         self.assertNotIn("Export-Clixml", source)
 
-    def test_finally_rotates_again_before_task_cleanup_and_reports_only_safe_evidence(self) -> None:
+    def test_finally_rotates_again_before_task_cleanup_and_reports_only_safe_evidence(
+        self,
+    ) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
-        finally_block = source[source.index("finally {", source.index("$completionEvidence = $null")) :]
-        rotate = finally_block.index("Set-LocalUser -Name $account.Name -Password $finalPassword")
+        finally_block = source[
+            source.index("finally {", source.index("$completionEvidence = $null")) :
+        ]
+        rotate = finally_block.index(
+            "Set-LocalUser -Name $account.Name -Password $finalPassword"
+        )
         delete = finally_block.index("$folder.DeleteTask($TaskName, 0)")
         self.assertLess(rotate, delete)
-        self.assertIn("stored_task_credential_invalidated = $finalPasswordRotated", finally_block)
+        self.assertIn(
+            "stored_task_credential_invalidated = $finalPasswordRotated", finally_block
+        )
         self.assertIn("password_material_logged_or_persisted = $false", finally_block)
         self.assertIn("Fail-closed cleanup error", finally_block)
         self.assertIn("bounded cleanup stop", finally_block)
@@ -143,31 +180,46 @@ class WslMigrationScriptTests(unittest.TestCase):
         self.assertIn("$process.Kill()", source)
         self.assertIn("exceeded its $ImportTimeoutSeconds second timeout", source)
 
-    def test_import_uses_exact_distro_postcondition_when_exit_metadata_is_unavailable(self) -> None:
+    def test_import_uses_exact_distro_postcondition_when_exit_metadata_is_unavailable(
+        self,
+    ) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn("$exitCodeAvailable = $false", source)
         self.assertIn("$exitCode = $null", source)
         self.assertIn("$exitCode = [int]$process.ExitCode", source)
-        self.assertIn("$importPostconditionPassed = $distros -contains $DistroName", source)
+        self.assertIn(
+            "$importPostconditionPassed = $distros -contains $DistroName", source
+        )
         self.assertIn("if ($exitCodeAvailable -and $exitCode -ne 0)", source)
         self.assertIn("if (-not $importPostconditionPassed)", source)
         self.assertIn('"unavailable exit metadata"', source)
         self.assertNotIn("La operación se completó correctamente", source)
         self.assertNotIn("operation completed successfully", source.lower())
 
-    def test_apply_grants_only_batch_logon_through_lsa_and_fails_on_direct_deny(self) -> None:
+    def test_apply_grants_only_batch_logon_through_lsa_and_fails_on_direct_deny(
+        self,
+    ) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn("function Grant-ExactBatchLogonRight", source)
-        self.assertIn('private static extern uint LsaAddAccountRights(', source)
-        self.assertIn('private static extern uint LsaEnumerateAccountRights(', source)
+        self.assertIn("private static extern uint LsaAddAccountRights(", source)
+        self.assertIn("private static extern uint LsaEnumerateAccountRights(", source)
         self.assertIn('$batchRight = "SeBatchLogonRight"', source)
         self.assertIn('$denyRight = "SeDenyBatchLogonRight"', source)
         self.assertIn("refusing to weaken or override a deny assignment", source)
-        self.assertIn("Compare-Object -ReferenceObject $expectedAfter -DifferenceObject $after", source)
-        self.assertIn("changed beyond the single authorized SeBatchLogonRight addition", source)
-        self.assertIn("$batchLogonEvidence = Grant-ExactBatchLogonRight $serviceSid.Value", source)
+        self.assertIn(
+            "Compare-Object -ReferenceObject $expectedAfter -DifferenceObject $after",
+            source,
+        )
+        self.assertIn(
+            "changed beyond the single authorized SeBatchLogonRight addition", source
+        )
+        self.assertIn(
+            "$batchLogonEvidence = Grant-ExactBatchLogonRight $serviceSid.Value", source
+        )
 
-    def test_script_does_not_use_broad_security_policy_tools_or_remove_rights(self) -> None:
+    def test_script_does_not_use_broad_security_policy_tools_or_remove_rights(
+        self,
+    ) -> None:
         source = SCRIPT.read_text(encoding="utf-8").lower()
         self.assertNotIn("secedit", source)
         self.assertIsNone(re.search(r"(?im)^\s*(?:&\s*)?ntrights(?:\.exe)?\b", source))
@@ -190,7 +242,9 @@ class WslMigrationScriptTests(unittest.TestCase):
             f"[void][System.Management.Automation.Language.Parser]::ParseFile('{SCRIPT}',[ref]$null,[ref]$errors); "
             "if($errors.Count){$errors|ForEach-Object{Write-Error $_};exit 1}"
         )
-        result = subprocess.run(["pwsh", "-NoProfile", "-Command", command], text=True, capture_output=True)
+        result = subprocess.run(
+            ["pwsh", "-NoProfile", "-Command", command], text=True, capture_output=True
+        )
         self.assertEqual(0, result.returncode, result.stderr)
 
 

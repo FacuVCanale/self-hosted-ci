@@ -137,9 +137,17 @@ class GateStore:
         connection.execute("PRAGMA busy_timeout = 10000")
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        db = self._connect()
+        try:
+            yield db
+        finally:
+            db.close()
+
     def _initialize(self) -> None:
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as db:
+        with self._connection() as db:
             db.executescript(
                 """
                 PRAGMA journal_mode = WAL;
@@ -658,7 +666,7 @@ class GateStore:
             )
 
     def pending_outbox(self) -> list[dict[str, Any]]:
-        with self._connect() as db:
+        with self._connection() as db:
             rows = db.execute(
                 "SELECT * FROM outbox WHERE state='pending' ORDER BY created_at, outbox_key"
             ).fetchall()
@@ -700,7 +708,7 @@ class GateStore:
                 raise ControlFailure("unknown outbox item")
 
     def get_gate(self, logical_key: str, generation: int | None = None) -> Gate | None:
-        with self._connect() as db:
+        with self._connection() as db:
             if generation is None:
                 row = db.execute(
                     "SELECT * FROM gates WHERE logical_key=? ORDER BY generation DESC LIMIT 1",
@@ -714,7 +722,7 @@ class GateStore:
             return None if row is None else self._gate_from_row(row)
 
     def get_admission(self, logical_key: str, generation: int) -> Admission | None:
-        with self._connect() as db:
+        with self._connection() as db:
             row = db.execute(
                 "SELECT * FROM admissions WHERE logical_key=? AND generation=?",
                 (logical_key, generation),

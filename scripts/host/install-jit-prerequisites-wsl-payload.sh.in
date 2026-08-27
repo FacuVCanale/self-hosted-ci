@@ -6,6 +6,12 @@ readonly incus_version='@@INCUS_VERSION@@'
 readonly garm_version='0.2.1'
 readonly garm_sha256='11176acb8a725f914b9b947891b4837d374fb616195562cc0ad45a7be8b6c746'
 readonly garm_url='https://github.com/cloudbase/garm/releases/download/v0.2.1/garm-linux-amd64.tgz'
+readonly garm_cli_version='0.2.1'
+readonly garm_cli_sha256='983fa54557f3f5ce3aa1eeb2387499f5f823d14512a0559ba888667bc3b3e88e'
+readonly garm_cli_url='https://github.com/cloudbase/garm/releases/download/v0.2.1/garm-cli-linux-amd64.tgz'
+readonly garm_provider_incus_version='0.1.5'
+readonly garm_provider_incus_sha256='1489b5f9b3f01528e338c604c13dabe8321ed6f1bc6de77c7344119d7731c43f'
+readonly garm_provider_incus_url='https://github.com/cloudbase/garm-provider-incus/releases/download/v0.1.5/garm-provider-incus-linux-amd64.tgz'
 readonly tx="$(mktemp -d /var/tmp/self-hosted-ci-jit-prereqs.XXXXXX)"
 
 cleanup() { rm -rf -- "${tx}"; }
@@ -24,9 +30,41 @@ systemctl disable --now garm.service self-hosted-ci-garm.service >/dev/null 2>&1
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl "incus=${incus_version}"
+apt-get install -y --no-install-recommends ca-certificates curl dnsmasq-base e2fsprogs nftables squid util-linux "incus=${incus_version}"
+# Incus only needs the dnsmasq executable. The full dnsmasq package adds a
+# persistent system service and may have been installed by an older revision
+# of this bootstrap; remove that wrapper package while retaining dnsmasq-base.
+if dpkg-query -W -f='${Status}' dnsmasq 2>/dev/null | grep -Fxq 'install ok installed'; then
+  apt-get remove -y dnsmasq
+fi
 apt-mark hold incus >/dev/null
 [[ "$(dpkg-query -W -f='${Version}' incus)" == "${incus_version}" ]]
+dpkg-query -W -f='${Status}' e2fsprogs | grep -Fxq 'install ok installed'
+dpkg-query -W -f='${Status}' util-linux | grep -Fxq 'install ok installed'
+dpkg-query -W -f='${Status}' dnsmasq-base | grep -Fxq 'install ok installed'
+command -v dnsmasq >/dev/null
+dnsmasq --version >/dev/null
+! systemctl is-enabled dnsmasq.service >/dev/null 2>&1
+! systemctl is-active dnsmasq.service >/dev/null 2>&1
+systemctl disable --now squid.service nftables.service >/dev/null 2>&1 || true
+dpkg-query -W -f='${Status}' nftables | grep -Fxq 'install ok installed'
+dpkg-query -W -f='${Status}' squid | grep -Fxq 'install ok installed'
+command -v nft >/dev/null
+command -v squid >/dev/null
+! systemctl is-enabled squid.service >/dev/null 2>&1
+! systemctl is-active squid.service >/dev/null 2>&1
+! systemctl is-enabled nftables.service >/dev/null 2>&1
+command -v mkfs.ext4 >/dev/null
+command -v losetup >/dev/null
+command -v tune2fs >/dev/null
+command -v findmnt >/dev/null
+command -v mountpoint >/dev/null
+command -v truncate >/dev/null
+command -v systemd-escape >/dev/null
+command -v blockdev >/dev/null
+command -v blkid >/dev/null
+grep -qw ext4 /proc/filesystems || { printf 'the WSL kernel does not expose ext4 support\n' >&2; exit 1; }
+grep -Eq '(^|[[:space:]])loop([[:space:]]|$)' /proc/devices || { printf 'the WSL kernel does not expose loop devices\n' >&2; exit 1; }
 [[ "$(apt-mark showhold incus)" == incus ]]
 
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
@@ -38,12 +76,39 @@ tar -xzf "${tx}/garm.tgz" -C "${tx}" --no-same-owner --no-same-permissions
 install -o root -g root -m 0755 "${tx}/garm" /usr/local/bin/garm
 [[ "$(/usr/local/bin/garm --version 2>&1)" == *"${garm_version}"* ]]
 
-if ! getent group incus-admin >/dev/null; then groupadd --system incus-admin; fi
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output "${tx}/garm-cli.tgz" "${garm_cli_url}"
+printf '%s  %s\n' "${garm_cli_sha256}" "${tx}/garm-cli.tgz" | sha256sum --check --status
+[[ "$(tar -tzf "${tx}/garm-cli.tgz")" == garm-cli ]]
+tar -xzf "${tx}/garm-cli.tgz" -C "${tx}" --no-same-owner --no-same-permissions
+[[ -f "${tx}/garm-cli" && ! -L "${tx}/garm-cli" ]]
+install -o root -g root -m 0755 "${tx}/garm-cli" /usr/local/bin/garm-cli
+[[ "$(stat -c '%U:%G:%a' /usr/local/bin/garm-cli)" == root:root:755 ]]
+[[ "$(/usr/local/bin/garm-cli version 2>&1)" == *"garm-cli: v${garm_cli_version}"* ]]
+
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output "${tx}/garm-provider-incus.tgz" "${garm_provider_incus_url}"
+printf '%s  %s\n' "${garm_provider_incus_sha256}" "${tx}/garm-provider-incus.tgz" | sha256sum --check --status
+[[ "$(tar -tzf "${tx}/garm-provider-incus.tgz")" == garm-provider-incus ]]
+tar -xzf "${tx}/garm-provider-incus.tgz" -C "${tx}" --no-same-owner --no-same-permissions
+[[ -f "${tx}/garm-provider-incus" && ! -L "${tx}/garm-provider-incus" ]]
+install -d -o root -g root -m 0755 /usr/local/libexec/garm
+install -o root -g root -m 0755 "${tx}/garm-provider-incus" /usr/local/libexec/garm/garm-provider-incus
+[[ "$(stat -c '%U:%G:%a' /usr/local/libexec/garm)" == root:root:755 ]]
+[[ "$(stat -c '%U:%G:%a' /usr/local/libexec/garm/garm-provider-incus)" == root:root:755 ]]
+
 if ! id garm-manager >/dev/null 2>&1; then
   useradd --system --create-home --home-dir /var/lib/garm --shell /usr/sbin/nologin garm-manager
 fi
-usermod --append --groups incus-admin garm-manager
+if getent group incus-admin >/dev/null \
+  && id -nG garm-manager | tr ' ' '\n' | grep -Fxq incus-admin; then
+  gpasswd --delete garm-manager incus-admin >/dev/null
+fi
 passwd --lock garm-manager >/dev/null
+if id -nG garm-manager | tr ' ' '\n' | grep -Fxq incus-admin; then
+  printf 'garm-manager retains forbidden incus-admin membership\n' >&2
+  exit 1
+fi
 for forbidden in sudo admin wheel; do
   if getent group "${forbidden}" >/dev/null && id -nG garm-manager | tr ' ' '\n' | grep -Fxq "${forbidden}"; then
     printf 'garm-manager is unexpectedly privileged through %s\n' "${forbidden}" >&2
@@ -62,5 +127,6 @@ if systemctl list-unit-files --no-legend --type=service --type=socket --type=tim
 fi
 [[ ! -e /var/lib/garm/.runner && ! -e /var/lib/garm/.credentials ]]
 
-printf '{"status":"installed","distro":"%s","incus_version":"%s","incus_held":true,"garm_version":"%s","garm_sha256":"%s","garm_manager_non_admin":true,"garm_enabled":false,"runner_registration_performed":false}\n' \
-  "${expected_distro}" "${incus_version}" "${garm_version}" "${garm_sha256}"
+printf '{"status":"installed","distro":"%s","incus_version":"%s","incus_held":true,"dnsmasq_base_installed":true,"dnsmasq_service_absent":true,"nftables_installed":true,"squid_installed":true,"distribution_network_services_disabled":true,"ext4_tools_installed":true,"ext4_kernel_supported":true,"loop_devices_supported":true,"garm_version":"%s","garm_sha256":"%s","garm_cli_version":"%s","garm_cli_sha256":"%s","garm_provider_incus_version":"%s","garm_provider_incus_sha256":"%s","garm_manager_non_admin":true,"garm_manager_incus_admin":false,"garm_enabled":false,"runner_registration_performed":false}\n' \
+  "${expected_distro}" "${incus_version}" "${garm_version}" "${garm_sha256}" \
+  "${garm_cli_version}" "${garm_cli_sha256}" "${garm_provider_incus_version}" "${garm_provider_incus_sha256}"

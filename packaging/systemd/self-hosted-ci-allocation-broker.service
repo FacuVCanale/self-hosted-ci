@@ -1,0 +1,26 @@
+[Unit]
+Description=Transient allocation broker for self-hosted-ci GARM runners
+Requires=self-hosted-ci-garm.service self-hosted-ci-network-policy.service
+After=self-hosted-ci-garm.service self-hosted-ci-network-policy.service
+ConditionPathExists=/etc/self-hosted-ci/ACTIVATION_APPROVED
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStartPre=/usr/local/lib/self-hosted-ci/garm-allocation-broker.py recover
+ExecStart=/usr/local/lib/self-hosted-ci/garm-allocation-broker.py serve
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/self-hosted-ci/garm
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

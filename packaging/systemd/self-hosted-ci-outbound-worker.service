@@ -1,0 +1,24 @@
+[Unit]
+Description=Outbound local CI coordinator worker
+Requires=self-hosted-ci-allocation-broker.service
+After=network-online.target self-hosted-ci-allocation-broker.service
+ConditionPathExists=/etc/self-hosted-ci/ACTIVATION_APPROVED
+ConditionPathExists=/etc/self-hosted-ci/outbound-worker.runtime-ready
+
+[Service]
+Type=simple
+User=root
+ExecCondition=/usr/local/lib/self-hosted-ci/install-outbound-worker-runtime.py --verify
+ExecStartPre=/usr/bin/install -d -o root -g root -m 0700 /run/self-hosted-ci
+ExecStart=/usr/local/lib/self-hosted-ci/outbound-coordinator-worker.py serve
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/self-hosted-ci/outbound-worker /var/lib/self-hosted-ci/garm /run/self-hosted-ci
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

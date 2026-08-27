@@ -5,6 +5,7 @@ installation token are intentionally represented by different types and
 accepted by different transports.  This makes credential crossing a local
 control failure before an HTTP request can be emitted.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ import http.client
 import json
 import os
 import subprocess
+import time
 from typing import Any, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -30,6 +32,9 @@ from .github import (
     ProtocolFailure,
     RuntimeIdentity,
     parse_dispatch_response,
+    parse_observed_workflow_job,
+    ObservedWorkflowJob,
+    WorkflowJobPending,
 )
 
 
@@ -87,12 +92,16 @@ class UrllibHTTPTransport:
         data = None
         request_headers = dict(headers)
         if json_body is not None:
-            data = json.dumps(json_body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            data = json.dumps(json_body, separators=(",", ":"), sort_keys=True).encode(
+                "utf-8"
+            )
             request_headers["Content-Type"] = "application/json"
         request = Request(url, data=data, headers=request_headers, method=method)
         try:
             with urlopen(request, timeout=self._timeout) as response:
-                return HTTPResponse(response.status, response.read(), dict(response.headers.items()))
+                return HTTPResponse(
+                    response.status, response.read(), dict(response.headers.items())
+                )
         except HTTPError as exc:
             try:
                 return HTTPResponse(exc.code, exc.read(), dict(exc.headers.items()))
@@ -126,7 +135,9 @@ class GitHubActionsToken:
         if not self.value or any(character.isspace() for character in self.value):
             raise ControlFailure("GITHUB_TOKEN is empty or malformed")
         if dict(self.permissions) != ACTIONS_TOKEN_PERMISSIONS:
-            raise ControlFailure("GITHUB_TOKEN permissions must be exactly actions:write")
+            raise ControlFailure(
+                "GITHUB_TOKEN permissions must be exactly actions:write"
+            )
 
 
 @dataclass(frozen=True, repr=False)
@@ -144,7 +155,9 @@ class InstallationToken:
         if self.expires_at.tzinfo is None or self.expires_at.utcoffset() is None:
             raise ControlFailure("installation token expiry must be timezone-aware")
         if dict(self.permissions) != MINIMUM_APP_PERMISSIONS:
-            raise ControlFailure("installation token permissions are not exactly checks-only")
+            raise ControlFailure(
+                "installation token permissions are not exactly checks-only"
+            )
         if isinstance(self.repository_id, bool) or self.repository_id < 1:
             raise ControlFailure("installation token repository_id must be positive")
         if isinstance(self.installation_id, bool) or self.installation_id < 1:
@@ -161,7 +174,9 @@ class InstallationToken:
             or dict(self.permissions) != dict(authority.permissions)
             or authority.key_state != "active"
         ):
-            raise ControlFailure("installation token is expired or outside exact authority")
+            raise ControlFailure(
+                "installation token is expired or outside exact authority"
+            )
 
 
 class RS256Signer(Protocol):
@@ -262,7 +277,10 @@ class GitHubAppAuthenticator:
             ),
             expected_status=200,
         )
-        if repository.get("id") != self._authority.repository_id or repository.get("full_name") != self._authority.repository:
+        if (
+            repository.get("id") != self._authority.repository_id
+            or repository.get("full_name") != self._authority.repository
+        ):
             raise ControlFailure("installation token repository identity mismatch")
         return token
 
@@ -271,7 +289,13 @@ class GitHubAppAuthenticator:
             raise ControlFailure("JWT clock must be timezone-aware")
         issued_at = int(now.timestamp()) - 60
         header = _b64json({"alg": "RS256", "typ": "JWT"})
-        claims = _b64json({"iat": issued_at, "exp": issued_at + 600, "iss": str(self._authority.app_id)})
+        claims = _b64json(
+            {
+                "iat": issued_at,
+                "exp": issued_at + 600,
+                "iss": str(self._authority.app_id),
+            }
+        )
         signing_input = f"{header}.{claims}".encode("ascii")
         signature = _b64(self._signer.sign(signing_input))
         if not signature:
@@ -304,16 +328,23 @@ class GitHubAppAuthenticator:
             raise ControlFailure("minted installation token permissions drifted")
         repositories = response.get("repositories")
         if not isinstance(repositories, list) or len(repositories) != 1:
-            raise ControlFailure("minted installation token repository scope is not exact")
+            raise ControlFailure(
+                "minted installation token repository scope is not exact"
+            )
         repository = repositories[0]
-        if not isinstance(repository, Mapping) or repository.get("id") != self._authority.repository_id or repository.get("full_name") != self._authority.repository:
+        if (
+            not isinstance(repository, Mapping)
+            or repository.get("id") != self._authority.repository_id
+            or repository.get("full_name") != self._authority.repository
+        ):
             raise ControlFailure("minted installation token repository scope mismatch")
         value = response.get("token")
         server_expires_at = _parse_timestamp(response.get("expires_at"))
         if (
             not isinstance(value, str)
             or server_expires_at <= now + INSTALLATION_TOKEN_SAFETY_MARGIN
-            or server_expires_at > now + INSTALLATION_TOKEN_MAX_TTL + INSTALLATION_TOKEN_CLOCK_SKEW
+            or server_expires_at
+            > now + INSTALLATION_TOKEN_MAX_TTL + INSTALLATION_TOKEN_CLOCK_SKEW
         ):
             raise ControlFailure("minted installation token value or TTL is invalid")
         usable_expires_at = min(
@@ -321,7 +352,9 @@ class GitHubAppAuthenticator:
             now + timedelta(seconds=request.ttl_seconds),
         )
         if usable_expires_at <= now:
-            raise ControlFailure("minted installation token has no safe usable lifetime")
+            raise ControlFailure(
+                "minted installation token has no safe usable lifetime"
+            )
         return InstallationToken(
             value,
             usable_expires_at,
@@ -338,7 +371,9 @@ class GitHubAppAuthenticator:
         headers: Mapping[str, str],
         body: Mapping[str, object] | None = None,
     ) -> HTTPResponse:
-        return self._http.request(method, self._api_url + path, headers=headers, json_body=body)
+        return self._http.request(
+            method, self._api_url + path, headers=headers, json_body=body
+        )
 
     @staticmethod
     def _headers(token: str) -> Mapping[str, str]:
@@ -365,6 +400,10 @@ class ActionsDispatchTransport:
         http: HTTPTransport,
         *,
         api_url: str = GITHUB_API,
+        observation_timeout_seconds: float = 30.0,
+        observation_poll_seconds: float = 1.0,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         self._api_url = _exact_api_url(api_url)
         if not isinstance(token, GitHubActionsToken):
@@ -378,6 +417,12 @@ class ActionsDispatchTransport:
             raise ControlFailure("Actions transport runtime identity mismatch")
         self._token = token
         self._http = http
+        if observation_timeout_seconds <= 0 or observation_poll_seconds <= 0:
+            raise ValueError("job observation timing must be positive")
+        self._observation_timeout = observation_timeout_seconds
+        self._observation_poll = observation_poll_seconds
+        self._monotonic = monotonic
+        self._sleeper = sleeper
 
     def dispatch(self, request: DispatchRequest, inputs: Mapping[str, str]) -> int:
         if not isinstance(request, DispatchRequest):
@@ -385,8 +430,13 @@ class ActionsDispatchTransport:
         if dict(self._token.permissions) != ACTIONS_TOKEN_PERMISSIONS:
             raise ControlFailure("GITHUB_TOKEN permissions drifted")
         if request.repository != self._token.repository:
-            raise ControlFailure("dispatch repository is outside GITHUB_TOKEN authority")
-        if not isinstance(inputs, Mapping) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in inputs.items()):
+            raise ControlFailure(
+                "dispatch repository is outside GITHUB_TOKEN authority"
+            )
+        if not isinstance(inputs, Mapping) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in inputs.items()
+        ):
             raise ProtocolFailure("workflow dispatch inputs must be a string mapping")
         workflow = quote(request.workflow_id, safe="")
         response = self._http.request(
@@ -397,12 +447,60 @@ class ActionsDispatchTransport:
                 "Authorization": f"Bearer {self._token.value}",
                 "X-GitHub-Api-Version": request.api_version,
             },
-            json_body={"ref": request.ref, "inputs": dict(inputs)},
+            json_body={
+                "ref": request.ref,
+                "inputs": dict(inputs),
+                "return_run_details": True,
+            },
         )
         if response.status != 200:
             raise ProtocolFailure("dispatch must return HTTP 200")
         body = _json_mapping(response.body)
         return parse_dispatch_response(request, response.status, body)
+
+    def observe_exact_job(
+        self, request: DispatchRequest, run_id: int, runner_label: str
+    ) -> ObservedWorkflowJob:
+        """Poll the exact dispatch for a bounded interval and fail closed."""
+        if request.repository != self._token.repository:
+            raise ControlFailure(
+                "job observation repository is outside GITHUB_TOKEN authority"
+            )
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {self._token.value}",
+            "X-GitHub-Api-Version": request.api_version,
+        }
+        base = f"{self._api_url}/repos/{request.repository}/actions/runs/{run_id}"
+        deadline = self._monotonic() + self._observation_timeout
+        while True:
+            run_response = self._http.request("GET", base, headers=headers)
+            jobs_response = self._http.request(
+                "GET", f"{base}/jobs?filter=latest&per_page=100", headers=headers
+            )
+            if run_response.status == 200 and jobs_response.status == 200:
+                try:
+                    return parse_observed_workflow_job(
+                        run_id,
+                        runner_label,
+                        _json_mapping(run_response.body),
+                        _json_mapping(jobs_response.body),
+                        expected_job_name="local-quality",
+                    )
+                except WorkflowJobPending:
+                    pass
+            elif run_response.status not in {
+                200,
+                404,
+                409,
+                422,
+            } or jobs_response.status not in {200, 404, 409, 422}:
+                raise ControlFailure(
+                    "exact workflow run/job observation is unavailable"
+                )
+            if self._monotonic() >= deadline:
+                raise ControlFailure("exact workflow job observation timed out")
+            self._sleeper(self._observation_poll)
 
 
 class GitHubCheckTransport:
@@ -454,7 +552,9 @@ class GitHubCheckTransport:
         except GitHubAdapterError as exc:
             raise AmbiguousCheckWrite("Check Run update outcome is ambiguous") from exc
         if any(observed.get(field) != value for field, value in expected.items()):
-            raise AmbiguousCheckWrite("Check Run update response did not match exact evidence")
+            raise AmbiguousCheckWrite(
+                "Check Run update response did not match exact evidence"
+            )
 
     def get_exact(self, check_run_id: int) -> Mapping[str, object]:
         self._authorize("metadata:read")
@@ -479,7 +579,9 @@ class GitHubCheckTransport:
         self._authorize("checks:create" if method == "POST" else "checks:update")
         if not isinstance(payload, Mapping):
             raise ControlFailure("Check Run payload must be a mapping")
-        response = self._http.request(method, self._url(path), headers=self._headers(), json_body=dict(payload))
+        response = self._http.request(
+            method, self._url(path), headers=self._headers(), json_body=dict(payload)
+        )
         return _expected_json(response, expected_status)
 
     def _authorize(self, operation: str) -> None:
@@ -540,7 +642,9 @@ def _parse_timestamp(value: object) -> datetime:
 
 
 def _b64json(value: Mapping[str, object]) -> str:
-    return _b64(json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    return _b64(
+        json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
 
 
 def _b64(value: bytes) -> str:

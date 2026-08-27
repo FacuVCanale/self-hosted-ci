@@ -3,6 +3,7 @@ config:
   limits.memory: 4GiB
   limits.processes: "2048"
   security.nesting: "false"
+  security.idmap.isolated: "true"
   security.privileged: "false"
   security.protection.delete: "false"
 description: Disposable one-job runner; destroy after every terminal outcome
@@ -10,10 +11,13 @@ devices:
   eth0:
     name: eth0
     network: ci-jit-isolated
+    security.ipv4_filtering: "true"
+    security.ipv6_filtering: "true"
+    security.mac_filtering: "true"
     type: nic
   root:
     path: /
     pool: ci-jit-dedicated
-    size: 24GiB
+    size: 12GiB
     type: disk
-name: self-hosted-ci-jit
+name: ci-jit

@@ -11,8 +11,10 @@ from github_automation.crypto import spki_fingerprint
 from github_automation.runner_jit import (
     RunnerJitError,
     SqliteAllocationLedger,
+    allocation_scale_set_name,
     sign_allocation,
     validate_allocation_payload,
+    validate_allocation_reservation,
     verify_allocation,
 )
 
@@ -20,16 +22,28 @@ from github_automation.runner_jit import (
 NOW = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
 
 
-def payload(*, allocation_id: str = "0198ef24-f800-7000-8000-000000000001", nonce: str = "A" * 43) -> dict:
-    return {
+def payload(
+    *,
+    allocation_id: str = "0198ef24-f800-7000-8000-000000000001",
+    nonce: str = "A" * 43,
+) -> dict:
+    value = {
         "runner_allocation_version": 1,
         "allocation_id": allocation_id,
         "repository_id": "1347574115",
         "repository": "FacuVCanale/self-hosted-ci-sandbox",
         "head_sha": "a" * 40,
+        "tested_sha": "c" * 40,
+        "dispatch_sha": "f" * 40,
         "workflow_ref": "FacuVCanale/self-hosted-ci-sandbox/.github/workflows/ci-gate.yml@refs/heads/main",
-        "runner_group": "self-hosted-ci-jit",
-        "labels": ["linux", "self-hosted", "wsl-jit", "x64"],
+        "run_id": "8001",
+        "run_attempt": 1,
+        "job_id": "8002",
+        "job_name": "local-quality",
+        "authority_kind": "personal-repository",
+        "runner_group": None,
+        "scale_set_name": "",
+        "labels": [],
         "image_fingerprint": "b" * 64,
         "nonce": nonce,
         "issued_at": "2026-08-27T12:00:00Z",
@@ -37,6 +51,24 @@ def payload(*, allocation_id: str = "0198ef24-f800-7000-8000-000000000001", nonc
         "max_jobs": 1,
         "ephemeral": True,
     }
+    value["scale_set_name"] = allocation_scale_set_name(value)
+    value["labels"] = [value["scale_set_name"]]
+    return value
+
+
+def reservation(**kwargs) -> dict:
+    value = payload(**kwargs)
+    for field in (
+        "runner_allocation_version",
+        "run_id",
+        "run_attempt",
+        "job_id",
+        "dispatch_sha",
+        "tested_sha",
+    ):
+        value.pop(field)
+    value["allocation_reservation_version"] = 1
+    return value
 
 
 class RunnerAllocationTests(unittest.TestCase):
@@ -44,25 +76,104 @@ class RunnerAllocationTests(unittest.TestCase):
         private = ed25519.Ed25519PrivateKey.generate()
         document = sign_allocation(payload(), private, now=NOW)
         verified = verify_allocation(
-            document, private.public_key(), pinned_fingerprint=spki_fingerprint(private.public_key()), now=NOW
+            document,
+            private.public_key(),
+            pinned_fingerprint=spki_fingerprint(private.public_key()),
+            now=NOW,
         )
         self.assertEqual("a" * 40, verified["head_sha"])
         document["payload"]["head_sha"] = "c" * 40
         with self.assertRaises(RunnerJitError):
             verify_allocation(
-                document, private.public_key(), pinned_fingerprint=spki_fingerprint(private.public_key()), now=NOW
+                document,
+                private.public_key(),
+                pinned_fingerprint=spki_fingerprint(private.public_key()),
+                now=NOW,
             )
 
     def test_unknown_fields_lifetime_labels_and_expiry_fail_closed(self) -> None:
         cases = []
-        value = payload(); value["extra"] = True; cases.append(value)
-        value = payload(); value["expires_at"] = "2026-08-27T12:05:01Z"; cases.append(value)
-        value = payload(); value["labels"] = list(reversed(value["labels"])); cases.append(value)
+        value = payload()
+        value["extra"] = True
+        cases.append(value)
+        value = payload()
+        value["expires_at"] = "2026-08-27T12:05:01Z"
+        cases.append(value)
+        value = payload()
+        value["labels"] = ["wsl-jit"]
+        cases.append(value)
         for value in cases:
             with self.subTest(value=value), self.assertRaises(RunnerJitError):
                 validate_allocation_payload(value, now=NOW)
         with self.assertRaises(RunnerJitError):
             validate_allocation_payload(payload(), now=NOW + timedelta(minutes=5))
+
+    def test_personal_authority_is_exact_repository_scoped_without_group(self) -> None:
+        value = payload()
+        validate_allocation_payload(value, now=NOW)
+        value["runner_group"] = "self-hosted-ci-jit"
+        with self.assertRaisesRegex(RunnerJitError, "personal repository"):
+            validate_allocation_payload(value, now=NOW)
+
+    def test_organization_authority_requires_exact_selected_runner_group(self) -> None:
+        value = payload()
+        value["authority_kind"] = "organization-runner-group"
+        value["runner_group"] = "selected-self-hosted-ci-jit"
+        validate_allocation_payload(value, now=NOW)
+        for runner_group in (None, "", " selected-group", "selected-group ", "*"):
+            invalid = dict(value, runner_group=runner_group)
+            with (
+                self.subTest(runner_group=runner_group),
+                self.assertRaisesRegex(RunnerJitError, "exact selected runner group"),
+            ):
+                validate_allocation_payload(invalid, now=NOW)
+
+    def test_authority_kind_is_required_and_discriminated(self) -> None:
+        missing = payload()
+        missing.pop("authority_kind")
+        with self.assertRaisesRegex(RunnerJitError, "exact v1 fields"):
+            validate_allocation_payload(missing, now=NOW)
+        invalid = payload()
+        invalid["authority_kind"] = "repository-or-group"
+        with self.assertRaisesRegex(RunnerJitError, "authority_kind is invalid"):
+            validate_allocation_payload(invalid, now=NOW)
+
+    def test_label_is_cryptographically_unique_and_not_caller_selected(self) -> None:
+        first = payload()
+        second = payload(
+            allocation_id="0198ef24-f800-7000-8000-000000000002", nonce="B" * 43
+        )
+        self.assertNotEqual(first["scale_set_name"], second["scale_set_name"])
+        self.assertRegex(first["scale_set_name"], r"^wsl-jit-[0-9a-f]{32}$")
+        first["scale_set_name"] = "wsl-jit-" + "0" * 32
+        first["labels"] = [first["scale_set_name"]]
+        with self.assertRaisesRegex(RunnerJitError, "allocation-derived"):
+            validate_allocation_payload(first, now=NOW)
+
+    def test_reservation_excludes_unknown_run_and_job_ids(self) -> None:
+        value = reservation()
+        validate_allocation_reservation(value, now=NOW)
+        value["job_id"] = "8002"
+        with self.assertRaisesRegex(RunnerJitError, "reservation requires exact"):
+            validate_allocation_reservation(value, now=NOW)
+
+    def test_signed_finalization_must_match_prior_reservation(self) -> None:
+        private = ed25519.Ed25519PrivateKey.generate()
+        fingerprint = spki_fingerprint(private.public_key())
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = SqliteAllocationLedger(Path(directory) / "ledger.sqlite3")
+            value = payload()
+            ledger.reserve(reservation(), now=NOW)
+            self.assertEqual(
+                "issued",
+                ledger.finalize(
+                    sign_allocation(value, private, now=NOW),
+                    private.public_key(),
+                    pinned_fingerprint=fingerprint,
+                    now=NOW,
+                ),
+            )
+            self.assertEqual("issued", ledger.get(value["allocation_id"]).state)
 
 
 class RunnerLedgerTests(unittest.TestCase):
@@ -77,8 +188,10 @@ class RunnerLedgerTests(unittest.TestCase):
 
     def admit(self, value: dict) -> str:
         return self.ledger.admit(
-            sign_allocation(value, self.private, now=NOW), self.private.public_key(),
-            pinned_fingerprint=self.fingerprint, now=NOW,
+            sign_allocation(value, self.private, now=NOW),
+            self.private.public_key(),
+            pinned_fingerprint=self.fingerprint,
+            now=NOW,
         )
 
     def test_issue_is_transactional_idempotent_and_nonce_replay_fails(self) -> None:
@@ -90,12 +203,16 @@ class RunnerLedgerTests(unittest.TestCase):
         other = payload(allocation_id="0198ef24-f800-7000-8000-000000000002")
         with self.assertRaises(RunnerJitError):
             self.admit(other)
-        changed = dict(value); changed["head_sha"] = "c" * 40
+        changed = dict(value)
+        changed["head_sha"] = "c" * 40
         with self.assertRaises(RunnerJitError):
             self.admit(changed)
 
     def test_exactly_one_job_and_cleanup_all_terminal_outcomes(self) -> None:
-        for index, outcome in enumerate(("success", "failure", "cancel", "timeout", "force-cancel", "reboot"), start=1):
+        for index, outcome in enumerate(
+            ("success", "failure", "cancel", "timeout", "force-cancel", "reboot"),
+            start=1,
+        ):
             allocation_id = f"0198ef24-f800-7000-8000-{index:012d}"
             value = payload(allocation_id=allocation_id, nonce=chr(64 + index) * 43)
             self.admit(value)
@@ -104,7 +221,9 @@ class RunnerLedgerTests(unittest.TestCase):
             with self.assertRaises(RunnerJitError):
                 self.ledger.transition(allocation_id, "start", now=NOW)
             self.ledger.transition(
-                allocation_id, "finish", outcome=outcome,
+                allocation_id,
+                "finish",
+                outcome=outcome,
                 normal_cancel_attempted=outcome == "force-cancel",
             )
             record = self.ledger.transition(allocation_id, "cleanup")
@@ -123,7 +242,9 @@ class RunnerLedgerTests(unittest.TestCase):
         with self.assertRaises(RunnerJitError):
             self.ledger.transition(value["allocation_id"], "finish", outcome="unknown")
         with self.assertRaises(RunnerJitError):
-            self.ledger.transition(value["allocation_id"], "finish", outcome="force-cancel")
+            self.ledger.transition(
+                value["allocation_id"], "finish", outcome="force-cancel"
+            )
 
     def test_claim_and_start_revalidate_persisted_ttl_at_boundaries(self) -> None:
         for offset, accepted in ((-1, True), (0, False), (1, False)):
@@ -132,7 +253,9 @@ class RunnerLedgerTests(unittest.TestCase):
             self.admit(value)
             at_boundary = NOW + timedelta(minutes=5, seconds=offset)
             if accepted:
-                claimed = self.ledger.transition(allocation_id, "claim", now=at_boundary)
+                claimed = self.ledger.transition(
+                    allocation_id, "claim", now=at_boundary
+                )
                 self.assertEqual("claimed", claimed.state)
             else:
                 with self.assertRaises(RunnerJitError):
@@ -145,13 +268,17 @@ class RunnerLedgerTests(unittest.TestCase):
         self.admit(value)
         self.ledger.transition(value["allocation_id"], "claim", now=NOW)
         with self.assertRaises(RunnerJitError):
-            self.ledger.transition(value["allocation_id"], "start", now=NOW + timedelta(minutes=5))
+            self.ledger.transition(
+                value["allocation_id"], "start", now=NOW + timedelta(minutes=5)
+            )
         record = self.ledger.get(value["allocation_id"])
         self.assertEqual(NOW, record.issued_at)
         self.assertEqual(NOW + timedelta(minutes=5), record.expires_at)
         self.assertEqual("claimed", record.state)
 
-    def test_reboot_recovery_is_atomic_and_idempotent_from_all_live_states(self) -> None:
+    def test_reboot_recovery_is_atomic_and_idempotent_from_all_live_states(
+        self,
+    ) -> None:
         for index, initial in enumerate(("issued", "claimed", "running"), start=1):
             allocation_id = f"0198ef24-f800-7000-8003-{index:012d}"
             value = payload(allocation_id=allocation_id, nonce=chr(74 + index) * 43)
@@ -168,7 +295,9 @@ class RunnerLedgerTests(unittest.TestCase):
             self.assertTrue(recovered.recovery_required)
             self.assertTrue(recovered.cleanup_pending)
             self.assertRegex(recovered.cleanup_idempotency_key or "", r"^[0-9a-f]{64}$")
-            self.assertEqual(recovered, self.ledger.transition(allocation_id, "recover"))
+            self.assertEqual(
+                recovered, self.ledger.transition(allocation_id, "recover")
+            )
 
             # Crash before the external cleanup effect: reopening the ledger
             # preserves the same pending operation and idempotency key.
@@ -189,7 +318,8 @@ class RunnerLedgerTests(unittest.TestCase):
             # Crash after the idempotent external effect but before the ledger
             # commit is recovered by acknowledging with the durable same key.
             cleaned = reopened.transition(
-                allocation_id, "ack-recovery-cleanup",
+                allocation_id,
+                "ack-recovery-cleanup",
                 cleanup_idempotency_key=recovered.cleanup_idempotency_key,
                 cleanup_evidence=evidence,
             )
@@ -202,7 +332,8 @@ class RunnerLedgerTests(unittest.TestCase):
             self.assertEqual(
                 cleaned,
                 reopened.transition(
-                    allocation_id, "ack-recovery-cleanup",
+                    allocation_id,
+                    "ack-recovery-cleanup",
                     cleanup_idempotency_key=recovered.cleanup_idempotency_key,
                     cleanup_evidence=evidence,
                 ),
@@ -218,9 +349,12 @@ class RunnerLedgerTests(unittest.TestCase):
             "allocation_id": value["allocation_id"],
             "cleanup_idempotency_key": pending.cleanup_idempotency_key,
             "jobs_started": 0,
-            "registration_removed": True, "workspace_removed": True,
-            "token_removed": True, "container_removed": True,
-            "allocation_removed": True, "orphan_registrations": 0,
+            "registration_removed": True,
+            "workspace_removed": True,
+            "token_removed": True,
+            "container_removed": True,
+            "allocation_removed": True,
+            "orphan_registrations": 0,
         }
         for mutate in (
             lambda item: item.__setitem__("registration_removed", False),
@@ -231,11 +365,14 @@ class RunnerLedgerTests(unittest.TestCase):
             mutate(crossed)
             with self.assertRaises(RunnerJitError):
                 self.ledger.transition(
-                    value["allocation_id"], "ack-recovery-cleanup",
+                    value["allocation_id"],
+                    "ack-recovery-cleanup",
                     cleanup_idempotency_key=pending.cleanup_idempotency_key,
                     cleanup_evidence=crossed,
                 )
-        self.assertEqual("recovery_required", self.ledger.get(value["allocation_id"]).state)
+        self.assertEqual(
+            "recovery_required", self.ledger.get(value["allocation_id"]).state
+        )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/FacuVCanale/self-hosted-ci/schemas/runner-allocation-reservation-v1.schema.json",
+  "title": "Pre-dispatch disposable runner reservation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["allocation_reservation_version", "allocation_id", "repository_id", "repository", "head_sha", "workflow_ref", "job_name", "authority_kind", "runner_group", "scale_set_name", "labels", "image_fingerprint", "nonce", "issued_at", "expires_at", "max_jobs", "ephemeral"],
+  "properties": {
+    "allocation_reservation_version": {"const": 1},
+    "allocation_id": {"type": "string", "format": "uuid"},
+    "repository_id": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "workflow_ref": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+@refs/heads/[A-Za-z0-9._/-]+$"},
+    "job_name": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[A-Za-z0-9_. -]+$"},
+    "authority_kind": {"enum": ["personal-repository", "organization-runner-group"]},
+    "runner_group": {"type": ["string", "null"]},
+    "scale_set_name": {"type": "string", "pattern": "^wsl-jit-[0-9a-f]{32}$"},
+    "labels": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"type": "string", "pattern": "^wsl-jit-[0-9a-f]{32}$"}},
+    "image_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nonce": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "max_jobs": {"const": 1},
+    "ephemeral": {"const": true}
+  }
+}

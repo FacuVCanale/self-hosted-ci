@@ -64,36 +64,78 @@ command -v systemctl >/dev/null || die "systemd is required"
 command -v incus >/dev/null || die "Incus is not installed"
 command -v garm >/dev/null || die "GARM is not installed"
 id garm-manager >/dev/null 2>&1 || die "dedicated garm-manager account is absent"
-getent group incus-admin >/dev/null || die "dedicated Incus administrative group is absent"
-id -nG garm-manager | tr ' ' '\n' | grep -qx incus-admin || die "garm-manager cannot access the dedicated Incus provider"
-if id -nG garm-manager | tr ' ' '\n' | grep -Eq '^(sudo|admin|wheel)$'; then
-  die "garm-manager belongs to an interactive privileged group"
+if id -nG garm-manager | tr ' ' '\n' | grep -Eq '^(incus|incus-admin|sudo|admin|wheel)$'; then
+  die "garm-manager belongs to a forbidden privileged group"
 fi
 systemctl is-enabled --quiet "${SERVICE_NAME}" && die "${SERVICE_NAME} must be disabled before provisioning"
 
 install -d -o root -g root -m 0750 "${TARGET_ROOT}" "${TARGET_ROOT}/garm" "${TARGET_ROOT}/incus"
 install -d -o root -g root -m 0700 "${STATE_ROOT}"
 install -d -o root -g root -m 0700 "${STATE_ROOT}/health"
+install -d -o root -g root -m 0700 "${STATE_ROOT}/garm" "${STATE_ROOT}/outbound-worker"
 install -d -o root -g root -m 0755 "/usr/local/lib/self-hosted-ci/github_automation"
+install -d -o root -g root -m 0755 "/usr/local/libexec/self-hosted-ci"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/verify-wsl-jit-readiness.py" "/usr/local/lib/self-hosted-ci/verify-wsl-jit-readiness.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/verify-live-artifact-contract.py" "/usr/local/lib/self-hosted-ci/verify-live-artifact-contract.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/collect-wsl-jit-measurements.py" "/usr/local/lib/self-hosted-ci/collect-wsl-jit-measurements.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/collect-health-snapshot.py" "/usr/local/lib/self-hosted-ci/collect-health-snapshot.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/garm-cli-session.py" "/usr/local/lib/self-hosted-ci/garm-cli-session.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/update-health-heartbeat.py" "/usr/local/lib/self-hosted-ci/update-health-heartbeat.py"
-for module in __init__.py crypto.py host_security.py runner_boundary.py; do
-  install -o root -g root -m 0644 "${repo_root}/github_automation/${module}" "/usr/local/lib/self-hosted-ci/github_automation/${module}"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/install-wsl-jit-evidence.py" "/usr/local/lib/self-hosted-ci/install-wsl-jit-evidence.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/garm-allocation-broker.py" "/usr/local/lib/self-hosted-ci/garm-allocation-broker.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/github-live-job-verifier.py" "/usr/local/libexec/self-hosted-ci/github-live-job-verifier.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/runner-job-started-hook.py" "/usr/local/lib/self-hosted-ci/runner-job-started-hook.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/outbound-coordinator-worker.py" "/usr/local/lib/self-hosted-ci/outbound-coordinator-worker.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/install-outbound-worker-runtime.py" "/usr/local/lib/self-hosted-ci/install-outbound-worker-runtime.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/jit-pilot-terminal-monitor.py" "/usr/local/lib/self-hosted-ci/jit-pilot-terminal-monitor.py"
+install -d -o root -g root -m 0755 /usr/local/lib/self-hosted-ci/github_automation
+for python_module in __init__.py crypto.py host_security.py runner_boundary.py runner_jit.py runner_jit_broker.py github.py github_adapter.py check_delivery.py inventory.py policy.py registry.py coordinator.py outbound_worker.py worker_authority.py gatestore.py jit_pilot.py local_approval.py; do
+  install -o root -g root -m 0644 "${repo_root}/github_automation/${python_module}" "/usr/local/lib/self-hosted-ci/github_automation/${python_module}"
 done
+install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-allocation-broker.service" "/etc/systemd/system/self-hosted-ci-allocation-broker.service"
+install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-outbound-worker.service" "/etc/systemd/system/self-hosted-ci-outbound-worker.service"
+for transaction_script in prepare-incus-runner-image.sh configure-garm-jit.sh activate-garm-jit.sh deactivate-garm-jit.sh garm-jit-transaction-lib.sh; do
+  install -o root -g root -m 0755 "${repo_root}/scripts/host/${transaction_script}" "/usr/local/lib/self-hosted-ci/${transaction_script}"
+done
+"/usr/local/lib/self-hosted-ci/install-wsl-jit-evidence.py" \
+  --evidence "${evidence}" --measurement-root "$(dirname "${evidence}")" \
+  --target-root "${TARGET_ROOT}" >/dev/null
 install -o root -g root -m 0640 "${repo_root}/templates/garm/config.toml.example" "${TARGET_ROOT}/garm/config.toml.example"
 install -o root -g root -m 0640 "${repo_root}/templates/incus/runner-profile.yaml" "${TARGET_ROOT}/incus/runner-profile.yaml"
+install -d -o root -g root -m 0755 "/usr/local/share/self-hosted-ci"
+install -o root -g root -m 0644 "${repo_root}/templates/garm/garm-provider-incus.toml" "/usr/local/share/self-hosted-ci/garm-provider-incus.toml"
+install -o root -g root -m 0644 "${repo_root}/templates/garm/outbound-worker.json.example" "/usr/local/share/self-hosted-ci/outbound-worker.json.example"
+install -o root -g root -m 0644 "${repo_root}/templates/garm/worker-app-authority.json.example" "/usr/local/share/self-hosted-ci/worker-app-authority.json.example"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/install-incus-garm-tls.sh" "/usr/local/lib/self-hosted-ci/install-incus-garm-tls.sh"
+"/usr/local/lib/self-hosted-ci/install-incus-garm-tls.sh" --apply \
+  --provider-template "/usr/local/share/self-hosted-ci/garm-provider-incus.toml" \
+  --acknowledge-loopback-tls-boundary >/dev/null
+install -o root -g root -m 0755 "${repo_root}/scripts/host/install-runner-network-runtime.sh" "/usr/local/lib/self-hosted-ci/install-runner-network-runtime.sh"
+bash "${repo_root}/scripts/host/install-runner-network-runtime.sh" >/dev/null
 install -o root -g root -m 0644 "${reviewer_public_key}" "${TARGET_ROOT}/boundary-reviewer-public-key.pem"
 printf '%s\n' "${reviewer_key_fingerprint}" >"${TARGET_ROOT}/boundary-reviewer-key.sha256"
 chmod 0644 "${TARGET_ROOT}/boundary-reviewer-key.sha256"
+python3 "/usr/local/lib/self-hosted-ci/verify-wsl-jit-readiness.py" \
+  --evidence "${TARGET_ROOT}/runner-boundary-v2.json" \
+  --measurement-root "${TARGET_ROOT}/host-evidence" \
+  --reviewer-public-key "${TARGET_ROOT}/boundary-reviewer-public-key.pem" \
+  --pinned-fingerprint "${reviewer_key_fingerprint}" >/dev/null || \
+  die "installed runner-boundary evidence failed post-install verification"
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-boundary-verify.service" "/etc/systemd/system/self-hosted-ci-boundary-verify.service"
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-garm.service" "/etc/systemd/system/${SERVICE_NAME}"
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-network-policy.service" "/etc/systemd/system/self-hosted-ci-network-policy.service"
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-egress-proxy.service" "/etc/systemd/system/self-hosted-ci-egress-proxy.service"
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-health-heartbeat.service" "/etc/systemd/system/self-hosted-ci-health-heartbeat.service"
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-health-heartbeat.timer" "/etc/systemd/system/self-hosted-ci-health-heartbeat.timer"
+/usr/local/lib/self-hosted-ci/verify-live-artifact-contract.py \
+  --evidence "${TARGET_ROOT}/runner-boundary-v2.json" \
+  --measurement-root "${TARGET_ROOT}/host-evidence" \
+  --reviewer-public-key "${TARGET_ROOT}/boundary-reviewer-public-key.pem" \
+  --pinned-fingerprint "${reviewer_key_fingerprint}" >/dev/null || \
+  die "installed live runtime artifacts failed signed-contract verification"
 systemctl daemon-reload
+systemctl start self-hosted-ci-boundary-verify.service
+systemctl is-active --quiet self-hosted-ci-boundary-verify.service || die "boundary verification unit did not become active"
 systemctl enable --now self-hosted-ci-health-heartbeat.timer
 systemctl disable "${SERVICE_NAME}" >/dev/null 2>&1 || true
 rm -f "${TARGET_ROOT}/ACTIVATION_APPROVED"
