@@ -253,10 +253,13 @@ class AllocationBrokerTests(unittest.TestCase):
         self.assertNotIn(b"installdependencies.sh", decoded)
 
     def test_offline_template_keeps_full_jit_lifecycle_without_apt(self):
-        template = (
+        raw = (
             Path(__file__).resolve().parents[2]
             / "templates/garm/runner-install-offline.sh.tmpl"
-        ).read_text(encoding="utf-8")
+        ).read_bytes()
+        self.assertTrue(raw.startswith(b"#!/bin/bash\n"))
+        self.assertNotIn(b"var CloudConfigTemplate", raw)
+        template = raw.decode("utf-8")
         for required in (
             "{{ .DownloadURL }}",
             "{{ .MetadataURL }}",
