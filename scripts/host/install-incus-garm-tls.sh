@@ -57,8 +57,12 @@ systemctl is-enabled --quiet self-hosted-ci-garm.service && die 'GARM must be di
 install -d -o root -g garm-manager -m 0750 "${target_root}"
 tx="$(mktemp -d /run/self-hosted-ci-incus-tls.XXXXXX)"
 chmod 0700 "${tx}"
+created_client_material=false
 cleanup() {
   incus delete "${canary}" --project "${project}" --force >/dev/null 2>&1 || true
+  if [[ "${created_client_material}" == true ]]; then
+    rm -f -- "${client_cert}" "${client_key}" "${server_cert}" "${provider_config}"
+  fi
   rm -rf -- "${tx}"
 }
 trap cleanup EXIT
@@ -78,6 +82,7 @@ else
     -keyout "${tx}/client.key" -out "${tx}/client.crt" >/dev/null 2>&1
   install -o root -g garm-manager -m 0640 "${tx}/client.key" "${client_key}"
   install -o root -g garm-manager -m 0640 "${tx}/client.crt" "${client_cert}"
+  created_client_material=true
 fi
 install -o root -g garm-manager -m 0640 /var/lib/incus/server.crt "${server_cert}"
 install -o root -g garm-manager -m 0640 "${template}" "${provider_config}"
@@ -156,6 +161,8 @@ grep -Eiq 'privileg|restricted|not allowed' "${tx}/response.json" || die 'privil
 [[ -z "$(incus list --all-projects --format csv)" ]] || die 'TLS canaries left an Incus instance'
 [[ ! -e /etc/self-hosted-ci/ACTIVATION_APPROVED ]] || die 'TLS installation unexpectedly crossed the activation gate'
 systemctl is-enabled --quiet self-hosted-ci-garm.service && die 'TLS installation unexpectedly enabled GARM'
+
+created_client_material=false
 
 printf '{"status":"installed","endpoint":"%s","project":"%s","trust_name":"%s","trust_restricted":true,"default_project_denied":true,"privileged_instance_denied":true,"tls_files_mode":"0640","tls_files_group":"garm-manager","garm_enabled":false,"runner_registration_performed":false}\n' \
   "${endpoint}" "${project}" "${trust_name}"

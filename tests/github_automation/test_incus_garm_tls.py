@@ -79,6 +79,8 @@ class IncusGarmTlsTests(unittest.TestCase):
         self.assertIn('--resolve "${server_name}:8443:127.0.0.1"', source)
         self.assertIn("--noproxy '*'", source)
         self.assertNotIn("--insecure", source)
+        self.assertIn("created_client_material=false", source)
+        self.assertIn('rm -f -- "${client_cert}" "${client_key}"', source)
 
     def test_provisioning_installs_tls_boundary_but_keeps_activation_inert(
         self,
