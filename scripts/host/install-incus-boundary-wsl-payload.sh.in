@@ -444,9 +444,9 @@ trap cleanup_canaries EXIT
 [[ -z "$(incus list --all-projects --format csv)" ]]
 [[ -z "$(incus storage volume list "${pool}" --all-projects --format csv)" ]]
 
-# Exercise quota enforcement through a real Incus-managed custom volume.
-# Incus 6.0 reports usage.total=0 for dir-backed custom volumes even when the
-# kernel quota is active, so that API field is not used as an oracle.
+# Exercise quota enforcement through a real Incus-managed custom volume. The
+# write side must run without CAP_SYS_RESOURCE because Linux intentionally lets
+# that capability bypass hard quota limits.
 incus storage volume create "${pool}" "${canary_quota}" size=8MiB --project "${project}"
 [[ "$(incus storage volume get "${pool}" "${canary_quota}" size --project "${project}")" == '8MiB' ]] || { printf 'custom-volume configured size drift\n' >&2; exit 1; }
 quota_volume_path="/var/lib/incus/storage-pools/${pool}/custom/${project}_${canary_quota}"
@@ -454,6 +454,8 @@ quota_volume_source_path="${storage_pool_path}/custom/${project}_${canary_quota}
 [[ -d "${quota_volume_path}" && ! -L "${quota_volume_path}" ]] || { printf 'quota canary volume path is not an exact directory\n' >&2; exit 1; }
 [[ -d "${quota_volume_source_path}" && ! -L "${quota_volume_source_path}" ]] || { printf 'quota canary source path is not an exact directory\n' >&2; exit 1; }
 [[ "$(stat -c %d:%i -- "${quota_volume_path}")" == "$(stat -c %d:%i -- "${quota_volume_source_path}")" ]] || { printf 'quota canary escaped the dedicated pool\n' >&2; exit 1; }
+chown 65534:65534 "${quota_volume_path}"
+chmod 0700 "${quota_volume_path}"
 STORAGE_POOL_PATH="${storage_pool_path}" QUOTA_VOLUME_PATH="${quota_volume_path}" python3 - <<'PY'
 import errno
 import os
@@ -465,16 +467,30 @@ pool_vfs = os.statvfs(pool_path)
 if pool_vfs.f_bavail * pool_vfs.f_frsize < 64 * mib:
     raise SystemExit("insufficient backing-pool space for an unambiguous quota canary")
 
-quota_vfs = os.statvfs(path)
-# statvfs() is evaluated inside the quota-controlled custom volume. On the
-# dir driver it therefore reports the volume's 8 MiB quota, not the free space
-# of the 16 GiB backing filesystem. Require only enough room for the successful
-# side of the canary; the subsequent 2 MiB write proves the quota boundary.
+directory_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+os.setgroups([])
+os.setgid(65534)
+os.setuid(65534)
+if os.geteuid() == 0 or os.getegid() == 0:
+    raise SystemExit("quota canary retained a privileged identity")
+with open("/proc/self/status", encoding="ascii") as status_file:
+    status = dict(
+        line.split(":", 1) for line in status_file if ":" in line
+    )
+if int(status["CapEff"].strip(), 16) & (1 << 24):
+    raise SystemExit("quota canary retained CAP_SYS_RESOURCE")
+
+quota_vfs = os.fstatvfs(directory_fd)
 if quota_vfs.f_bavail * quota_vfs.f_frsize < 7 * mib:
     raise SystemExit("insufficient quota headroom for the under-limit canary")
 
-def write_exact(target, byte_count):
-    fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+def write_exact(name, byte_count):
+    fd = os.open(
+        name,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory_fd,
+    )
     try:
         chunk = b"\0" * mib
         remaining = byte_count
@@ -487,18 +503,18 @@ def write_exact(target, byte_count):
     finally:
         os.close(fd)
 
-under = os.path.join(path, "under-quota.bin")
-over = os.path.join(path, "over-quota.bin")
-write_exact(under, 7 * mib)
-if os.stat(under).st_size != 7 * mib:
+write_exact("under-quota.bin", 7 * mib)
+if os.stat("under-quota.bin", dir_fd=directory_fd, follow_symlinks=False).st_size != 7 * mib:
     raise SystemExit("under-quota write size drift")
 try:
-    write_exact(over, 2 * mib)
+    write_exact("over-quota.bin", 2 * mib)
 except OSError as exc:
     if exc.errno != errno.EDQUOT:
         raise SystemExit(f"quota crossing failed with unexpected errno {exc.errno}")
 else:
     raise SystemExit("quota crossing unexpectedly succeeded")
+finally:
+    os.close(directory_fd)
 PY
 incus storage volume delete "${pool}" "${canary_quota}" --project "${project}"
 [[ ! -e "${quota_volume_path}" && ! -e "${quota_volume_source_path}" ]]
