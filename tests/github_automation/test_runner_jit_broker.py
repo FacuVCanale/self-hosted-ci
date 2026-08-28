@@ -190,9 +190,14 @@ class AllocationBrokerTests(unittest.TestCase):
         self.assertIn(self.payload["allocation_id"], bootstrap)
         self.assertIn(self.payload["scale_set_name"], bootstrap)
         self.assertIn(
-            "ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/self-hosted-ci/bin/runner-job-started-hook.py",
+            "ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/self-hosted-ci/bin/runner-job-started-hook.sh",
             bootstrap,
         )
+        self.assertIn(
+            "exec /usr/bin/python3 /opt/self-hosted-ci/bin/runner-job-started-hook.py",
+            bootstrap,
+        )
+        self.assertIn("chmod 0755 /opt/self-hosted-ci/bin/runner-job-started-hook.sh", bootstrap)
         self.assertIn(
             "export HTTPS_PROXY=http://10.254.0.1:3128",
             bootstrap,
@@ -202,7 +207,7 @@ class AllocationBrokerTests(unittest.TestCase):
             bootstrap,
         )
         self.assertIn(
-            "DefaultEnvironment=ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/self-hosted-ci/bin/runner-job-started-hook.py HTTPS_PROXY=http://10.254.0.1:3128",
+            "DefaultEnvironment=ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/self-hosted-ci/bin/runner-job-started-hook.sh HTTPS_PROXY=http://10.254.0.1:3128",
             bootstrap,
         )
         self.assertIn(

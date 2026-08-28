@@ -462,6 +462,12 @@ chmod 0644 /etc/profile.d/self-hosted-ci-runner-proxy.sh
 printf '%s' '{hook_b64}' | base64 -d > /opt/self-hosted-ci/bin/runner-job-started-hook.py
 chown root:root /opt/self-hosted-ci/bin/runner-job-started-hook.py
 chmod 0755 /opt/self-hosted-ci/bin/runner-job-started-hook.py
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'exec /usr/bin/python3 /opt/self-hosted-ci/bin/runner-job-started-hook.py "$@"' \
+  > /opt/self-hosted-ci/bin/runner-job-started-hook.sh
+chown root:root /opt/self-hosted-ci/bin/runner-job-started-hook.sh
+chmod 0755 /opt/self-hosted-ci/bin/runner-job-started-hook.sh
 printf '%s' '{envelope_b64}' | base64 -d > /etc/self-hosted-ci/allocation.json
 printf '%s\n' '{payload["allocation_id"]}' > /etc/self-hosted-ci/allocation-id
 printf '%s\n' '{payload["scale_set_name"]}' > /etc/self-hosted-ci/scale-set-name
@@ -469,7 +475,7 @@ chown root:root /etc/self-hosted-ci/allocation.json /etc/self-hosted-ci/allocati
 chmod 0444 /etc/self-hosted-ci/allocation.json /etc/self-hosted-ci/allocation-id /etc/self-hosted-ci/scale-set-name
 printf '%s\n' \
   '[Manager]' \
-  'DefaultEnvironment=ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/self-hosted-ci/bin/runner-job-started-hook.py HTTPS_PROXY=http://10.254.0.1:3128 HTTP_PROXY=http://10.254.0.1:3128 NO_PROXY=10.254.0.1,127.0.0.1,localhost https_proxy=http://10.254.0.1:3128 http_proxy=http://10.254.0.1:3128 no_proxy=10.254.0.1,127.0.0.1,localhost' \
+  'DefaultEnvironment=ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/self-hosted-ci/bin/runner-job-started-hook.sh HTTPS_PROXY=http://10.254.0.1:3128 HTTP_PROXY=http://10.254.0.1:3128 NO_PROXY=10.254.0.1,127.0.0.1,localhost https_proxy=http://10.254.0.1:3128 http_proxy=http://10.254.0.1:3128 no_proxy=10.254.0.1,127.0.0.1,localhost' \
   > /etc/systemd/system.conf.d/self-hosted-ci-runner-hook.conf
 chown root:root /etc/systemd/system.conf.d/self-hosted-ci-runner-hook.conf
 chmod 0644 /etc/systemd/system.conf.d/self-hosted-ci-runner-hook.conf
