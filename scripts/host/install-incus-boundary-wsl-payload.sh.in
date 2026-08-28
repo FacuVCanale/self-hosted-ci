@@ -543,24 +543,38 @@ expect_policy_rejection() {
 current_phase='incus-negative-policy-canaries'
 
 expect_policy_rejection privileged 'privileg|security[.]privileged' \
-  incus init --empty "${canary_privileged}" --project "${project}" --no-profiles \
+  incus init --empty "${canary_privileged}" --project "${project}" -p "${profile}" \
   -c limits.cpu=1 -c limits.memory=64MiB -c limits.processes=64 \
-  -d root,type=disk,path=/,pool="${pool}",size=64MiB \
   -c security.privileged=true
 expect_policy_rejection nesting 'nest|security[.]nesting' \
-  incus init --empty "${canary_nesting}" --project "${project}" --no-profiles \
+  incus init --empty "${canary_nesting}" --project "${project}" -p "${profile}" \
   -c limits.cpu=1 -c limits.memory=64MiB -c limits.processes=64 \
-  -d root,type=disk,path=/,pool="${pool}",size=64MiB \
   -c security.nesting=true
-expect_policy_rejection proxy 'proxy' \
-  incus init --empty "${canary_proxy}" --project "${project}" --no-profiles \
-  -c limits.cpu=1 -c limits.memory=64MiB -c limits.processes=64 \
-  -d root,type=disk,path=/,pool="${pool}",size=64MiB \
-  -d proxy0,type=proxy,listen=tcp:127.0.0.1:1,connect=tcp:127.0.0.1:1
+
+incus init --empty "${canary_proxy}" --project "${project}" -p "${profile}" \
+  -c limits.cpu=1 -c limits.memory=64MiB -c limits.processes=64
+proxy_output=''
+if proxy_output="$(incus config device add "${canary_proxy}" proxy0 proxy \
+  listen=tcp:127.0.0.1:1 connect=tcp:127.0.0.1:1 --project "${project}" 2>&1)"; then
+  incus delete "${canary_proxy}" --project "${project}" --force
+  printf 'negative canary unexpectedly succeeded: proxy\n' >&2
+  exit 1
+fi
+incus delete "${canary_proxy}" --project "${project}" --force
+printf '%s' "${proxy_output}" | grep -Eiq 'restrict|not allowed|forbidden|project' || {
+  printf 'negative canary failed for an unrecognized reason (proxy): %s\n' "${proxy_output}" >&2
+  exit 1
+}
+printf '%s' "${proxy_output}" | grep -Eiq 'proxy' || {
+  printf 'negative canary did not prove the requested restriction (proxy): %s\n' "${proxy_output}" >&2
+  exit 1
+}
+[[ -z "$(incus list --all-projects --format csv)" ]]
+[[ -z "$(incus storage volume list "${pool}" --all-projects --format csv)" ]]
+
 expect_policy_rejection idmap 'idmap|isolat|security[.]idmap' \
-  incus init --empty "${canary_idmap}" --project "${project}" --no-profiles \
+  incus init --empty "${canary_idmap}" --project "${project}" -p "${profile}" \
   -c limits.cpu=1 -c limits.memory=64MiB -c limits.processes=64 \
-  -d root,type=disk,path=/,pool="${pool}",size=64MiB \
   -c security.idmap.isolated=false
 
 cleanup_canaries
