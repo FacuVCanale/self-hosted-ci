@@ -191,6 +191,23 @@ class AllocationBrokerTests(unittest.TestCase):
             "ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/self-hosted-ci/bin/runner-job-started-hook.py",
             bootstrap,
         )
+        self.assertIn(
+            "export HTTPS_PROXY=http://10.254.0.1:3128",
+            bootstrap,
+        )
+        self.assertIn(
+            "export NO_PROXY=10.254.0.1,127.0.0.1,localhost",
+            bootstrap,
+        )
+        self.assertIn(
+            "DefaultEnvironment=ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/self-hosted-ci/bin/runner-job-started-hook.py HTTPS_PROXY=http://10.254.0.1:3128",
+            bootstrap,
+        )
+        self.assertIn(
+            "> /etc/profile.d/self-hosted-ci-runner-proxy.sh",
+            bootstrap,
+        )
+        self.assertIn("chmod 0644 /etc/profile.d/self-hosted-ci-runner-proxy.sh", bootstrap)
         self.assertIn("systemctl daemon-reexec", bootstrap)
 
     def test_garm_cli_commands_always_recreate_the_ephemeral_session(self):

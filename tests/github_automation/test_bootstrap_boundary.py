@@ -174,7 +174,7 @@ def wsl_observation() -> dict:
     bridge = {
         "ipv4.address": "10.254.0.1/28",
         "ipv4.dhcp": "true",
-        "ipv4.dhcp.ranges": "10.254.0.2-10.254.0.2",
+        "ipv4.dhcp.ranges": "10.254.0.2-10.254.0.14",
         "ipv4.dhcp.gateway": "10.254.0.1",
         "ipv4.routing": "false",
         "ipv4.nat": "false",
@@ -300,9 +300,9 @@ def wsl_observation() -> dict:
                         "eth0": {
                             "name": "eth0",
                             "network": "ci-jit-isolated",
-                            "security.ipv4_filtering": "true",
-                            "security.ipv6_filtering": "true",
-                            "security.mac_filtering": "true",
+                            "security.ipv4_filtering": "false",
+                            "security.ipv6_filtering": "false",
+                            "security.mac_filtering": "false",
                             "type": "nic",
                         },
                     },

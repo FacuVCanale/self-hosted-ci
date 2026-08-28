@@ -57,6 +57,8 @@ class NetworkPolicyAndProxyTests(unittest.TestCase):
             source.index("ip saddr != ${runner_subnet}"),
         )
         self.assertIn("tcp dport { 3128, 8079, 8080 }", source)
+        self.assertIn("ip daddr 10.254.0.1 udp dport 53", source)
+        self.assertIn("ip daddr 10.254.0.1 tcp dport 53", source)
         self.assertIn('iifname "${bridge}" counter drop', source)
         self.assertIn('oifname "${bridge}" counter drop', source)
         self.assertIn("quarantine_policy", source)
@@ -82,7 +84,7 @@ class NetworkPolicyAndProxyTests(unittest.TestCase):
             "fc00::/7",
             "fe80::/10",
         ):
-            self.assertIn(network, source)
+            self.assertIn(network, NETWORK_SCRIPT.read_text())
         for domain in (
             ".actions.githubusercontent.com",
             ".blob.core.windows.net",
@@ -91,10 +93,7 @@ class NetworkPolicyAndProxyTests(unittest.TestCase):
         ):
             self.assertIn(domain, source)
         self.assertNotIn(" .githubusercontent.com", source)
-        self.assertLess(
-            source.index("http_access deny forbidden_v4"),
-            source.index("http_access allow github_domains"),
-        )
+        self.assertLess(source.index("http_access deny !github_domains"), source.index("http_access allow github_domains"))
         self.assertIn(
             "access_log stdio:/var/log/self-hosted-ci/squid-access.log", source
         )

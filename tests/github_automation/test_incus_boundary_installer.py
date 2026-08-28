@@ -112,6 +112,8 @@ class IncusBoundaryInstallerTests(unittest.TestCase):
             "mounted ext4 UUID drift",
             "storage image ownership, mode, size, or link-count drift",
             'incus storage create "${pool}" dir source="${storage_pool_path}"',
+            'install -d -o root -g root -m 0711 "${storage_pool_path}"',
+            "storage pool source ownership or traverse mode drift",
             "Options=loop,prjquota,nodev",
             'systemctl enable --now "${mount_unit}"',
             "RequiresMountsFor=${storage_mount}",
