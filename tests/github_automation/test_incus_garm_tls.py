@@ -100,6 +100,8 @@ class IncusGarmTlsTests(unittest.TestCase):
             "systemctl is-active --quiet self-hosted-ci-boundary-verify.service", source
         )
         self.assertIn('rm -f "${TARGET_ROOT}/ACTIVATION_APPROVED"', source)
+        self.assertIn('enabled_state="$(systemctl is-enabled', source)
+        self.assertNotIn('! systemctl is-enabled --quiet "${service}"', source)
         for transaction_script in (
             "activate-garm-jit.sh",
             "deactivate-garm-jit.sh",

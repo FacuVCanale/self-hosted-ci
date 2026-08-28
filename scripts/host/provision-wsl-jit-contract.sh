@@ -24,7 +24,9 @@ make_service_inert() {
     die "${service} has unexpected enablement state: ${enabled_state}"
   fi
   ! systemctl is-active --quiet "${service}" || die "${service} remains active"
-  ! systemctl is-enabled --quiet "${service}" || die "${service} remains enabled"
+  enabled_state="$(systemctl is-enabled "${service}" 2>/dev/null)" || true
+  [[ "${enabled_state}" != "enabled" && "${enabled_state}" != "enabled-runtime" && "${enabled_state}" != "indirect" ]] || \
+    die "${service} remains enabled"
 }
 
 usage() {
@@ -112,7 +114,9 @@ id garm-manager >/dev/null 2>&1 || die "dedicated garm-manager account is absent
 if id -nG garm-manager | tr ' ' '\n' | grep -Eq '^(incus|incus-admin|sudo|admin|wheel)$'; then
   die "garm-manager belongs to a forbidden privileged group"
 fi
-systemctl is-enabled --quiet "${SERVICE_NAME}" && die "${SERVICE_NAME} must be disabled before provisioning"
+service_enablement="$(systemctl is-enabled "${SERVICE_NAME}" 2>/dev/null)" || true
+[[ "${service_enablement}" != "enabled" && "${service_enablement}" != "enabled-runtime" && "${service_enablement}" != "indirect" ]] || \
+  die "${SERVICE_NAME} must be disabled before provisioning"
 if [[ "${contract_mode}" == "bootstrap-inert" ]]; then
   [[ ! -e "${TARGET_ROOT}/ACTIVATION_APPROVED" ]] || die "bootstrap requires activation approval to be absent"
   [[ ! -e "${TARGET_ROOT}/outbound-worker.runtime-ready" ]] || die "bootstrap requires runtime-ready state to be absent"
