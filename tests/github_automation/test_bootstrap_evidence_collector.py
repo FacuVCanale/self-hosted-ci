@@ -1,4 +1,5 @@
 from pathlib import Path
+import base64
 import re
 import shutil
 import subprocess
@@ -78,6 +79,7 @@ class BootstrapEvidenceCollectorTests(unittest.TestCase):
             "Complete-WslCollectionCleanup",
             "Assert-WslCollectorStageAbsent",
             "cleanup_verified=`$true",
+            "exec(base64.b64decode(sys.argv.pop(1)))",
         ):
             self.assertIn(token, self.source)
 
@@ -89,20 +91,22 @@ class BootstrapEvidenceCollectorTests(unittest.TestCase):
         )
         self.assertIsNotNone(match)
         cleanup_program = match.group(1)
+        encoded_program = base64.b64encode(cleanup_program.encode("utf-8")).decode("ascii")
+        launcher = "import base64,sys;exec(base64.b64decode(sys.argv.pop(1)))"
         with tempfile.TemporaryDirectory() as parent:
             root = Path(parent) / "stage"
             root.mkdir()
             target = root / "collector.py"
             target.write_text("payload", encoding="utf-8")
             first = subprocess.run(
-                ["python3", "-c", cleanup_program, str(root), str(target)],
+                ["python3", "-c", launcher, encoded_program, str(root), str(target)],
                 text=True,
                 capture_output=True,
                 check=False,
             )
             self.assertEqual(0, first.returncode, first.stderr)
             second = subprocess.run(
-                ["python3", "-c", cleanup_program, str(root), str(target)],
+                ["python3", "-c", launcher, encoded_program, str(root), str(target)],
                 text=True,
                 capture_output=True,
                 check=False,
@@ -113,7 +117,7 @@ class BootstrapEvidenceCollectorTests(unittest.TestCase):
             target.write_text("payload", encoding="utf-8")
             (root / "unexpected").write_text("residue", encoding="utf-8")
             dirty = subprocess.run(
-                ["python3", "-c", cleanup_program, str(root), str(target)],
+                ["python3", "-c", launcher, encoded_program, str(root), str(target)],
                 text=True,
                 capture_output=True,
                 check=False,
