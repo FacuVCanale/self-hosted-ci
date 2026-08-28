@@ -167,7 +167,11 @@ systemctl is-active incus.service >/dev/null
 [[ "$(systemctl is-active "${mount_unit}")" == 'active' ]]
 verify_storage_mount
 systemctl show incus.service --property=DropInPaths --value | tr ' ' '\n' | grep -Fxq -- "${incus_dropin_path}" || { printf 'Incus storage drop-in is not loaded\n' >&2; exit 1; }
-install -d -o root -g root -m 0700 "${storage_pool_path}"
+# The dir driver bind-mounts this path as the container storage-pool root.
+# LXC's unprivileged setup process needs traverse-only access to reach its
+# remapped rootfs; 0711 exposes no directory listing or file contents.
+install -d -o root -g root -m 0711 "${storage_pool_path}"
+[[ "$(stat -c %u:%g:%a -- "${storage_pool_path}")" == '0:0:711' ]] || { printf 'storage pool source ownership or traverse mode drift\n' >&2; exit 1; }
 
 # Initialization is deliberately a one-time database transition. Existing
 # Incus state is never reinitialized or replaced by this installer.
@@ -246,7 +250,7 @@ current_phase='incus-isolated-network'
 readonly -a isolated_network_config=(
   'ipv4.address=10.254.0.1/28'
   'ipv4.dhcp=true'
-  'ipv4.dhcp.ranges=10.254.0.2-10.254.0.2'
+  'ipv4.dhcp.ranges=10.254.0.2-10.254.0.14'
   'ipv4.dhcp.gateway=10.254.0.1'
   'ipv4.routing=false'
   'ipv4.nat=false'
@@ -318,7 +322,7 @@ if ! incus profile device get "${profile}" root type --project "${project}" >/de
   incus profile device add "${profile}" root disk path=/ pool="${pool}" size=12GiB --project "${project}"
 fi
 if ! incus profile device get "${profile}" eth0 type --project "${project}" >/dev/null 2>&1; then
-  incus profile device add "${profile}" eth0 nic network="${bridge}" name=eth0 security.mac_filtering=true security.ipv4_filtering=true security.ipv6_filtering=true --project "${project}"
+  incus profile device add "${profile}" eth0 nic network="${bridge}" name=eth0 security.mac_filtering=false security.ipv4_filtering=false security.ipv6_filtering=false --project "${project}"
 fi
 printf '%s\n' '{
   "config": {
@@ -332,7 +336,7 @@ printf '%s\n' '{
   "description": "",
   "devices": {
     "root": {"type":"disk","path":"/","pool":"ci-jit-dedicated","size":"12GiB"},
-    "eth0": {"type":"nic","network":"ci-jit-isolated","name":"eth0","security.mac_filtering":"true","security.ipv4_filtering":"true","security.ipv6_filtering":"true"}
+    "eth0": {"type":"nic","network":"ci-jit-isolated","name":"eth0","security.mac_filtering":"false","security.ipv4_filtering":"false","security.ipv6_filtering":"false"}
   }
 }' | incus profile edit "${profile}" --project "${project}"
 
@@ -356,7 +360,7 @@ if network.get("type") != "bridge":
 network_config = network.get("config", {})
 required_network = {
     "ipv4.address": "10.254.0.1/28", "ipv4.dhcp": "true",
-    "ipv4.dhcp.ranges": "10.254.0.2-10.254.0.2",
+    "ipv4.dhcp.ranges": "10.254.0.2-10.254.0.14",
     "ipv4.dhcp.gateway": "10.254.0.1",
     "ipv4.routing": "false", "ipv4.nat": "false",
     "ipv4.firewall": "false", "ipv6.address": "none",
@@ -413,7 +417,7 @@ root = devices["root"]
 if root != {"type": "disk", "path": "/", "pool": "ci-jit-dedicated", "size": "12GiB"}:
     raise SystemExit("root is not the sole exact disk device")
 eth0 = devices["eth0"]
-if eth0 != {"type": "nic", "network": "ci-jit-isolated", "name": "eth0", "security.mac_filtering": "true", "security.ipv4_filtering": "true", "security.ipv6_filtering": "true"}:
+if eth0 != {"type": "nic", "network": "ci-jit-isolated", "name": "eth0", "security.mac_filtering": "false", "security.ipv4_filtering": "false", "security.ipv6_filtering": "false"}:
     raise SystemExit("eth0 is not bound only to the isolated bridge")
 for device in devices.values():
     if device.get("type") in {"proxy", "unix-char", "unix-block"}:

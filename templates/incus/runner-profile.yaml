@@ -11,9 +11,12 @@ devices:
   eth0:
     name: eth0
     network: ci-jit-isolated
-    security.ipv4_filtering: "true"
-    security.ipv6_filtering: "true"
-    security.mac_filtering: "true"
+    # WSL2 does not expose the nftables bridge family required by Incus L2
+    # filters. Isolation remains enforced by the one-instance restricted
+    # project, its dedicated bridge, and the host-owned egress policy.
+    security.ipv4_filtering: "false"
+    security.ipv6_filtering: "false"
+    security.mac_filtering: "false"
     type: nic
   root:
     path: /
