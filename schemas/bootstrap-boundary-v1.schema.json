@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/FacuVCanale/self-hosted-ci/schemas/bootstrap-boundary-v1.schema.json",
+  "title": "WSL JIT inert provisioning bootstrap boundary v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bootstrap_boundary_version", "issued_at", "expires_at", "nonce", "authorization", "windows_observation", "wsl_observation", "public_manifest", "attestation"],
+  "properties": {
+    "bootstrap_boundary_version": {"const": 1},
+    "issued_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$"},
+    "expires_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T.*Z$"},
+    "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "authorization": {
+      "type": "object", "additionalProperties": false,
+      "required": ["operation", "mode", "activation_authorized", "github_contact_authorized", "runtime_ready_authorized", "runner_registration_authorized"],
+      "properties": {
+        "operation": {"const": "provision-wsl-jit-contract"},
+        "mode": {"const": "inert-only"},
+        "activation_authorized": {"const": false},
+        "github_contact_authorized": {"const": false},
+        "runtime_ready_authorized": {"const": false},
+        "runner_registration_authorized": {"const": false}
+      }
+    },
+    "windows_observation": {"$ref": "#/$defs/observation"},
+    "wsl_observation": {"$ref": "#/$defs/observation"},
+    "public_manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bootstrap_public_manifest_version", "mapping_digest", "artifact_count", "sha256"],
+      "properties": {
+        "bootstrap_public_manifest_version": {"const": 1},
+        "mapping_digest": {"const": "2419930b80c9b10d89b9f485ae60757301e3e23d9b72ef18e28f31b951a591d7"},
+        "artifact_count": {"const": 61},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "attestation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["attestation_version", "signer_fingerprint", "signature"],
+      "properties": {
+        "attestation_version": {"const": 1},
+        "signer_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "signature": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}$"}
+      }
+    }
+  },
+  "$defs": {
+    "observation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "observed_at", "sha256"],
+      "properties": {
+        "schema": {"type": "string"},
+        "collector": {"type": "string"},
+        "schema_version": {"const": 1},
+        "observed_at": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "oneOf": [
+        {"required": ["schema"], "not": {"required": ["collector"]}},
+        {"required": ["collector"], "not": {"required": ["schema"]}}
+      ]
+    }
+  }
+}
