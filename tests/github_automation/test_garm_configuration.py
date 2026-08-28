@@ -22,10 +22,20 @@ class GarmConfigurationTests(unittest.TestCase):
     def test_garm_identity_can_traverse_the_protected_configuration_root(self):
         provisioner = (ROOT / "scripts/host/provision-wsl-jit-contract.sh").read_text()
         configurator = (ROOT / "scripts/host/configure-garm-jit.sh").read_text()
-        expected = 'install -d -o root -g garm-manager -m 0750 "${TARGET_ROOT}" "${TARGET_ROOT}/garm"'
-        self.assertIn(expected, provisioner)
         self.assertIn(
-            "install -d -o root -g garm-manager -m 0750 /etc/self-hosted-ci /etc/self-hosted-ci/garm",
+            'install -d -o root -g garm-manager -m 0751 "${TARGET_ROOT}"',
+            provisioner,
+        )
+        self.assertIn(
+            'install -d -o root -g garm-manager -m 0750 "${TARGET_ROOT}/garm"',
+            provisioner,
+        )
+        self.assertIn(
+            "install -d -o root -g garm-manager -m 0751 /etc/self-hosted-ci",
+            configurator,
+        )
+        self.assertIn(
+            "install -d -o root -g garm-manager -m 0750 /etc/self-hosted-ci/garm",
             configurator,
         )
         self.assertIn(
@@ -70,6 +80,13 @@ class GarmConfigurationTests(unittest.TestCase):
         self.assertGreaterEqual(configurator.count("if inventory is None: inventory=[]"), 2)
         self.assertIn("if scale_sets is None: scale_sets=[]", configurator)
         self.assertIn("if instances is None: instances=[]", configurator)
+
+    def test_canary_inputs_are_written_root_only(self):
+        configurator = (ROOT / "scripts/host/configure-garm-jit.sh").read_text()
+        self.assertIn(
+            "for path,value,mode in ((broker_path,broker,0o600),(health_path,state,0o600)):",
+            configurator,
+        )
 
     def test_plan_is_machine_readable_and_inert(self) -> None:
         result = subprocess.run(

@@ -141,6 +141,25 @@ class WorkerAuthorityTests(unittest.TestCase):
             ):
                 self.authenticate(*auth_responses(**mutation))
 
+    def test_token_expiry_allows_only_bounded_github_server_clock_skew(self) -> None:
+        accepted = auth_responses(
+            token=lambda value: value.update(
+                expires_at=(NOW + timedelta(hours=1, seconds=60))
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        )
+        self.authenticate(*accepted)
+        rejected = auth_responses(
+            token=lambda value: value.update(
+                expires_at=(NOW + timedelta(hours=1, seconds=61))
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        )
+        with self.assertRaises(WorkerAuthorityError):
+            self.authenticate(*rejected)
+
     def test_minimal_client_uses_only_fixed_repository_workflow_run_and_jobs(
         self,
     ) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 import tempfile
 import unittest
 
@@ -191,6 +192,68 @@ class AllocationBrokerTests(unittest.TestCase):
             bootstrap,
         )
         self.assertIn("systemctl daemon-reexec", bootstrap)
+
+    def test_garm_cli_commands_always_recreate_the_ephemeral_session(self):
+        hook = Path(self.tempdir.name) / "hook.py"
+        hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        driver = GarmCliAllocationDriver(
+            {
+                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "provider_name": "incus_ci_jit",
+                "image_alias": "runner-pinned",
+                "image_fingerprint": "b" * 64,
+                "targets": {},
+            },
+            hook,
+        )
+        completed = mock.Mock(returncode=0, stdout="[]")
+        with mock.patch("subprocess.run", return_value=completed) as run:
+            self.assertEqual([], driver._run("scaleset", "list", "--repo", "id"))
+        self.assertEqual(
+            [
+                "/usr/local/lib/self-hosted-ci/garm-cli-session.py",
+                "run",
+                "--",
+                "--format",
+                "json",
+                "scaleset",
+                "list",
+                "--repo",
+                "id",
+            ],
+            run.call_args.args[0],
+        )
+
+    def test_garm_omitempty_false_and_zero_fields_preserve_disabled_jit_contract(self):
+        hook = Path(self.tempdir.name) / "hook.py"
+        hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        driver = GarmCliAllocationDriver(
+            {
+                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "provider_name": "incus_ci_jit",
+                "image_alias": "runner-pinned",
+                "image_fingerprint": "b" * 64,
+                "targets": {},
+            },
+            hook,
+        )
+        driver._run = mock.Mock(return_value={"id": 1, "name": "jit", "max_runners": 1})
+        self.assertEqual(
+            {"id": 1, "name": "jit", "max_runners": 1},
+            driver._show_exact("1", "jit", False),
+        )
+
+    def test_broker_units_wait_for_authenticated_garm_readiness(self):
+        for name in (
+            "self-hosted-ci-allocation-broker.service",
+            "self-hosted-ci-canary-broker.service",
+        ):
+            source = (Path(__file__).parents[2] / "packaging/systemd" / name).read_text()
+            self.assertIn("garm-cli-session.py ensure", source)
+            self.assertIn("&& /usr/local/lib/self-hosted-ci/garm-allocation-broker.py recover", source)
+            self.assertIn('[ "$i" -lt 60 ]', source)
+            self.assertIn("Environment=INCUS_CONF=/run/self-hosted-ci/incus-client", source)
+            self.assertIn("/run/self-hosted-ci", source)
 
     def test_hook_uses_only_fixed_bridge_local_broker_before_steps(self):
         source = (

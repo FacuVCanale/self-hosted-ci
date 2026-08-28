@@ -127,7 +127,8 @@ if [[ "${contract_mode}" == "bootstrap-inert" ]]; then
   done
 fi
 
-install -d -o root -g garm-manager -m 0750 "${TARGET_ROOT}" "${TARGET_ROOT}/garm"
+install -d -o root -g garm-manager -m 0751 "${TARGET_ROOT}"
+install -d -o root -g garm-manager -m 0750 "${TARGET_ROOT}/garm"
 install -d -o root -g root -m 0750 "${TARGET_ROOT}/incus"
 install -d -o root -g root -m 0700 "${STATE_ROOT}"
 install -d -o root -g root -m 0700 "${STATE_ROOT}/health"

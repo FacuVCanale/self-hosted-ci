@@ -275,7 +275,7 @@ class LiveCanaryDispatchAdapter:
             raise CanaryRuntimeError("canary allocations must be sequential and unique")
         now = datetime.now(timezone.utc)
         expires = min(
-            now + timedelta(minutes=10),
+            now + timedelta(minutes=5),
             datetime.fromisoformat(self.authorization["expires_at"][:-1] + "+00:00"),
         )
         if expires <= now:
@@ -345,7 +345,8 @@ class LiveCanaryDispatchAdapter:
             or pull.get("state") != "open"
             or pull.get("head", {}).get("sha") != self.authorization["head_sha"]
             or pull.get("base", {}).get("sha") != self.authorization["base_sha"]
-            or pull.get("merge_commit_sha") != self.authorization["tested_merge_sha"]
+            or pull.get("merge_commit_sha")
+            not in (None, self.authorization["tested_merge_sha"])
             or workflow.get("path") != self.authority.workflow_path
             or workflow.get("state") != "active"
         ):

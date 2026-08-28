@@ -10,7 +10,7 @@ Type=simple
 User=root
 Group=root
 ExecStartPre=/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py verify
-ExecStartPre=/usr/local/lib/self-hosted-ci/garm-allocation-broker.py recover
+ExecStartPre=/bin/sh -c 'i=0; until /usr/local/lib/self-hosted-ci/garm-cli-session.py ensure >/dev/null 2>&1 && /usr/local/lib/self-hosted-ci/garm-allocation-broker.py recover >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 60 ] || exit 1; sleep 1; done'
 ExecStart=/usr/local/lib/self-hosted-ci/garm-allocation-broker.py serve
 Restart=on-failure
 RestartSec=2s
@@ -18,7 +18,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/self-hosted-ci/garm /var/lib/self-hosted-ci/canary
+ReadWritePaths=/var/lib/self-hosted-ci/garm /var/lib/self-hosted-ci/canary /run/self-hosted-ci
+Environment=INCUS_CONF=/run/self-hosted-ci/incus-client
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictRealtime=true

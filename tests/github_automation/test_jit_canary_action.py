@@ -77,6 +77,22 @@ class JitCanaryActionTests(unittest.TestCase):
         self.assertEqual("success", output["scenario"])
         self.assertEqual(auth["tested_merge_sha"], output["tested_merge_sha"])
 
+    def test_app_pr_response_may_omit_synthetic_merge_sha(self):
+        module = load_action()
+        auth = authorization()
+        package = {"canary_package_version": 1, "scenario": "success", "runner_label": "wsl-jit-" + "8" * 32, "authorization": sign_canary_authorization(auth, PRIVATE)}
+        env = {"GITHUB_REPOSITORY": auth["repository"], "GITHUB_REPOSITORY_ID": "123", "GITHUB_SHA": auth["dispatch_sha"], "GITHUB_WORKFLOW_REF": auth["workflow_ref"], "GITHUB_TOKEN": "token"}
+
+        class AppApi(Api):
+            def __call__(self, path, token):
+                value = super().__call__(path, token)
+                if path.endswith("/pulls/7"):
+                    value["merge_commit_sha"] = None
+                return value
+
+        output = module.validate_package(json.dumps(package).encode(), public_key_pem=PUBLIC, pinned_fingerprint=FINGERPRINT, environment=env, api=AppApi(), now=lambda: NOW)
+        self.assertEqual(auth["tested_merge_sha"], output["tested_merge_sha"])
+
     def test_tampering_or_dispatch_drift_fails_closed(self):
         module = load_action()
         auth = authorization()

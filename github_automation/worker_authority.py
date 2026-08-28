@@ -21,6 +21,7 @@ API_ROOT = "https://api.github.com"
 API_VERSION = "2026-03-10"
 WORKER_PERMISSIONS = {"metadata": "read", "pull_requests": "read", "actions": "write"}
 MAX_TOKEN_TTL = timedelta(hours=1)
+MAX_SERVER_CLOCK_SKEW = timedelta(seconds=60)
 TOKEN_SAFETY_MARGIN = timedelta(seconds=30)
 _REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _SHA = re.compile(r"[0-9a-f]{40}")
@@ -401,7 +402,7 @@ class WorkerGitHubClient:
             or repository.get("id") != self.authority.repository_id
             or repository.get("full_name") != self.authority.repository
             or expires_at.tzinfo is None
-            or not now < expires_at <= now + MAX_TOKEN_TTL
+            or not now < expires_at <= now + MAX_TOKEN_TTL + MAX_SERVER_CLOCK_SKEW
         ):
             raise WorkerAuthorityError("worker installation token authority mismatch")
         return WorkerInstallationToken(

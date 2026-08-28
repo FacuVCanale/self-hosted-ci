@@ -145,12 +145,12 @@ with tarfile.open(source, "r:") as archive:
         raise SystemExit("canary bundle layout is invalid")
     archive.extractall(target, numeric_owner=True, filter="data")
 PY
-install -d -o root -g root -m 0700 /etc/self-hosted-ci
+install -d -o root -g garm-manager -m 0751 /etc/self-hosted-ci
 install -o root -g root -m 0600 "$work/canary/authorization.json" /etc/self-hosted-ci/canary-authorization.json
 install -o root -g root -m 0600 "$work/canary/runtime-config.json" /etc/self-hosted-ci/canary-runtime.json
 /usr/local/lib/self-hosted-ci/verify-jit-canary-authorization.py \
   --authorization /etc/self-hosted-ci/canary-authorization.json \
-  --reviewer-public-key /etc/self-hosted-ci/boundary-reviewer-public-key.pem \
+  --reviewer-public-key /etc/self-hosted-ci/bootstrap/reviewer-public-key.pem \
   --pinned-fingerprint "$reviewer_fingerprint" >"$work/verified.json"
 python3 - "$work/verified.json" "$nonce" <<'PY'
 import json, pathlib, sys
@@ -159,8 +159,9 @@ if value.get("authorized") is not True or value.get("nonce") != sys.argv[2]:
     raise SystemExit("canary nonce or authorization verification mismatch")
 PY
 args=(execute --config /etc/self-hosted-ci/canary-runtime.json --authorization /etc/self-hosted-ci/canary-authorization.json)
+export PYTHONPATH=/opt/self-hosted-ci/source
 set +e
-/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py "${args[@]}"
+/opt/self-hosted-ci/source/scripts/host/run-wsl-jit-canary-matrix.py "${args[@]}"
 status=$?
 set -e
 if [[ "$status" == 75 && "$phase" == initial ]]; then
@@ -168,7 +169,7 @@ if [[ "$status" == 75 && "$phase" == initial ]]; then
   exit 75
 fi
 [[ "$status" == 0 ]] || exit "$status"
-/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py production-fence
+/opt/self-hosted-ci/source/scripts/host/run-wsl-jit-canary-matrix.py production-fence
 printf '{"status":"terminal","nonce":"%s","runtime_empty":true,"production_activation_changed":false,"outbound_worker_started":false}\n' "$nonce"
 '@
     $payloadB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($linuxPayload))
