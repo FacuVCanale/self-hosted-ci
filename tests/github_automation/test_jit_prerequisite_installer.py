@@ -85,28 +85,22 @@ class JitPrerequisiteInstallerTests(unittest.TestCase):
             "/usr/local/libexec/garm/garm-provider-incus",
             '"incus=${incus_version}"',
             "dnsmasq-base",
-            "dpkg-query -W -f='${Status}' dnsmasq-base",
+            "for package in e2fsprogs util-linux dnsmasq-base nftables squid",
             "apt-get remove -y dnsmasq",
-            "command -v dnsmasq",
+            "for command in dnsmasq nft squid mkfs.ext4",
             "dnsmasq --version",
             "dnsmasq.service",
             "e2fsprogs",
             "util-linux",
-            "command -v mkfs.ext4",
-            "command -v losetup",
-            "command -v tune2fs",
-            "command -v findmnt",
-            "command -v mountpoint",
-            "command -v systemd-escape",
-            "command -v blockdev",
-            "command -v blkid",
+            "mkfs.ext4 losetup tune2fs findmnt mountpoint truncate systemd-escape blockdev blkid",
             "grep -qw ext4 /proc/filesystems",
             "loop devices",
             "apt-mark hold incus",
             "sha256sum --check --status",
             "nftables",
             "squid",
-            "systemctl disable --now squid.service nftables.service",
+            "make_service_inert squid.service false",
+            "make_service_inert nftables.service false",
             '"dnsmasq_base_installed":true',
             '"dnsmasq_service_absent":true',
             '"nftables_installed":true',
@@ -124,12 +118,43 @@ class JitPrerequisiteInstallerTests(unittest.TestCase):
             "/usr/local/bin/garm --version",
             "pgrep -x garm",
             "an enabled GARM-related unit remains",
-            "systemctl disable --now garm.service self-hosted-ci-garm.service",
+            "make_service_inert garm.service true",
+            "make_service_inert self-hosted-ci-garm.service true",
             'runner_registration_performed":false',
         ):
             self.assertIn(token, source)
         for forbidden in ("config.sh", "--url", "--token", "runner register"):
             self.assertNotIn(forbidden, source)
+
+    def test_payload_failures_are_phase_diagnostic_and_service_checks_fail_closed(
+        self,
+    ) -> None:
+        source = PAYLOAD.read_text(encoding="utf-8")
+        for token in (
+            "set -Eeuo pipefail",
+            "export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'",
+            "trap 'report_error \"$?\" \"$LINENO\" \"$BASH_COMMAND\"' ERR",
+            "phase='apt-installation'",
+            "phase='package-postconditions'",
+            "phase='garm-binary-installation'",
+            "phase='garm-identity'",
+            "phase='final-inertness'",
+            "JIT prerequisite payload failed: phase=%s line=%s exit=%s command=%s",
+            "JIT prerequisite postcondition failed: phase=%s detail=%s",
+            "safe_command",
+            "require_installed_package",
+            "require_command",
+            "require_service_absent dnsmasq.service",
+            "make_service_inert squid.service false",
+            "make_service_inert nftables.service false",
+            "cannot establish enabled state for ${unit}",
+            "${unit} has unsafe active state ${active_state}",
+            "${unit} has unsafe enabled state ${enabled_state}",
+        ):
+            self.assertIn(token, source)
+        self.assertNotIn("! systemctl", source)
+        self.assertNotIn("systemctl disable --now", source)
+        self.assertNotRegex(source, r"systemctl[^\n]+\|\| true")
 
     def test_garm_021_config_template_uses_current_schema_and_placeholders(
         self,

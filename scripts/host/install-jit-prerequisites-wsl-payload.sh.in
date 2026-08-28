@@ -1,5 +1,116 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+
+phase='bootstrap'
+tx=''
+
+safe_command() {
+  local command="${1//$'\n'/ }"
+  local lowered="${command,,}"
+  case "${lowered}" in
+    *token*|*secret*|*password*|*credential*|*authorization*|*private*key*)
+      printf '<redacted>'
+      ;;
+    *)
+      printf '%.240s' "${command}"
+      ;;
+  esac
+}
+
+report_error() {
+  local status="$1"
+  local line="$2"
+  local command
+  trap - ERR
+  command="$(safe_command "$3")"
+  printf 'JIT prerequisite payload failed: phase=%s line=%s exit=%s command=%s\n' \
+    "${phase}" "${line}" "${status}" "${command}" >&2
+  exit "${status}"
+}
+
+cleanup() {
+  local status=$?
+  trap - ERR EXIT
+  set +e
+  if [[ -n "${tx}" && -e "${tx}" ]] && ! rm -rf -- "${tx}"; then
+    printf 'JIT prerequisite payload cleanup failed: phase=cleanup path=/var/tmp/self-hosted-ci-jit-prereqs.*\n' >&2
+    [[ "${status}" -ne 0 ]] && exit "${status}"
+    exit 1
+  fi
+  exit "${status}"
+}
+
+die() {
+  printf 'JIT prerequisite postcondition failed: phase=%s detail=%s\n' "${phase}" "$1" >&2
+  exit 1
+}
+
+require_installed_package() {
+  local package="$1"
+  local status
+  if ! status="$(dpkg-query -W -f='${Status}' "${package}" 2>&1)"; then
+    die "package ${package} is not queryable"
+  fi
+  [[ "${status}" == 'install ok installed' ]] || die "package ${package} is not installed"
+}
+
+require_command() {
+  local command="$1"
+  local resolved
+  resolved="$(command -v "${command}")" || die "command ${command} is absent from pinned PATH"
+  [[ "${resolved}" == /* && -x "${resolved}" ]] || die "command ${command} did not resolve to an executable absolute path"
+}
+
+service_property() {
+  local unit="$1"
+  local property="$2"
+  local value
+  if ! value="$(systemctl show "${unit}" --property="${property}" --value 2>&1)"; then
+    die "cannot inspect ${unit} ${property}"
+  fi
+  printf '%s' "${value}"
+}
+
+require_service_absent() {
+  local unit="$1"
+  local load_state
+  load_state="$(service_property "${unit}" LoadState)"
+  [[ "${load_state}" == 'not-found' ]] || die "${unit} remains loaded (${load_state})"
+}
+
+make_service_inert() {
+  local unit="$1"
+  local allow_absent="$2"
+  local load_state enabled_state active_state
+  load_state="$(service_property "${unit}" LoadState)"
+  if [[ "${load_state}" == 'not-found' ]]; then
+    [[ "${allow_absent}" == true ]] || die "${unit} is unexpectedly absent"
+    return
+  fi
+  [[ "${load_state}" == 'loaded' ]] || die "${unit} has unsafe load state ${load_state}"
+  systemctl stop "${unit}" || die "could not stop ${unit}"
+  if enabled_state="$(systemctl is-enabled "${unit}" 2>&1)"; then
+    :
+  else
+    [[ "${enabled_state}" == 'disabled' ]] || die "cannot establish enabled state for ${unit} (${enabled_state})"
+  fi
+  if [[ "${enabled_state}" != 'disabled' ]]; then
+    systemctl disable "${unit}" || die "could not disable ${unit} from ${enabled_state}"
+  fi
+  if active_state="$(systemctl is-active "${unit}" 2>&1)"; then
+    die "${unit} remains active (${active_state})"
+  fi
+  [[ "${active_state}" == 'inactive' ]] || die "${unit} has unsafe active state ${active_state}"
+  if enabled_state="$(systemctl is-enabled "${unit}" 2>&1)"; then
+    die "${unit} remains enabled (${enabled_state})"
+  fi
+  [[ "${enabled_state}" == 'disabled' ]] || die "${unit} has unsafe enabled state ${enabled_state}"
+}
+
+trap 'report_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+trap cleanup EXIT
 
 readonly expected_distro='Ubuntu-24.04-CI'
 readonly incus_version='@@INCUS_VERSION@@'
@@ -12,10 +123,8 @@ readonly garm_cli_url='https://github.com/cloudbase/garm/releases/download/v0.2.
 readonly garm_provider_incus_version='0.1.5'
 readonly garm_provider_incus_sha256='1489b5f9b3f01528e338c604c13dabe8321ed6f1bc6de77c7344119d7731c43f'
 readonly garm_provider_incus_url='https://github.com/cloudbase/garm-provider-incus/releases/download/v0.1.5/garm-provider-incus-linux-amd64.tgz'
-readonly tx="$(mktemp -d /var/tmp/self-hosted-ci-jit-prereqs.XXXXXX)"
-
-cleanup() { rm -rf -- "${tx}"; }
-trap cleanup EXIT
+tx="$(mktemp -d /var/tmp/self-hosted-ci-jit-prereqs.XXXXXX)"
+readonly tx
 
 [[ "${EUID}" -eq 0 ]] || { printf 'payload requires WSL root\n' >&2; exit 1; }
 [[ "${WSL_DISTRO_NAME:-}" == "${expected_distro}" ]] || { printf 'unexpected WSL distro\n' >&2; exit 1; }
@@ -26,8 +135,11 @@ trap cleanup EXIT
 
 # Any pre-existing manager is stopped first. This installer never supplies a
 # GARM config, GitHub credential, registration token, pool, or runner.
-systemctl disable --now garm.service self-hosted-ci-garm.service >/dev/null 2>&1 || true
+phase='pre-install-inertness'
+make_service_inert garm.service true
+make_service_inert self-hosted-ci-garm.service true
 
+phase='apt-installation'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl dnsmasq-base e2fsprogs nftables squid util-linux "incus=${incus_version}"
@@ -38,35 +150,25 @@ if dpkg-query -W -f='${Status}' dnsmasq 2>/dev/null | grep -Fxq 'install ok inst
   apt-get remove -y dnsmasq
 fi
 apt-mark hold incus >/dev/null
-[[ "$(dpkg-query -W -f='${Version}' incus)" == "${incus_version}" ]]
-dpkg-query -W -f='${Status}' e2fsprogs | grep -Fxq 'install ok installed'
-dpkg-query -W -f='${Status}' util-linux | grep -Fxq 'install ok installed'
-dpkg-query -W -f='${Status}' dnsmasq-base | grep -Fxq 'install ok installed'
-command -v dnsmasq >/dev/null
-dnsmasq --version >/dev/null
-! systemctl is-enabled dnsmasq.service >/dev/null 2>&1
-! systemctl is-active dnsmasq.service >/dev/null 2>&1
-systemctl disable --now squid.service nftables.service >/dev/null 2>&1 || true
-dpkg-query -W -f='${Status}' nftables | grep -Fxq 'install ok installed'
-dpkg-query -W -f='${Status}' squid | grep -Fxq 'install ok installed'
-command -v nft >/dev/null
-command -v squid >/dev/null
-! systemctl is-enabled squid.service >/dev/null 2>&1
-! systemctl is-active squid.service >/dev/null 2>&1
-! systemctl is-enabled nftables.service >/dev/null 2>&1
-command -v mkfs.ext4 >/dev/null
-command -v losetup >/dev/null
-command -v tune2fs >/dev/null
-command -v findmnt >/dev/null
-command -v mountpoint >/dev/null
-command -v truncate >/dev/null
-command -v systemd-escape >/dev/null
-command -v blockdev >/dev/null
-command -v blkid >/dev/null
+systemctl daemon-reload
+
+phase='package-postconditions'
+[[ "$(dpkg-query -W -f='${Version}' incus)" == "${incus_version}" ]] || die "Incus package version drifted"
+for package in e2fsprogs util-linux dnsmasq-base nftables squid; do
+  require_installed_package "${package}"
+done
+for command in dnsmasq nft squid mkfs.ext4 losetup tune2fs findmnt mountpoint truncate systemd-escape blockdev blkid; do
+  require_command "${command}"
+done
+dnsmasq --version >/dev/null || die "dnsmasq executable is not functional"
+require_service_absent dnsmasq.service
+make_service_inert squid.service false
+make_service_inert nftables.service false
 grep -qw ext4 /proc/filesystems || { printf 'the WSL kernel does not expose ext4 support\n' >&2; exit 1; }
 grep -Eq '(^|[[:space:]])loop([[:space:]]|$)' /proc/devices || { printf 'the WSL kernel does not expose loop devices\n' >&2; exit 1; }
-[[ "$(apt-mark showhold incus)" == incus ]]
+[[ "$(apt-mark showhold incus)" == incus ]] || die "Incus apt hold is absent"
 
+phase='garm-binary-installation'
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
   --output "${tx}/garm.tgz" "${garm_url}"
 printf '%s  %s\n' "${garm_sha256}" "${tx}/garm.tgz" | sha256sum --check --status
@@ -97,6 +199,7 @@ install -o root -g root -m 0755 "${tx}/garm-provider-incus" /usr/local/libexec/g
 [[ "$(stat -c '%U:%G:%a' /usr/local/libexec/garm)" == root:root:755 ]]
 [[ "$(stat -c '%U:%G:%a' /usr/local/libexec/garm/garm-provider-incus)" == root:root:755 ]]
 
+phase='garm-identity'
 if ! id garm-manager >/dev/null 2>&1; then
   useradd --system --create-home --home-dir /var/lib/garm --shell /usr/sbin/nologin garm-manager
 fi
@@ -116,17 +219,20 @@ for forbidden in sudo admin wheel; do
   fi
 done
 
-systemctl disable --now garm.service self-hosted-ci-garm.service >/dev/null 2>&1 || true
-! systemctl is-enabled garm.service >/dev/null 2>&1
-! systemctl is-enabled self-hosted-ci-garm.service >/dev/null 2>&1
-! pgrep -x garm >/dev/null 2>&1
+phase='final-inertness'
+make_service_inert garm.service true
+make_service_inert self-hosted-ci-garm.service true
+if pgrep -x garm >/dev/null 2>&1; then
+  die "a GARM process remains"
+fi
 if systemctl list-unit-files --no-legend --type=service --type=socket --type=timer 2>/dev/null \
   | awk 'tolower($1) ~ /garm/ && $2 ~ /^enabled/ { print }' | grep -q .; then
   printf 'an enabled GARM-related unit remains\n' >&2
   exit 1
 fi
-[[ ! -e /var/lib/garm/.runner && ! -e /var/lib/garm/.credentials ]]
+[[ ! -e /var/lib/garm/.runner && ! -e /var/lib/garm/.credentials ]] || die "persistent runner credentials are present"
 
+phase='complete'
 printf '{"status":"installed","distro":"%s","incus_version":"%s","incus_held":true,"dnsmasq_base_installed":true,"dnsmasq_service_absent":true,"nftables_installed":true,"squid_installed":true,"distribution_network_services_disabled":true,"ext4_tools_installed":true,"ext4_kernel_supported":true,"loop_devices_supported":true,"garm_version":"%s","garm_sha256":"%s","garm_cli_version":"%s","garm_cli_sha256":"%s","garm_provider_incus_version":"%s","garm_provider_incus_sha256":"%s","garm_manager_non_admin":true,"garm_manager_incus_admin":false,"garm_enabled":false,"runner_registration_performed":false}\n' \
   "${expected_distro}" "${incus_version}" "${garm_version}" "${garm_sha256}" \
   "${garm_cli_version}" "${garm_cli_sha256}" "${garm_provider_incus_version}" "${garm_provider_incus_sha256}"
