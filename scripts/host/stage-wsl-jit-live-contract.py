@@ -143,6 +143,13 @@ PUBLIC_ARTIFACTS = (
         "garm",
     ),
     (
+        "templates/garm/runner-install-offline.sh.tmpl",
+        "/usr/local/share/self-hosted-ci/runner-install-offline.sh.tmpl",
+        "0644",
+        "config",
+        "garm",
+    ),
+    (
         "scripts/host/github-live-job-verifier.py",
         "/usr/local/libexec/self-hosted-ci/github-live-job-verifier.py",
         "0755",

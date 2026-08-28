@@ -180,6 +180,9 @@ class Dispatch:
     def github_inventory(self, runner_label):
         return {"remaining": 0, "inventory_digest": "0" * 64}
 
+    def transient_github_inventory(self):
+        return {"remaining": 0, "inventory_digest": "0" * 64}
+
     def reboot_host(self, allocation_id):
         self.reboot_cancelled = True
         raise CanaryRebootRequired(
@@ -540,6 +543,15 @@ class LiveCanaryDispatchAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(CanaryRuntimeError, "survived cleanup"):
             adapter.github_inventory("canary-label")
         self.assertEqual([1, 2], adapter.transport.pages)
+
+    def test_transient_inventory_rejects_orphaned_canary_runner(self):
+        adapter = LiveCanaryDispatchAdapter.__new__(LiveCanaryDispatchAdapter)
+        adapter._github_runner_inventory = lambda: (
+            [{"id": 1, "name": "wsl-jit-" + "a" * 32, "labels": []}],
+            "b" * 64,
+        )
+        with self.assertRaisesRegex(CanaryRuntimeError, "survived cleanup"):
+            adapter.transient_github_inventory()
 
 
 class ProductionFenceTests(unittest.TestCase):

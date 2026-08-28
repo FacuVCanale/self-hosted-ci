@@ -85,7 +85,7 @@ jobs:
             failure) exit 1 ;;
             cancel) exec sleep 240 ;;
             timeout) exec sleep 240 ;;
-            force-cancel) trap '' TERM; exec sleep 240 ;;
+            force-cancel) trap '' INT TERM; exec sleep 240 ;;
             reboot) printf '%s\n' reboot-checkpoint-created ;;
             *) exit 64 ;;
           esac

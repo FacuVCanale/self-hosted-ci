@@ -127,6 +127,8 @@ class CanaryDispatchAdapter(Protocol):
 
     def github_inventory(self, runner_label: str) -> Mapping[str, Any]: ...
 
+    def transient_github_inventory(self) -> Mapping[str, Any]: ...
+
     def resume_reboot_evidence(
         self, evidence: Mapping[str, Any]
     ) -> Mapping[str, Any]: ...
@@ -556,7 +558,7 @@ class LiveCanaryDispatchAdapter:
             "force_cancel_receipt": self._force_cancel_receipt,
         }
 
-    def github_inventory(self, runner_label: str) -> Mapping[str, Any]:
+    def _github_runner_inventory(self) -> tuple[list[Mapping[str, Any]], str]:
         token = self.client.authenticate()
         runners: list[Mapping[str, Any]] = []
         total_count: int | None = None
@@ -599,6 +601,11 @@ class LiveCanaryDispatchAdapter:
             runners
         ):
             raise CanaryRuntimeError("GitHub runner inventory is truncated or duplicated")
+        inventory = {"total_count": total_count, "runners": runners}
+        return runners, hashlib.sha256(canonicalize_jcs(inventory)).hexdigest()
+
+    def github_inventory(self, runner_label: str) -> Mapping[str, Any]:
+        runners, inventory_digest = self._github_runner_inventory()
         matching = [
             runner
             for runner in runners
@@ -607,12 +614,9 @@ class LiveCanaryDispatchAdapter:
         ]
         if matching:
             raise CanaryRuntimeError("GitHub canary registration survived cleanup")
-        inventory = {"total_count": total_count, "runners": runners}
         result = {
             "remaining": 0,
-            "inventory_digest": hashlib.sha256(
-                canonicalize_jcs(inventory)
-            ).hexdigest(),
+            "inventory_digest": inventory_digest,
         }
         self._scenario = None
         self._reservation = None
@@ -621,6 +625,22 @@ class LiveCanaryDispatchAdapter:
         self._normal_cancel_receipt = None
         self._force_cancel_receipt = None
         return result
+
+    def transient_github_inventory(self) -> Mapping[str, Any]:
+        runners, inventory_digest = self._github_runner_inventory()
+        transient = [
+            runner
+            for runner in runners
+            if _NONCE.fullmatch(str(runner.get("name", "")).removeprefix("wsl-jit-"))
+            or any(
+                _NONCE.fullmatch(str(label.get("name", "")).removeprefix("wsl-jit-"))
+                for label in runner.get("labels", [])
+                if isinstance(label, Mapping)
+            )
+        ]
+        if transient:
+            raise CanaryRuntimeError("transient GitHub runner survived cleanup")
+        return {"remaining": 0, "inventory_digest": inventory_digest}
 
     def resume_reboot_evidence(
         self, evidence: Mapping[str, Any]
@@ -927,6 +947,9 @@ class BrokerCanaryScenarioDriver:
     def prove_runtime_empty(self) -> Mapping[str, Any]:
         self.broker.driver.assert_no_persistent_scale_set()
         self.broker.driver.assert_runtime_empty()
+        github = self.dispatch.transient_github_inventory()
+        if github.get("remaining") != 0:
+            raise CanaryRuntimeError("GitHub transient runner inventory is not empty")
         return {
             "scale_sets": 0,
             "instances": 0,
