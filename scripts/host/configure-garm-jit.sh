@@ -151,7 +151,7 @@ systemctl is-enabled --quiet self-hosted-ci-garm.service && die 'persistent GARM
 systemctl is-active --quiet self-hosted-ci-garm.service && die 'persistent GARM service must be inactive during configuration'
 [[ ! -e /etc/self-hosted-ci/ACTIVATION_APPROVED ]] || die 'activation sentinel must be absent during configuration'
 
-install -d -o root -g garm-manager -m 0750 /etc/self-hosted-ci/garm
+install -d -o root -g garm-manager -m 0750 /etc/self-hosted-ci /etc/self-hosted-ci/garm
 install -d -o garm-manager -g garm-manager -m 0700 /var/lib/self-hosted-ci/garm
 [[ ! -e "${GARM_CONFIG}" || ( -f "${GARM_CONFIG}" && ! -L "${GARM_CONFIG}" ) ]] || die 'existing GARM config is not a regular file'
 [[ ! -e "${HEALTH_STATE}" || ( -f "${HEALTH_STATE}" && ! -L "${HEALTH_STATE}" ) ]] || die 'existing health state is not a regular file'
