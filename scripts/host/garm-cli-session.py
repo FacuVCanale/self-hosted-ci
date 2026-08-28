@@ -156,7 +156,7 @@ def _login(username: bytes, password: bytes, secret: bytes) -> str:
         password_text = password.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise SessionError("GARM credentials are not valid UTF-8") from exc
-    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", username_text):
+    if not re.fullmatch(r"[A-Za-z0-9]{1,64}", username_text):
         raise SessionError("GARM username credential is invalid")
     payload = json.dumps(
         {"username": username_text, "password": password_text},
@@ -241,9 +241,11 @@ def ensure_session() -> Path:
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
     config = config_dir / "config.toml"
     secret = _root_secret(JWT_SECRET_FILE)
-    if _token_from_config(config, secret) is None:
-        token = _login(_root_secret(USERNAME_FILE), _root_secret(PASSWORD_FILE), secret)
-        _write_config(config, token)
+    # A correctly signed, unexpired token can still be stale after GARM rolls
+    # back or recreates its database because token generations are persisted.
+    # Login on every invocation so the CLI never reuses a generation-stale JWT.
+    token = _login(_root_secret(USERNAME_FILE), _root_secret(PASSWORD_FILE), secret)
+    _write_config(config, token)
     return config
 
 

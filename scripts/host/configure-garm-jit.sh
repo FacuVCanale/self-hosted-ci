@@ -10,6 +10,7 @@ readonly ADMIN_USERNAME=/etc/self-hosted-ci/garm/admin-username
 readonly ADMIN_PASSWORD=/etc/self-hosted-ci/garm/admin-password
 readonly JWT_SECRET=/etc/self-hosted-ci/garm/jwt-secret
 readonly GARM_DATABASE=/var/lib/self-hosted-ci/garm/garm.db
+readonly GARM_BLOB_DATABASE=/var/lib/self-hosted-ci/garm/blob-garm.db
 readonly LIVE_VERIFIER_CONFIG=/etc/self-hosted-ci/github-live-job-verifier.json
 readonly SESSION_HELPER=/usr/local/lib/self-hosted-ci/garm-cli-session.py
 readonly RUNTIME_CLI_HOME=/run/self-hosted-ci/garm-cli
@@ -152,12 +153,13 @@ systemctl is-active --quiet self-hosted-ci-garm.service && die 'persistent GARM 
 [[ ! -e /etc/self-hosted-ci/ACTIVATION_APPROVED ]] || die 'activation sentinel must be absent during configuration'
 
 install -d -o root -g garm-manager -m 0750 /etc/self-hosted-ci /etc/self-hosted-ci/garm
+install -d -o root -g garm-manager -m 0710 /var/lib/self-hosted-ci
 install -d -o garm-manager -g garm-manager -m 0700 /var/lib/self-hosted-ci/garm
 [[ ! -e "${GARM_CONFIG}" || ( -f "${GARM_CONFIG}" && ! -L "${GARM_CONFIG}" ) ]] || die 'existing GARM config is not a regular file'
 [[ ! -e "${HEALTH_STATE}" || ( -f "${HEALTH_STATE}" && ! -L "${HEALTH_STATE}" ) ]] || die 'existing health state is not a regular file'
 transaction_dir="$(mktemp -d /etc/self-hosted-ci/garm/.configure-rollback.XXXXXX)"
 chmod 0700 "${transaction_dir}"
-had_config=false; had_health=false; had_broker_config=false; had_broker_key=false; had_admin_username=false; had_admin_password=false; had_jwt_secret=false; had_database=false; had_live_verifier_config=false
+had_config=false; had_health=false; had_broker_config=false; had_broker_key=false; had_admin_username=false; had_admin_password=false; had_jwt_secret=false; had_database=false; had_blob_database=false; had_live_verifier_config=false
 if [[ -e "${GARM_CONFIG}" ]]; then
   cp -a "${GARM_CONFIG}" "${transaction_dir}/config.toml"; had_config=true
 fi
@@ -178,6 +180,7 @@ for secret_name in admin-username admin-password jwt-secret; do
   fi
 done
 if [[ -e "${GARM_DATABASE}" ]]; then cp -a "${GARM_DATABASE}" "${transaction_dir}/garm.db"; had_database=true; fi
+if [[ -e "${GARM_BLOB_DATABASE}" ]]; then cp -a "${GARM_BLOB_DATABASE}" "${transaction_dir}/blob-garm.db"; had_blob_database=true; fi
 if [[ -e "${LIVE_VERIFIER_CONFIG}" ]]; then cp -a "${LIVE_VERIFIER_CONFIG}" "${transaction_dir}/github-live-job-verifier.json"; had_live_verifier_config=true; fi
 candidate="$(mktemp /etc/self-hosted-ci/garm/.config.toml.XXXXXX)"
 transaction_succeeded=false
@@ -191,8 +194,9 @@ cleanup() {
   systemctl stop "${TRANSIENT_UNIT}" >/dev/null 2>&1 || true
   systemctl reset-failed "${TRANSIENT_UNIT}" >/dev/null 2>&1 || true
   if [[ "${transaction_succeeded}" != true ]]; then
-    rm -f "${GARM_DATABASE}-wal" "${GARM_DATABASE}-shm"
+    rm -f "${GARM_DATABASE}-wal" "${GARM_DATABASE}-shm" "${GARM_BLOB_DATABASE}-wal" "${GARM_BLOB_DATABASE}-shm"
     if [[ "${had_database}" == true ]]; then cp -a "${transaction_dir}/garm.db" "${GARM_DATABASE}"; else rm -f "${GARM_DATABASE}"; fi
+    if [[ "${had_blob_database}" == true ]]; then cp -a "${transaction_dir}/blob-garm.db" "${GARM_BLOB_DATABASE}"; else rm -f "${GARM_BLOB_DATABASE}"; fi
     if [[ "${had_config}" == true ]]; then cp -a "${transaction_dir}/config.toml" "${GARM_CONFIG}"; else rm -f "${GARM_CONFIG}"; fi
     if [[ "${had_health}" == true ]]; then cp -a "${transaction_dir}/health-state.json" "${HEALTH_STATE}"; else rm -f "${HEALTH_STATE}"; fi
     if [[ "${had_broker_config}" == true ]]; then cp -a "${transaction_dir}/allocation-broker.json" "${BROKER_CONFIG}"; else rm -f "${BROKER_CONFIG}"; fi
@@ -257,7 +261,7 @@ import pathlib, re, sys
 garm, username = map(pathlib.Path, sys.argv[1:])
 if "REPLACE_ME_" in garm.read_text(encoding="utf-8"): raise SystemExit("unrendered config")
 value=username.read_text(encoding="utf-8").rstrip("\r\n")
-if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", value): raise SystemExit("GARM admin username is invalid")
+if not re.fullmatch(r"[A-Za-z0-9]{1,64}", value): raise SystemExit("GARM admin username is invalid")
 PY
 
 image_info="$(incus image info "${image_alias}" --project ci-jit)" || die 'local runner image alias is absent'
@@ -288,7 +292,7 @@ import json, pathlib, urllib.error, urllib.request, sys
 username=pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").rstrip("\r\n")
 password=pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").rstrip("\r\n")
 body=json.dumps({"username":username,"password":password,"email":username+"@localhost.invalid","full_name":"Self Hosted CI Administrator"},separators=(",",":")).encode()
-request=urllib.request.Request("http://127.0.0.1:9997/first-run",data=body,headers={"Content-Type":"application/json"},method="POST")
+request=urllib.request.Request("http://127.0.0.1:9997/api/v1/first-run",data=body,headers={"Content-Type":"application/json"},method="POST")
 try:
     with urllib.request.urlopen(request,timeout=5) as response:
         if response.status != 200: raise SystemExit("unexpected first-run response")
@@ -296,6 +300,7 @@ except urllib.error.HTTPError as exc:
     if exc.code != 409: raise SystemExit("controller first-run failed") from None
 PY
 garm_cli() { "${SESSION_HELPER}" run -- --format json "$@"; }
+garm_cli controller update --callback-url "${CALLBACK_URL}" --metadata-url "${METADATA_URL}" >/dev/null || die 'controller URL initialization failed'
 for _ in $(seq 1 20); do
   if garm_cli controller show >/dev/null 2>&1; then break; fi
   sleep 0.25
@@ -307,7 +312,6 @@ import json, sys
 v=json.loads(sys.argv[1])
 if len(v)!=1 or v[0].get("name")!="incus_ci_jit" or v[0].get("type")!="external": raise SystemExit("provider inventory drifted")
 PY
-garm_cli controller update --callback-url "${CALLBACK_URL}" --metadata-url "${METADATA_URL}" >/dev/null
 controller="$(garm_cli controller show)"
 python3 - "${controller}" "${CALLBACK_URL}" "${METADATA_URL}" <<'PY'
 import json, sys
@@ -318,7 +322,10 @@ PY
 credentials="$(garm_cli github credentials list)" || die 'GitHub credential inventory failed'
 credential_id="$(python3 - "${credentials}" "${GITHUB_CREDENTIAL_NAME}" <<'PY'
 import json,sys
-matches=[v for v in json.loads(sys.argv[1]) if v.get("name")==sys.argv[2]]
+inventory=json.loads(sys.argv[1])
+if inventory is None: inventory=[]
+if not isinstance(inventory,list): raise SystemExit("sandbox GitHub credential inventory is not an array")
+matches=[v for v in inventory if v.get("name")==sys.argv[2]]
 if len(matches)>1: raise SystemExit("duplicate sandbox GitHub credentials")
 if matches:
     v=matches[0]
@@ -336,7 +343,10 @@ repo_owner="${entity_name%%/*}"; repo_name="${entity_name#*/}"
 repositories="$(garm_cli repo list --owner "${repo_owner}" --name "${repo_name}" --endpoint github.com)" || die 'sandbox repository inventory failed'
 derived_entity_id="$(python3 - "${repositories}" "${repo_owner}" "${repo_name}" "${GITHUB_CREDENTIAL_NAME}" <<'PY'
 import json,sys
-matches=[v for v in json.loads(sys.argv[1]) if v.get("owner")==sys.argv[2] and v.get("name")==sys.argv[3]]
+inventory=json.loads(sys.argv[1])
+if inventory is None: inventory=[]
+if not isinstance(inventory,list): raise SystemExit("sandbox repository inventory is not an array")
+matches=[v for v in inventory if v.get("owner")==sys.argv[2] and v.get("name")==sys.argv[3]]
 if len(matches)>1: raise SystemExit("duplicate sandbox repository")
 if matches:
     v=matches[0]
@@ -367,8 +377,11 @@ inventory="$(garm_cli scaleset list "${entity_flag}" "${entity_id}")"
 instances="$(incus list --project ci-jit --format json)"
 python3 - "${inventory}" "${instances}" <<'PY'
 import json,sys
-if json.loads(sys.argv[1]) != []: raise SystemExit("configuration requires zero scale sets")
-if json.loads(sys.argv[2]) != []: raise SystemExit("configuration requires zero Incus instances")
+scale_sets=json.loads(sys.argv[1]); instances=json.loads(sys.argv[2])
+if scale_sets is None: scale_sets=[]
+if instances is None: instances=[]
+if not isinstance(scale_sets,list) or scale_sets: raise SystemExit("configuration requires zero scale sets")
+if not isinstance(instances,list) or instances: raise SystemExit("configuration requires zero Incus instances")
 PY
 install -o root -g root -m 0640 "${allocation_public_key}" "${BROKER_PUBLIC_KEY}"
 python3 - "${HEALTH_STATE}" "${BROKER_CONFIG}" "${BROKER_PUBLIC_KEY}" "${cli_home}" "${repository_id}" "${authority_kind}" "${entity_id}" "${entity_name}" "${runner_group}" "${image_alias}" "${image_fingerprint}" "${live_job_verifier}" <<'PY'

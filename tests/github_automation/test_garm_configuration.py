@@ -28,6 +28,48 @@ class GarmConfigurationTests(unittest.TestCase):
             "install -d -o root -g garm-manager -m 0750 /etc/self-hosted-ci /etc/self-hosted-ci/garm",
             configurator,
         )
+        self.assertIn(
+            "install -d -o root -g garm-manager -m 0710 /var/lib/self-hosted-ci",
+            configurator,
+        )
+
+    def test_first_run_uses_the_versioned_garm_api_base_path(self):
+        configurator = (ROOT / "scripts/host/configure-garm-jit.sh").read_text()
+        self.assertIn("http://127.0.0.1:9997/api/v1/first-run", configurator)
+        self.assertNotIn('http://127.0.0.1:9997/first-run"', configurator)
+
+    def test_controller_urls_are_initialized_before_controller_info_is_read(self):
+        configurator = (ROOT / "scripts/host/configure-garm-jit.sh").read_text()
+        update = configurator.index(
+            'garm_cli controller update --callback-url "${CALLBACK_URL}" --metadata-url "${METADATA_URL}"'
+        )
+        show = configurator.index("if garm_cli controller show")
+        self.assertLess(update, show)
+
+    def test_transaction_rolls_back_primary_and_blob_databases(self):
+        configurator = (ROOT / "scripts/host/configure-garm-jit.sh").read_text()
+        self.assertIn(
+            "readonly GARM_BLOB_DATABASE=/var/lib/self-hosted-ci/garm/blob-garm.db",
+            configurator,
+        )
+        self.assertIn(
+            'cp -a "${transaction_dir}/blob-garm.db" "${GARM_BLOB_DATABASE}"',
+            configurator,
+        )
+        self.assertIn(
+            '"${GARM_BLOB_DATABASE}-wal" "${GARM_BLOB_DATABASE}-shm"',
+            configurator,
+        )
+
+    def test_admin_username_matches_upstream_alphanumeric_contract(self):
+        configurator = (ROOT / "scripts/host/configure-garm-jit.sh").read_text()
+        self.assertIn('re.fullmatch(r"[A-Za-z0-9]{1,64}", value)', configurator)
+
+    def test_empty_garm_inventories_accept_upstream_null_encoding(self):
+        configurator = (ROOT / "scripts/host/configure-garm-jit.sh").read_text()
+        self.assertGreaterEqual(configurator.count("if inventory is None: inventory=[]"), 2)
+        self.assertIn("if scale_sets is None: scale_sets=[]", configurator)
+        self.assertIn("if instances is None: instances=[]", configurator)
 
     def test_plan_is_machine_readable_and_inert(self) -> None:
         result = subprocess.run(
@@ -60,7 +102,7 @@ class GarmConfigurationTests(unittest.TestCase):
             "TOML-safe characters",
             "transaction_succeeded",
             "configure-rollback",
-            'urllib.request.Request("http://127.0.0.1:9997/first-run"',
+            'urllib.request.Request("http://127.0.0.1:9997/api/v1/first-run"',
             "github credentials update",
             "github credentials add",
             "repo update",
