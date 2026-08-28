@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/FacuVCanale/self-hosted-ci/schemas/bootstrap-public-manifest-v1.schema.json",
+  "title": "Exact public inert-provisioning byte manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bootstrap_public_manifest_version", "mapping_digest", "artifacts"],
+  "properties": {
+    "bootstrap_public_manifest_version": {"const": 1},
+    "mapping_digest": {"const": "2419930b80c9b10d89b9f485ae60757301e3e23d9b72ef18e28f31b951a591d7"},
+    "artifacts": {
+      "type": "array", "minItems": 61, "maxItems": 61,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["source", "target", "mode", "sha256", "size"],
+        "properties": {
+          "source": {"type": "string", "minLength": 1},
+          "target": {"type": "string", "minLength": 1},
+          "mode": {"type": "string", "pattern": "^0[0-7]{3}$"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "size": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}

@@ -470,6 +470,85 @@ GitHub-hosted y el runtime local permanece desactivado.
 
 ## Actualizar el live contract desde Windows
 
+### Bootstrap semántico inerte
+
+El primer provisioning ya no depende de un `runner-boundary-v2` fabricado a
+mano. Antes de instalar runtime se recolectan dos observaciones independientes:
+
+- `collect-windows-wsl-semantic-contract.ps1` observa, desde una PowerShell
+  elevada, la cuenta local exacta, pertenencia efectiva a Administrators,
+  registro WSL bajo el SID de servicio, BasePath y ACL. Es read-only respecto
+  del host y guarda evidencia privada protegida para SYSTEM/Administrators.
+- `collect-wsl-jit-semantic-observations.sh` corre dentro de la distro de
+  servicio y observa configuración WSL, mounts/interop, superficies de
+  credenciales, identidades Linux, pins de software, Incus, red y estado inerte
+  de GARM. No acepta flags ni overrides y nunca emite un `pass` proporcionado
+  por el operador.
+
+`build-wsl-jit-bootstrap-manifest.py` genera un manifiesto JCS que fija cada
+source, target, mode, tamaño y SHA-256 público que el provisioner podrá instalar
+o ejecutar. `build-wsl-jit-bootstrap.py` deriva el contrato únicamente si ambas
+observaciones y ese manifiesto satisfacen sus verificadores semánticos. Luego
+`sign-wsl-jit-bootstrap.py` usa una clave Ed25519 externa y un dominio de firma
+exclusivo de bootstrap. El contrato resultante sólo autoriza
+`provision-wsl-jit-contract` en modo `inert-only`: no autoriza GitHub,
+activation, `runtime-ready` ni registro de runners.
+
+Flujo reproducible, manteniendo observaciones y claves fuera del repositorio:
+
+```powershell
+& "C:\ProgramData\self-hosted-ci\package\scripts\host\collect-wsl-jit-bootstrap-evidence.ps1" `
+  -ExpectedServiceAccountSid "<SID-EXACTO>" -Apply `
+  -AcknowledgeBootstrapEvidenceCollection `
+  -AcknowledgeOneTimePasswordRotation
+```
+
+El comando devuelve las dos rutas privadas content-addressed. Copialas al host
+revisor y generá un challenge nuevo de 128 bits para vincular esa autorización:
+
+```bash
+nonce="$(openssl rand -hex 16)"
+python3 scripts/host/build-wsl-jit-bootstrap-manifest.py \
+  --output /private/bootstrap-public-manifest-v1.json
+python3 scripts/host/build-wsl-jit-bootstrap.py \
+  --windows-observation /private/windows-observation.json \
+  --wsl-observation /private/wsl-observation.json \
+  --public-manifest /private/bootstrap-public-manifest-v1.json \
+  --nonce "$nonce" \
+  --output /private/bootstrap-boundary-v1.unsigned.json
+python3 scripts/host/sign-wsl-jit-bootstrap.py \
+  --input /private/bootstrap-boundary-v1.unsigned.json \
+  --output /private/bootstrap-boundary-v1.signed.json \
+  --reviewer-private-key /private/reviewer-private-key.pem
+```
+
+Conservá `nonce` sólo hasta aplicar el bootstrap. El provisioner exige ese
+challenge exacto, observaciones recientes y una autorización con TTL de diez
+minutos; otro nonce o bytes públicos distintos invalidan el contrato. El mismo
+bundle puede reintentarse de forma idempotente durante ese TTL: este challenge
+vincula la ceremonia, pero no es un token persistente de un solo uso.
+
+El provisioner acepta los dos contratos de forma mutuamente exclusiva:
+
+```bash
+sudo scripts/host/provision-wsl-jit-contract.sh --apply \
+  --bootstrap-evidence /private/bootstrap-boundary-v1.signed.json \
+  --windows-observation /private/windows-observation.json \
+  --wsl-observation /private/wsl-observation.json \
+  --public-manifest /private/bootstrap-public-manifest-v1.json \
+  --reviewer-public-key /private/reviewer-public-key.pem \
+  --reviewer-key-fingerprint <sha256-spki-del-reviewer> \
+  --expected-bootstrap-nonce "$nonce" \
+  --acknowledge-host-mutation \
+  --acknowledge-dedicated-boundary
+```
+
+En bootstrap, los servicios de boundary, red, proxy, broker, outbound worker y
+GARM terminan disabled; `ACTIVATION_APPROVED` y
+`outbound-worker.runtime-ready` deben estar ausentes antes de empezar. El
+`runner-boundary-v2` final sigue siendo obligatorio después de los canaries de
+lifecycle y reboot; un bootstrap firmado no puede sustituirlo.
+
 La instalación sobre la distro que pertenece a la cuenta de servicio se hace
 con `scripts/host/install-wsl-jit-live-contract.ps1`. El script es plan-only por
 defecto y usa una tarea one-shot `Password`/`Limited`; no activa GARM, no

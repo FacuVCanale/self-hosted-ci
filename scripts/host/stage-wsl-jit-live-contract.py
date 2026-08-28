@@ -178,6 +178,27 @@ PUBLIC_ARTIFACTS = (
         "garm",
     ),
     (
+        "scripts/host/collect-wsl-jit-semantic-observations.py",
+        "/usr/local/lib/self-hosted-ci/collect-wsl-jit-semantic-observations.py",
+        "0755",
+        "script",
+        "wsl-distro",
+    ),
+    (
+        "scripts/host/collect-wsl-jit-semantic-observations.sh",
+        "/usr/local/lib/self-hosted-ci/collect-wsl-jit-semantic-observations.sh",
+        "0755",
+        "script",
+        "wsl-distro",
+    ),
+    (
+        "scripts/host/verify-wsl-jit-bootstrap.py",
+        "/usr/local/lib/self-hosted-ci/verify-wsl-jit-bootstrap.py",
+        "0755",
+        "script",
+        "wsl-distro",
+    ),
+    (
         "github_automation/__init__.py",
         "/usr/local/lib/self-hosted-ci/github_automation/__init__.py",
         "0644",
@@ -190,6 +211,13 @@ PUBLIC_ARTIFACTS = (
         "0644",
         "python-module",
         "garm",
+    ),
+    (
+        "github_automation/bootstrap_boundary.py",
+        "/usr/local/lib/self-hosted-ci/github_automation/bootstrap_boundary.py",
+        "0644",
+        "python-module",
+        "wsl-distro",
     ),
     (
         "github_automation/host_security.py",
