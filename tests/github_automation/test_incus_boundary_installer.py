@@ -250,6 +250,15 @@ class IncusBoundaryInstallerTests(unittest.TestCase):
         )
         self.assertIn("AppArmor confinement instead of using raw.dnsmasq", source)
 
+    def test_unrelated_global_networks_are_preserved_outside_restricted_project(self) -> None:
+        source = PAYLOAD.read_text(encoding="utf-8")
+        self.assertNotIn("unexpected Incus network inventory", source)
+        self.assertIn(
+            'incus network list --format json | json_has_name "${bridge}"', source
+        )
+        self.assertIn('restricted.networks.access="${bridge}"', source)
+        self.assertIn("Other global networks are outside", source)
+
     def test_payload_failures_report_the_exact_phase_line_and_command(self) -> None:
         source = PAYLOAD.read_text(encoding="utf-8")
         for token in (
@@ -294,10 +303,9 @@ class IncusBoundaryInstallerTests(unittest.TestCase):
         ):
             self.assertLess(preflight, source.index(mutation))
 
-    def test_boundary_rejects_extra_networks_projects_and_canary_residue(self) -> None:
+    def test_boundary_rejects_extra_projects_and_canary_residue(self) -> None:
         source = PAYLOAD.read_text(encoding="utf-8")
         for token in (
-            "unexpected Incus network inventory",
             "unexpected Incus project inventory",
             "negative canary left an instance",
             "negative canary left a storage volume",
