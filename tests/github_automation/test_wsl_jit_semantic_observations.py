@@ -150,6 +150,20 @@ class SemanticObservationCollectorTests(unittest.TestCase):
             any(error["probe"] == "garm-processes" for error in collector.errors)
         )
 
+    def test_disabled_or_absent_systemd_service_is_observed_without_probe_error(self):
+        module = load_module()
+
+        def run(argv, **_kwargs):
+            if "is-active" in argv:
+                return subprocess.CompletedProcess(argv, 3, stdout="inactive\n", stderr="")
+            return subprocess.CompletedProcess(argv, 4, stdout="\n", stderr="")
+
+        collector = module.Collector(run=run, environ={})
+        with mock.patch.object(module.shutil, "which", return_value="/usr/bin/systemctl"):
+            state = collector.service_state("missing.service")
+        self.assertEqual(state, {"active": "inactive", "enabled": "not-found"})
+        self.assertEqual(collector.errors, [])
+
     def test_recursive_nested_ssh_credentials_are_detected_without_path_output(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as temporary:

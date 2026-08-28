@@ -328,9 +328,9 @@ raise SystemExit(completed.returncode)
 `$ErrorActionPreference = 'Stop'
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '$ExpectedServiceAccountSid') { throw 'worker service SID mismatch' }
 function Remove-WslCollectorStage {
-    `$cleanupProgram = 'import os,sys; root=sys.argv[1]; target=sys.argv[2]; temporary=os.path.join(root,".collector.tmp"); os.unlink(target) if os.path.lexists(target) else None; os.unlink(temporary) if os.path.lexists(temporary) else None; os.rmdir(root) if os.path.lexists(root) else None; raise SystemExit(0 if not os.path.lexists(target) and not os.path.lexists(temporary) and not os.path.lexists(root) else 1)'
-    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- /usr/bin/python3 -c `$cleanupProgram '$collectorLinuxRoot' '$collectorLinuxPath'
-    if (`$LASTEXITCODE -ne 0) { throw 'WSL collector staging cleanup failed' }
+    `$cleanupProgram = 'import os,sys; root=sys.argv[1]; target=sys.argv[2]; temporary=os.path.join(root,".collector.tmp"); errors=[]; paths=(("target",target),("temporary",temporary)); exec("for label,path in paths:\n try:\n  if os.path.lexists(path): os.unlink(path)\n except OSError as error:\n  errors.append(f\"{label} cleanup failed ({type(error).__name__}): {error}\")"); exec("try:\n if os.path.lexists(root): os.rmdir(root)\nexcept OSError as error:\n errors.append(f\"root cleanup failed ({type(error).__name__}): {error}; entries={sorted(os.listdir(root)) if os.path.isdir(root) else []}\")"); remaining=[label for label,path in (("root",root),)+paths if os.path.lexists(path)]; errors.append("remaining="+",".join(remaining)) if remaining else None; print("; ".join(errors),file=sys.stderr) if errors else None; raise SystemExit(1 if errors else 0)'
+    `$cleanup = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', `$cleanupProgram, '$collectorLinuxRoot', '$collectorLinuxPath')
+    if (`$cleanup.ExitCode -ne 0) { throw "WSL collector staging cleanup failed (exit=`$(`$cleanup.ExitCode)): `$(`$cleanup.Output)" }
 }
 function Stage-WslCollector {
     `$collectorBytes = [IO.File]::ReadAllBytes('$WslCollectorPath')
@@ -355,31 +355,65 @@ function Stage-WslCollector {
     }
     finally { [Array]::Clear(`$collectorBytes, 0, `$collectorBytes.Length) }
 }
+function Invoke-WslCleanupCommand([string]`$Executable, [string[]]`$Arguments) {
+    `$previousPreference = `$ErrorActionPreference
+    `$ErrorActionPreference = 'Continue'
+    try {
+        `$commandOutput = @(& `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- `$Executable @Arguments 2>&1)
+        `$commandExitCode = `$LASTEXITCODE
+    }
+    finally { `$ErrorActionPreference = `$previousPreference }
+    [pscustomobject]@{
+        ExitCode = [int]`$commandExitCode
+        Output = ((@(`$commandOutput | ForEach-Object { [string]`$_ }) -join "`n").Trim())
+    }
+}
+function Test-WslCollectionUnitNotFound(`$ShowResult) {
+    return `$ShowResult.ExitCode -eq 4 -or (`$ShowResult.ExitCode -eq 0 -and `$ShowResult.Output.Trim() -eq 'not-found')
+}
+function Get-WslCollectionUnitLoadState {
+    `$loadState = Invoke-WslCleanupCommand '/usr/bin/systemctl' @('show', '$collectionUnit', '--property=LoadState', '--value')
+    if (-not (Test-WslCollectionUnitNotFound `$loadState) -and `$loadState.ExitCode -ne 0) {
+        throw "WSL collection unit LoadState probe failed (exit=`$(`$loadState.ExitCode)): `$(`$loadState.Output)"
+    }
+    return `$loadState
+}
 function Stop-WslCollectionUnit {
-    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- /bin/true
-    if (`$LASTEXITCODE -ne 0) { throw 'WSL transport unavailable while terminating collection unit' }
+    `$transport = Invoke-WslCleanupCommand '/bin/true' @()
+    if (`$transport.ExitCode -ne 0) { throw "WSL transport unavailable while terminating collection unit (exit=`$(`$transport.ExitCode)): `$(`$transport.Output)" }
     `$controlGroup = "/system.slice/$collectionUnit.service"
-    `$show = @(& `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- systemctl show '$collectionUnit' --property=ControlGroup --value 2>`$null)
-    if (`$LASTEXITCODE -eq 0 -and `$show.Count -eq 1 -and ([string]`$show[0]).Trim()) { `$controlGroup = ([string]`$show[0]).Trim() }
-    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- systemctl kill --kill-whom=all '$collectionUnit' 2>`$null
-    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- systemctl stop '$collectionUnit' 2>`$null
-    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- systemctl reset-failed '$collectionUnit' 2>`$null
-    `$unitDeadline = (Get-Date).AddSeconds(15)
-    do {
-        `$unitShow = @(& `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- systemctl show '$collectionUnit' --property=LoadState --value 2>`$null)
-        `$unitShowExit = `$LASTEXITCODE
-        if (`$unitShowExit -eq 4 -or (`$unitShowExit -eq 0 -and `$unitShow.Count -eq 1 -and ([string]`$unitShow[0]).Trim() -eq 'not-found')) { break }
-        Start-Sleep -Milliseconds 250
-    } while ((Get-Date) -lt `$unitDeadline)
-    if (`$unitShowExit -ne 4 -and -not (`$unitShowExit -eq 0 -and `$unitShow.Count -eq 1 -and ([string]`$unitShow[0]).Trim() -eq 'not-found')) { throw 'WSL collection unit remains loaded after termination' }
+    `$unitShow = Get-WslCollectionUnitLoadState
+    if (-not (Test-WslCollectionUnitNotFound `$unitShow)) {
+        `$groupShow = Invoke-WslCleanupCommand '/usr/bin/systemctl' @('show', '$collectionUnit', '--property=ControlGroup', '--value')
+        if (`$groupShow.ExitCode -eq 0 -and `$groupShow.Output.Trim()) { `$controlGroup = `$groupShow.Output.Trim() }
+        foreach (`$operation in @(
+            @('kill', '--kill-whom=all', '$collectionUnit'),
+            @('stop', '$collectionUnit'),
+            @('reset-failed', '$collectionUnit')
+        )) {
+            `$operationResult = Invoke-WslCleanupCommand '/usr/bin/systemctl' `$operation
+            if (`$operationResult.ExitCode -ne 0) {
+                `$unitShow = Get-WslCollectionUnitLoadState
+                if (Test-WslCollectionUnitNotFound `$unitShow) { break }
+                throw "WSL collection unit cleanup command failed (`$(`$operation[0]), exit=`$(`$operationResult.ExitCode)): `$(`$operationResult.Output)"
+            }
+        }
+        `$unitDeadline = (Get-Date).AddSeconds(15)
+        do {
+            `$unitShow = Get-WslCollectionUnitLoadState
+            if (Test-WslCollectionUnitNotFound `$unitShow) { break }
+            Start-Sleep -Milliseconds 250
+        } while ((Get-Date) -lt `$unitDeadline)
+        if (-not (Test-WslCollectionUnitNotFound `$unitShow)) { throw "WSL collection unit remains loaded after termination (LoadState=`$(`$unitShow.Output))" }
+    }
     `$cgroupProgram = 'import os,sys; path="/sys/fs/cgroup"+sys.argv[1]; procs=os.path.join(path,"cgroup.procs"); raise SystemExit(0 if not os.path.exists(path) or (os.path.isfile(procs) and not open(procs,encoding="ascii").read().strip()) else 1)'
-    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- /usr/bin/python3 -c `$cgroupProgram `$controlGroup
-    if (`$LASTEXITCODE -ne 0) { throw 'WSL collection unit cgroup still contains processes or is unobservable' }
+    `$cgroup = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', `$cgroupProgram, `$controlGroup)
+    if (`$cgroup.ExitCode -ne 0) { throw "WSL collection unit cgroup still contains processes or is unobservable (exit=`$(`$cgroup.ExitCode)): `$(`$cgroup.Output)" }
 }
 function Assert-WslCollectorStageAbsent {
-    `$verifyProgram = 'import os,sys; root=sys.argv[1]; target=sys.argv[2]; temporary=os.path.join(root,".collector.tmp"); raise SystemExit(0 if not os.path.lexists(root) and not os.path.lexists(target) and not os.path.lexists(temporary) else 1)'
-    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- /usr/bin/python3 -c `$verifyProgram '$collectorLinuxRoot' '$collectorLinuxPath'
-    if (`$LASTEXITCODE -ne 0) { throw 'WSL collector staging absence could not be verified' }
+    `$verifyProgram = 'import os,sys; root=sys.argv[1]; target=sys.argv[2]; temporary=os.path.join(root,".collector.tmp"); remaining=[label for label,path in (("root",root),("target",target),("temporary",temporary)) if os.path.lexists(path)]; print("remaining="+",".join(remaining),file=sys.stderr) if remaining else None; raise SystemExit(1 if remaining else 0)'
+    `$verify = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', `$verifyProgram, '$collectorLinuxRoot', '$collectorLinuxPath')
+    if (`$verify.ExitCode -ne 0) { throw "WSL collector staging absence could not be verified (exit=`$(`$verify.ExitCode)): `$(`$verify.Output)" }
 }
 function Merge-CollectionFailure([string]`$Existing, [string]`$Additional) {
     if (`$Existing) { return "`$Existing; `$Additional" }

@@ -618,11 +618,19 @@ class Collector:
         enabled = self.command(
             f"service:{name}:enabled",
             ["systemctl", "is-enabled", name],
-            accepted_codes=(0, 1),
+            accepted_codes=(0, 1, 3, 4),
         )
+        enabled_state = enabled.strip() if enabled is not None else None
+        if enabled_state == "":
+            enabled_state = "not-found"
+        if enabled_state not in {"disabled", "not-found", "enabled", "static", "masked", None}:
+            self.errors.append(
+                {"probe": f"service:{name}:enabled", "reason": "invalid-state"}
+            )
+            enabled_state = None
         return {
             "active": active.strip() if active is not None else None,
-            "enabled": enabled.strip() if enabled is not None else None,
+            "enabled": enabled_state,
         }
 
     def garm(self) -> dict[str, object]:

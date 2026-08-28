@@ -1,6 +1,8 @@
 from pathlib import Path
+import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 
@@ -62,7 +64,7 @@ class BootstrapEvidenceCollectorTests(unittest.TestCase):
     def test_wsl_staging_cleanup_is_fail_closed_on_all_collection_paths(self):
         for token in (
             "function Remove-WslCollectorStage",
-            "os.unlink(target) if os.path.lexists(target) else None",
+            "if os.path.lexists(path): os.unlink(path)",
             'temporary=os.path.join(root,".collector.tmp")',
             "os.rmdir(root)",
             "WSL collector staging cleanup failed",
@@ -75,6 +77,69 @@ class BootstrapEvidenceCollectorTests(unittest.TestCase):
             "Complete-WslCollectionCleanup",
             "Assert-WslCollectorStageAbsent",
             "cleanup_verified=`$true",
+        ):
+            self.assertIn(token, self.source)
+
+    def test_staging_cleanup_program_is_idempotent_and_reports_exact_residue(self):
+        match = re.search(
+            r"`\$cleanupProgram = '(.*?)'\n    `\$cleanup =",
+            self.source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        cleanup_program = match.group(1)
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "stage"
+            root.mkdir()
+            target = root / "collector.py"
+            target.write_text("payload", encoding="utf-8")
+            first = subprocess.run(
+                ["python3", "-c", cleanup_program, str(root), str(target)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, first.returncode, first.stderr)
+            second = subprocess.run(
+                ["python3", "-c", cleanup_program, str(root), str(target)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, second.returncode, second.stderr)
+
+            root.mkdir()
+            target.write_text("payload", encoding="utf-8")
+            (root / "unexpected").write_text("residue", encoding="utf-8")
+            dirty = subprocess.run(
+                ["python3", "-c", cleanup_program, str(root), str(target)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(1, dirty.returncode)
+            self.assertIn("root cleanup failed (OSError)", dirty.stderr)
+            self.assertIn("entries=['unexpected']", dirty.stderr)
+            self.assertIn("remaining=root", dirty.stderr)
+
+    def test_cleanup_observes_unloaded_unit_before_mutation_and_preserves_detail(self):
+        stop = self.source.index("function Stop-WslCollectionUnit")
+        initial_load_state = self.source.index("`$unitShow = Get-WslCollectionUnitLoadState", stop)
+        not_found_guard = self.source.index("if (-not (Test-WslCollectionUnitNotFound `$unitShow))", initial_load_state)
+        kill = self.source.index("@('kill', '--kill-whom=all'", not_found_guard)
+        self.assertLess(initial_load_state, not_found_guard)
+        self.assertLess(not_found_guard, kill)
+        for token in (
+            "function Invoke-WslCleanupCommand",
+            "function Test-WslCollectionUnitNotFound",
+            "function Get-WslCollectionUnitLoadState",
+            "WSL collection unit LoadState probe failed",
+            "WSL collection unit cleanup command failed",
+            "root cleanup failed",
+            "entries=",
+            "remaining=",
+            "WSL collector staging cleanup failed (exit=",
+            "WSL collector staging absence could not be verified (exit=",
         ):
             self.assertIn(token, self.source)
 
