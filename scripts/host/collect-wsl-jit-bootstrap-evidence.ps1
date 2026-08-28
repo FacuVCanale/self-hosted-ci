@@ -22,8 +22,17 @@ $WslStagingPath = Join-Path $Root "wsl-observation.json"
 $StdoutPath = Join-Path $Root "worker.stdout.log"
 $StderrPath = Join-Path $Root "worker.stderr.log"
 $OutputRoot = "C:\ProgramData\self-hosted-ci\bootstrap-evidence\v1"
+$DiagnosticsRoot = "C:\ProgramData\self-hosted-ci\diagnostics\bootstrap-evidence\v1"
 $WindowsEvidenceRoot = "C:\ProgramData\self-hosted-ci\semantic-contract-staging\v1"
 $PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+$StageTimeoutSeconds = 45
+$CollectorTimeoutSeconds = 330
+$SystemdTimeoutSeconds = 360
+$WslTimeoutSeconds = 390
+$WorkerCleanupBudgetSeconds = 60
+$TaskTimeoutSeconds = 570
+$ParentTimeoutSeconds = 600
+$CleanupBudgetSeconds = $ParentTimeoutSeconds - $TaskTimeoutSeconds
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -112,16 +121,51 @@ function Get-Sha256([string]$Path) {
 function Save-ContentAddressedJson([string]$Source, [string]$Prefix) {
     $sha256 = Get-Sha256 $Source
     $destination = Join-Path $OutputRoot ("$Prefix-$sha256.json")
-    if (Test-Path -LiteralPath $destination) {
-        $existing = Get-Item -LiteralPath $destination -Force -ErrorAction Stop
-        if ($existing.PSIsContainer -or ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "content-addressed evidence destination is unsafe" }
-        if ((Get-Sha256 $destination) -cne $sha256) { throw "content-addressed evidence collision" }
+    $temporary = Join-Path $OutputRoot (".$Prefix-$([Guid]::NewGuid().ToString('N')).tmp")
+    try {
+        if (-not (Test-Path -LiteralPath $destination)) {
+            Copy-Item -LiteralPath $Source -Destination $temporary -ErrorAction Stop
+            Set-Acl -LiteralPath $temporary -AclObject (New-PrivateAcl $false)
+            if ((Get-Sha256 $temporary) -cne $sha256) { throw "evidence source changed while it was being preserved" }
+            try { [IO.File]::Move($temporary, $destination) }
+            catch {
+                if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw }
+            }
+        }
     }
-    else {
-        Copy-Item -LiteralPath $Source -Destination $destination -ErrorAction Stop
+    finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
     }
+    $existing = Get-Item -LiteralPath $destination -Force -ErrorAction Stop
+    if ($existing.PSIsContainer -or ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "content-addressed evidence destination is unsafe" }
     Set-Acl -LiteralPath $destination -AclObject (New-PrivateAcl $false)
+    if ((Get-Sha256 $destination) -cne $sha256) { throw "content-addressed evidence collision" }
     return [ordered]@{ path = $destination; sha256 = $sha256; bytes = (Get-Item -LiteralPath $destination -Force).Length }
+}
+
+function Save-FailureDiagnostics([string]$FailureMessage, [Security.Principal.SecurityIdentifier]$ServiceSid, [string]$TaskState, [uint32]$TaskResult) {
+    if (-not (Test-Path -LiteralPath $DiagnosticsRoot)) { [void](New-Item -ItemType Directory -Path $DiagnosticsRoot -Force) }
+    Assert-NoReparsePath $DiagnosticsRoot "C:\ProgramData\self-hosted-ci"
+    Set-Acl -LiteralPath $DiagnosticsRoot -AclObject (New-PrivateAcl $true)
+    $bundle = Join-Path $DiagnosticsRoot ([Guid]::NewGuid().ToString())
+    [void](New-Item -ItemType Directory -Path $bundle)
+    Set-Acl -LiteralPath $bundle -AclObject (New-PrivateAcl $true)
+    foreach ($entry in @(
+        @{ Source = $StdoutPath; Name = "worker.stdout.log" },
+        @{ Source = $StderrPath; Name = "worker.stderr.log" },
+        @{ Source = $ResultPath; Name = "collect-result.json" },
+        @{ Source = $WslStagingPath; Name = "wsl-observation.json" }
+    )) {
+        if (Test-Path -LiteralPath $entry.Source -PathType Leaf) { Copy-Item -LiteralPath $entry.Source -Destination (Join-Path $bundle $entry.Name) }
+    }
+    $safe = [ordered]@{
+        observed_at = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+        task_name = $TaskName; service_sid = $ServiceSid.Value; distro = $DistroName
+        task_state = $TaskState; task_result = $TaskResult; failure = $FailureMessage
+        github_contacted = $false; runner_registration_changed = $false; activation_changed = $false
+    }
+    [IO.File]::WriteAllText((Join-Path $bundle "failure.json"), ($safe | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+    return $bundle
 }
 
 function Register-OneShot([string]$UserId, [Security.SecureString]$Password) {
@@ -137,7 +181,7 @@ function Register-OneShot([string]$UserId, [Security.SecureString]$Password) {
         $definition.Settings.Enabled = $true
         $definition.Settings.AllowDemandStart = $true
         $definition.Settings.StartWhenAvailable = $false
-        $definition.Settings.ExecutionTimeLimit = "PT12M"
+        $definition.Settings.ExecutionTimeLimit = "PT9M"
         $definition.Settings.MultipleInstances = 2 # TASK_INSTANCES_IGNORE_NEW
         $action = $definition.Actions.Create(0)
         $action.Path = $PowerShellExe
@@ -153,7 +197,8 @@ function Register-OneShot([string]$UserId, [Security.SecureString]$Password) {
 if ($env:OS -ne "Windows_NT" -or -not (Test-IsAdministrator)) { throw "collector requires an elevated Windows console" }
 if ($ServiceAccount -ne "selfhosted-ci-svc" -or $DistroName -ne "Ubuntu-24.04-CI") { throw "service account and distro names are pinned" }
 if ($ExpectedServiceAccountSid -notmatch '^S-1-[0-9]+(?:-[0-9]+)+$') { throw "invalid service SID" }
-if ($TimeoutSeconds -ne 600) { throw "TimeoutSeconds is pinned to 600" }
+if ($TimeoutSeconds -ne $ParentTimeoutSeconds) { throw "TimeoutSeconds is pinned to $ParentTimeoutSeconds" }
+if (-not ($CollectorTimeoutSeconds -lt $SystemdTimeoutSeconds -and $SystemdTimeoutSeconds -lt $WslTimeoutSeconds -and ($StageTimeoutSeconds + $WslTimeoutSeconds + $WorkerCleanupBudgetSeconds) -lt 540 -and 540 -lt $TaskTimeoutSeconds -and $TaskTimeoutSeconds -lt $ParentTimeoutSeconds -and $CleanupBudgetSeconds -ge 30)) { throw "runtime timeout hierarchy is invalid" }
 foreach ($path in @($PackageRoot, $WindowsCollectorPath, $WslCollectorPath)) {
     if (-not (Test-Path -LiteralPath $path)) { throw "required package input is absent: $path" }
     Assert-NoReparsePath $path $PackageRoot
@@ -185,6 +230,7 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw
 if (Test-Path -LiteralPath $Root) { throw "staging root already exists" }
 
 $registered = $false; $passwordApplied = $false; $temporaryPassword = $null
+$lastTaskState = "NotCreated"; [uint32]$lastTaskResult = 267011
 $windowsSaved = $null; $wslSaved = $null
 try {
     if (-not (Test-Path -LiteralPath $OutputRoot)) { [void](New-Item -ItemType Directory -Path $OutputRoot -Force) }
@@ -203,14 +249,16 @@ try {
 
     [void](New-Item -ItemType Directory -Path $Root)
     Set-Acl -LiteralPath $Root -AclObject (New-ProtectedAcl $service.SID)
-    $collectorLinuxRoot = "/run/self-hosted-ci-bootstrap-evidence"
+    $attemptId = [Guid]::NewGuid().ToString("N")
+    $collectionUnit = "self-hosted-ci-bootstrap-evidence-collect-$attemptId"
+    $collectorLinuxRoot = "/run/self-hosted-ci-bootstrap-evidence-$attemptId"
     $collectorLinuxPath = "$collectorLinuxRoot/collect-wsl-jit-semantic-observations.py"
     $wslCollectorBytes = (Get-Item -LiteralPath $WslCollectorPath -Force -ErrorAction Stop).Length
     $stage = @'
 import hashlib, os, pathlib, sys
-target, expected_sha256, expected_bytes = sys.argv[1], sys.argv[2], int(sys.argv[3])
+target, expected_sha256, expected_bytes, expected_root = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
 root = pathlib.Path(target).parent
-if root != pathlib.Path("/run/self-hosted-ci-bootstrap-evidence") or pathlib.Path(target).name != "collect-wsl-jit-semantic-observations.py":
+if root != pathlib.Path(expected_root) or not expected_root.startswith("/run/self-hosted-ci-bootstrap-evidence-") or pathlib.Path(target).name != "collect-wsl-jit-semantic-observations.py":
     raise SystemExit("unexpected WSL collector staging path")
 if root.exists() or os.path.lexists(target):
     raise SystemExit("WSL collector staging path already exists")
@@ -269,7 +317,10 @@ with open(collector, "rb") as handle:
     actual = hashlib.sha256(handle.read()).hexdigest()
 if actual != expected:
     raise SystemExit("WSL collector sha256 mismatch")
-completed = subprocess.run(["/usr/bin/python3", collector], check=False)
+try:
+    completed = subprocess.run(["/usr/bin/python3", collector], check=False, timeout=480)
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
 raise SystemExit(completed.returncode)
 '@
     $bootstrapB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bootstrap))
@@ -286,17 +337,19 @@ function Stage-WslCollector {
     if (`$collectorBytes.Length -ne $wslCollectorBytes) { throw 'Windows collector byte count changed before staging' }
     `$stagePsi = [Diagnostics.ProcessStartInfo]::new()
     `$stagePsi.FileName = "`$env:SystemRoot\System32\wsl.exe"
-    `$stagePsi.Arguments = '-d $DistroName -u root -- /usr/bin/python3 -c "import base64;exec(base64.b64decode(''$stageB64''))" $collectorLinuxPath $wslCollectorSha256 $wslCollectorBytes'
+    `$stagePsi.Arguments = '-d $DistroName -u root -- /usr/bin/python3 -c "import base64;exec(base64.b64decode(''$stageB64''))" $collectorLinuxPath $wslCollectorSha256 $wslCollectorBytes $collectorLinuxRoot'
     `$stagePsi.UseShellExecute = `$false; `$stagePsi.CreateNoWindow = `$true
     `$stagePsi.RedirectStandardInput = `$true; `$stagePsi.RedirectStandardOutput = `$true; `$stagePsi.RedirectStandardError = `$true
     `$stageProcess = [Diagnostics.Process]::new(); `$stageProcess.StartInfo = `$stagePsi
     if (-not `$stageProcess.Start()) { throw 'could not start exact WSL collector staging transport' }
     try {
-        `$stageProcess.StandardInput.BaseStream.Write(`$collectorBytes, 0, `$collectorBytes.Length)
-        `$stageProcess.StandardInput.BaseStream.Flush()
-        `$stageProcess.StandardInput.Close()
         `$stageStdoutTask = `$stageProcess.StandardOutput.ReadToEndAsync(); `$stageStderrTask = `$stageProcess.StandardError.ReadToEndAsync()
-        if (-not `$stageProcess.WaitForExit(60000)) { try { `$stageProcess.Kill() } catch {}; throw 'WSL collector staging transport timed out' }
+        try {
+            `$stageProcess.StandardInput.BaseStream.Write(`$collectorBytes, 0, `$collectorBytes.Length)
+            `$stageProcess.StandardInput.BaseStream.Flush()
+        }
+        finally { `$stageProcess.StandardInput.Close() }
+        if (-not `$stageProcess.WaitForExit($StageTimeoutSeconds * 1000)) { try { `$stageProcess.Kill() } catch {}; throw 'WSL collector staging transport timed out' }
         `$stageStdout = `$stageStdoutTask.GetAwaiter().GetResult(); `$stageStderr = `$stageStderrTask.GetAwaiter().GetResult()
         if (`$stageProcess.ExitCode -ne 0) { throw "WSL collector staging transport failed: `$stageStderr" }
     }
@@ -305,32 +358,60 @@ function Stage-WslCollector {
 function Stop-WslCollectionUnit {
     & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- /bin/true
     if (`$LASTEXITCODE -ne 0) { throw 'WSL transport unavailable while terminating collection unit' }
-    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- systemctl kill --kill-whom=all self-hosted-ci-bootstrap-evidence-collect 2>`$null
-    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- systemctl stop self-hosted-ci-bootstrap-evidence-collect 2>`$null
-    `$show = @(& `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- systemctl show self-hosted-ci-bootstrap-evidence-collect --property=ActiveState --property=SubState --property=ControlGroup --value 2>&1)
-    `$showExit = `$LASTEXITCODE
-    if (`$showExit -eq 4) { return }
-    if (`$showExit -ne 0 -or `$show.Count -ne 3) { throw 'WSL collection unit termination state is unobservable' }
-    `$active = ([string]`$show[0]).Trim(); `$sub = ([string]`$show[1]).Trim(); `$controlGroup = ([string]`$show[2]).Trim()
-    if (`$active -notin @('inactive','failed') -or `$sub -notin @('dead','failed')) { throw 'WSL collection unit could not be terminated' }
-    if (`$controlGroup) {
-        & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- /usr/bin/test '!' -s "/sys/fs/cgroup`$controlGroup/cgroup.procs"
-        if (`$LASTEXITCODE -ne 0) { throw 'WSL collection unit cgroup still contains processes' }
+    `$controlGroup = "/system.slice/$collectionUnit.service"
+    `$show = @(& `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- systemctl show '$collectionUnit' --property=ControlGroup --value 2>`$null)
+    if (`$LASTEXITCODE -eq 0 -and `$show.Count -eq 1 -and ([string]`$show[0]).Trim()) { `$controlGroup = ([string]`$show[0]).Trim() }
+    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- systemctl kill --kill-whom=all '$collectionUnit' 2>`$null
+    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- systemctl stop '$collectionUnit' 2>`$null
+    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- systemctl reset-failed '$collectionUnit' 2>`$null
+    `$unitDeadline = (Get-Date).AddSeconds(15)
+    do {
+        `$unitShow = @(& `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- systemctl show '$collectionUnit' --property=LoadState --value 2>`$null)
+        `$unitShowExit = `$LASTEXITCODE
+        if (`$unitShowExit -eq 4 -or (`$unitShowExit -eq 0 -and `$unitShow.Count -eq 1 -and ([string]`$unitShow[0]).Trim() -eq 'not-found')) { break }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt `$unitDeadline)
+    if (`$unitShowExit -ne 4 -and -not (`$unitShowExit -eq 0 -and `$unitShow.Count -eq 1 -and ([string]`$unitShow[0]).Trim() -eq 'not-found')) { throw 'WSL collection unit remains loaded after termination' }
+    `$cgroupProgram = 'import os,sys; path="/sys/fs/cgroup"+sys.argv[1]; procs=os.path.join(path,"cgroup.procs"); raise SystemExit(0 if not os.path.exists(path) or (os.path.isfile(procs) and not open(procs,encoding="ascii").read().strip()) else 1)'
+    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- /usr/bin/python3 -c `$cgroupProgram `$controlGroup
+    if (`$LASTEXITCODE -ne 0) { throw 'WSL collection unit cgroup still contains processes or is unobservable' }
+}
+function Assert-WslCollectorStageAbsent {
+    `$verifyProgram = 'import os,sys; root=sys.argv[1]; target=sys.argv[2]; temporary=os.path.join(root,".collector.tmp"); raise SystemExit(0 if not os.path.lexists(root) and not os.path.lexists(target) and not os.path.lexists(temporary) else 1)'
+    & `$env:SystemRoot\System32\wsl.exe -d $DistroName -u root -- /usr/bin/python3 -c `$verifyProgram '$collectorLinuxRoot' '$collectorLinuxPath'
+    if (`$LASTEXITCODE -ne 0) { throw 'WSL collector staging absence could not be verified' }
+}
+function Merge-CollectionFailure([string]`$Existing, [string]`$Additional) {
+    if (`$Existing) { return "`$Existing; `$Additional" }
+    return `$Additional
+}
+function Complete-WslCollectionCleanup {
+    `$failure = `$null
+    try { Stop-WslCollectionUnit } catch { `$failure = Merge-CollectionFailure `$failure `$_.Exception.Message }
+    try { Remove-WslCollectorStage } catch { `$failure = Merge-CollectionFailure `$failure `$_.Exception.Message }
+    try { Assert-WslCollectorStageAbsent } catch { `$failure = Merge-CollectionFailure `$failure `$_.Exception.Message }
+    if (`$failure) { throw `$failure }
+}
+function Wait-WslProcess([Diagnostics.Process]`$Process) {
+    if (-not `$Process.WaitForExit($WslTimeoutSeconds * 1000)) {
+        try { `$Process.Kill() } catch {}
+        throw 'WSL evidence transport exceeded its nested timeout'
     }
 }
-`$stageAttempted = `$false; `$collectionFailure = `$null
+`$stageAttempted = `$false; `$collectionFailure = `$null; `$stdout = ''; `$stderr = ''; `$stdoutTask = `$null; `$stderrTask = `$null
+`$collectionExitCode = `$null; `$collectionStatus = `$null; `$cleanupVerified = `$false
 try {
     `$stageAttempted = `$true
     Stage-WslCollector
     `$psi = [Diagnostics.ProcessStartInfo]::new()
     `$psi.FileName = "`$env:SystemRoot\System32\wsl.exe"
-    `$psi.Arguments = '-d $DistroName -u root -- systemd-run --quiet --wait --pipe --collect --setenv=WSL_DISTRO_NAME=$DistroName --property=RuntimeMaxSec=600 --property=TimeoutStopSec=15 --property=KillMode=control-group --unit=self-hosted-ci-bootstrap-evidence-collect /usr/bin/python3 -c "import base64;exec(base64.b64decode(''$bootstrapB64''))" $collectorLinuxPath $wslCollectorSha256'
+    `$psi.Arguments = '-d $DistroName -u root -- systemd-run --quiet --wait --pipe --collect --setenv=WSL_DISTRO_NAME=$DistroName --property=RuntimeMaxSec=$SystemdTimeoutSeconds --property=TimeoutStopSec=15 --property=KillMode=control-group --unit=$collectionUnit /usr/bin/python3 -c "import base64;exec(base64.b64decode(''$bootstrapB64''))" $collectorLinuxPath $wslCollectorSha256'
     `$psi.UseShellExecute = `$false; `$psi.CreateNoWindow = `$true
     `$psi.RedirectStandardOutput = `$true; `$psi.RedirectStandardError = `$true
     `$process = [Diagnostics.Process]::new(); `$process.StartInfo = `$psi
     if (-not `$process.Start()) { throw 'could not start exact WSL evidence collector' }
     `$stdoutTask = `$process.StandardOutput.ReadToEndAsync(); `$stderrTask = `$process.StandardError.ReadToEndAsync()
-    if (-not `$process.WaitForExit($TimeoutSeconds * 1000)) { try { `$process.Kill() } catch {}; Stop-WslCollectionUnit; throw 'WSL evidence collector timed out and its systemd unit was terminated' }
+    Wait-WslProcess `$process
     `$stdout = `$stdoutTask.GetAwaiter().GetResult(); `$stderr = `$stderrTask.GetAwaiter().GetResult()
     [IO.File]::WriteAllText('$StdoutPath', `$stdout, [Text.UTF8Encoding]::new(`$false))
     [IO.File]::WriteAllText('$StderrPath', `$stderr, [Text.UTF8Encoding]::new(`$false))
@@ -339,19 +420,33 @@ try {
     `$observation = `$last | ConvertFrom-Json
     if (`$observation.collector -ne 'wsl-jit-semantic-observations' -or [int]`$observation.schema_version -ne 1) { throw 'WSL evidence schema mismatch' }
     [IO.File]::WriteAllText('$WslStagingPath', `$last + "`n", [Text.UTF8Encoding]::new(`$false))
-    [ordered]@{ status='observed'; exit_code=`$process.ExitCode; collection_status=`$observation.collection_status } | ConvertTo-Json -Compress | Set-Content -LiteralPath '$ResultPath' -Encoding UTF8
+    `$collectionExitCode = `$process.ExitCode; `$collectionStatus = `$observation.collection_status
 }
-catch { `$collectionFailure = `$_.Exception.Message }
+catch {
+    `$collectionFailure = `$_.Exception.Message
+    try {
+        if (`$null -ne `$stdoutTask -and `$stdoutTask.IsCompleted) { `$stdout = `$stdoutTask.GetAwaiter().GetResult() }
+        if (`$null -ne `$stderrTask -and `$stderrTask.IsCompleted) { `$stderr = `$stderrTask.GetAwaiter().GetResult() }
+    } catch {}
+    [IO.File]::WriteAllText('$StdoutPath', [string]`$stdout, [Text.UTF8Encoding]::new(`$false))
+    [IO.File]::WriteAllText('$StderrPath', (([string]`$stderr) + "`n" + `$collectionFailure).Trim() + "`n", [Text.UTF8Encoding]::new(`$false))
+    [ordered]@{ status='failed'; error=`$collectionFailure } | ConvertTo-Json -Compress | Set-Content -LiteralPath '$ResultPath' -Encoding UTF8
+}
 finally {
     if (`$stageAttempted) {
-        try { Remove-WslCollectorStage }
+        try { Complete-WslCollectionCleanup; `$cleanupVerified = `$true }
         catch {
             if (`$collectionFailure) { `$collectionFailure += "; `$(`$_.Exception.Message)" }
             else { `$collectionFailure = `$_.Exception.Message }
         }
     }
 }
-if (`$collectionFailure) { throw `$collectionFailure }
+if (`$collectionFailure) {
+    [IO.File]::WriteAllText('$StderrPath', (([string]`$stderr) + "`n" + `$collectionFailure).Trim() + "`n", [Text.UTF8Encoding]::new(`$false))
+    [ordered]@{ status='failed'; error=`$collectionFailure; cleanup_verified=`$cleanupVerified } | ConvertTo-Json -Compress | Set-Content -LiteralPath '$ResultPath' -Encoding UTF8
+    throw `$collectionFailure
+}
+[ordered]@{ status='observed'; exit_code=`$collectionExitCode; collection_status=`$collectionStatus; cleanup_verified=`$true } | ConvertTo-Json -Compress | Set-Content -LiteralPath '$ResultPath' -Encoding UTF8
 "@
     [IO.File]::WriteAllText($WorkerPath, $worker, [Text.UTF8Encoding]::new($false))
 
@@ -369,18 +464,29 @@ if (`$collectionFailure) { throw `$collectionFailure }
     if ($actions.Count -ne 1 -or [IO.Path]::GetFullPath([string]$actions[0].Execute) -ne [IO.Path]::GetFullPath($PowerShellExe) -or [string]$actions[0].Arguments -ne "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$WorkerPath`"") { throw "one-shot task action postcondition failed" }
     if (-not $observed.Settings.Enabled -or -not $observed.Settings.AllowDemandStart -or $observed.Settings.StartWhenAvailable -or $observed.Settings.MultipleInstances -ne "IgnoreNew") { throw "one-shot task settings postcondition failed" }
 
+    $baselineInfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
+    $baselineLastRunTime = [DateTime]$baselineInfo.LastRunTime
+    $parentDeadline = (Get-Date).AddSeconds($ParentTimeoutSeconds)
+    $taskDeadline = $parentDeadline.AddSeconds(-$CleanupBudgetSeconds)
     Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds + 30)
+    $complete = $false; $failed = $false; $runObserved = $false
     do {
-        Start-Sleep -Seconds 2
         $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
         $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
-        $complete = [string]$task.State -ne "Running" -and (Test-Path -LiteralPath $ResultPath -PathType Leaf)
-        $failed = [string]$task.State -ne "Running" -and [uint32]$info.LastTaskResult -notin @(0, 267009)
-    } while (-not $complete -and -not $failed -and (Get-Date) -lt $deadline)
-    if (-not $complete -or [uint32]$info.LastTaskResult -ne 0) { throw "one-shot task failed or timed out" }
+        $taskState = [string]$task.State
+        $taskResult = [uint32]$info.LastTaskResult
+        $lastTaskState = $taskState; $lastTaskResult = $taskResult
+        $lastRunAdvanced = [DateTime]$info.LastRunTime -gt $baselineLastRunTime
+        $resultPresent = Test-Path -LiteralPath $ResultPath -PathType Leaf
+        $runObserved = $runObserved -or $lastRunAdvanced -or $taskState -eq "Running" -or $resultPresent
+        $complete = $runObserved -and $taskState -ne "Running" -and $resultPresent -and $taskResult -eq 0
+        $schedulerPending = $taskResult -in @([uint32]267008, [uint32]267009, [uint32]267011)
+        $failed = $runObserved -and $taskState -ne "Running" -and -not $schedulerPending -and $taskResult -ne 0
+        if (-not $complete -and -not $failed) { Start-Sleep -Milliseconds 500 }
+    } while (-not $complete -and -not $failed -and (Get-Date) -lt $taskDeadline -and (Get-Date) -lt $parentDeadline)
+    if (-not $complete) { throw "one-shot task did not complete successfully (state=$taskState result=$taskResult run_observed=$runObserved result_present=$resultPresent)" }
     $result = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json
-    if ($result.status -ne "observed" -or -not (Test-Path -LiteralPath $WslStagingPath -PathType Leaf)) { throw "WSL collection postcondition failed" }
+    if ($result.status -ne "observed" -or -not [bool]$result.cleanup_verified -or -not (Test-Path -LiteralPath $WslStagingPath -PathType Leaf)) { throw "WSL collection postcondition failed" }
     $wslObservation = Get-Content -LiteralPath $WslStagingPath -Raw | ConvertFrom-Json
     $wslSaved = Save-ContentAddressedJson $WslStagingPath "wsl-jit-semantic-observations"
 
@@ -411,6 +517,26 @@ if (`$collectionFailure) { throw `$collectionFailure }
 }
 catch {
     $original = $_.Exception.Message; $cleanup = [Collections.Generic.List[string]]::new()
+    $diagnosticPath = $null
+    $taskBeforeDiagnostics = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($null -ne $taskBeforeDiagnostics -and [string]$taskBeforeDiagnostics.State -eq "Running") {
+        try {
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+            $quiesceDeadline = (Get-Date).AddSeconds(15)
+            do {
+                Start-Sleep -Milliseconds 250
+                $taskBeforeDiagnostics = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+            } while ($null -ne $taskBeforeDiagnostics -and [string]$taskBeforeDiagnostics.State -eq "Running" -and (Get-Date) -lt $quiesceDeadline)
+            if ($null -ne $taskBeforeDiagnostics -and [string]$taskBeforeDiagnostics.State -eq "Running") { throw "task did not quiesce before diagnostic preservation" }
+            if ($null -ne $taskBeforeDiagnostics) {
+                $lastTaskState = [string]$taskBeforeDiagnostics.State
+                $lastTaskResult = [uint32](Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop).LastTaskResult
+            }
+        }
+        catch { $cleanup.Add("task quiesce: $($_.Exception.Message)") }
+    }
+    try { $diagnosticPath = Save-FailureDiagnostics $original $service.SID $lastTaskState $lastTaskResult }
+    catch { $cleanup.Add("diagnostic preservation: $($_.Exception.Message)") }
     if ($passwordApplied) {
         $recoveryPassword = New-CryptographicAccountPassword
         try { Set-LocalUser -Name $service.Name -Password $recoveryPassword -ErrorAction Stop; $passwordApplied = $false }
@@ -426,7 +552,8 @@ catch {
     if ($null -ne $windowsSaved) { [void]$preservedPaths.Add([string]$windowsSaved.path) }
     if ($null -ne $wslSaved) { [void]$preservedPaths.Add([string]$wslSaved.path) }
     $preserved = $preservedPaths -join ", "
-    if ($cleanup.Count) { throw "bootstrap evidence collection failed: $original. Preserved: $preserved. Cleanup failures: $($cleanup -join '; ')" }
-    throw "bootstrap evidence collection failed; task, credential, and staging cleanup were verified. Preserved: $preserved. Original error: $original"
+    $diagnostics = $(if ($diagnosticPath) { [string]$diagnosticPath } else { "unavailable" })
+    if ($cleanup.Count) { throw "bootstrap evidence collection failed: $original. Task state/result: $lastTaskState/$lastTaskResult. Evidence: $preserved. Diagnostics: $diagnostics. Cleanup failures: $($cleanup -join '; ')" }
+    throw "bootstrap evidence collection failed; Windows task, credential, and staging cleanup were verified. Evidence: $preserved. Diagnostics: $diagnostics. Task state/result: $lastTaskState/$lastTaskResult. Original error: $original"
 }
 finally { if ($null -ne $temporaryPassword) { $temporaryPassword.Dispose() } }
