@@ -218,9 +218,17 @@ class IncusBoundaryInstallerTests(unittest.TestCase):
             "== '8MiB'",
             "pool_vfs.f_bavail * pool_vfs.f_frsize < 64 * mib",
             "quota_vfs.f_bavail * quota_vfs.f_frsize < 7 * mib",
-            "reports the volume's 8 MiB quota",
-            "write_exact(under, 7 * mib)",
-            "write_exact(over, 2 * mib)",
+            'chown 65534:65534 "${quota_volume_path}"',
+            'chmod 0700 "${quota_volume_path}"',
+            "os.O_DIRECTORY | os.O_NOFOLLOW",
+            "os.setgroups([])",
+            "os.setgid(65534)",
+            "os.setuid(65534)",
+            'status["CapEff"]',
+            "(1 << 24)",
+            'write_exact("under-quota.bin", 7 * mib)',
+            'write_exact("over-quota.bin", 2 * mib)',
+            "dir_fd=directory_fd",
             "exc.errno != errno.EDQUOT",
             'incus storage volume delete "${pool}" "${canary_quota}"',
             "quota canary escaped the dedicated pool",
@@ -235,6 +243,16 @@ class IncusBoundaryInstallerTests(unittest.TestCase):
             source.rindex('incus storage volume delete "${pool}" "${canary_quota}"'),
             source.index("current_phase='incus-negative-policy-canaries'"),
         )
+        self.assertLess(
+            source.index("os.setgroups([])"), source.index("os.setgid(65534)")
+        )
+        self.assertLess(
+            source.index("os.setgid(65534)"), source.index("os.setuid(65534)")
+        )
+        self.assertLess(
+            source.index("os.setuid(65534)"),
+            source.index('write_exact("under-quota.bin", 7 * mib)'),
+        )
 
     def test_quota_canary_sizes_form_a_reachable_boundary(self) -> None:
         source = PAYLOAD.read_text(encoding="utf-8")
@@ -245,10 +263,10 @@ class IncusBoundaryInstallerTests(unittest.TestCase):
             re.search(r"quota_vfs\.f_bavail \* quota_vfs\.f_frsize < (\d+) \* mib", source).group(1)  # type: ignore[union-attr]
         )
         under = int(
-            re.search(r"write_exact\(under, (\d+) \* mib\)", source).group(1)  # type: ignore[union-attr]
+            re.search(r'write_exact\("under-quota\.bin", (\d+) \* mib\)', source).group(1)  # type: ignore[union-attr]
         )
         crossing = int(
-            re.search(r"write_exact\(over, (\d+) \* mib\)", source).group(1)  # type: ignore[union-attr]
+            re.search(r'write_exact\("over-quota\.bin", (\d+) \* mib\)', source).group(1)  # type: ignore[union-attr]
         )
 
         self.assertGreater(under, 0)
