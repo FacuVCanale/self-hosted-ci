@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+
+current_phase='preflight'
+report_payload_failure() {
+  local exit_code="$1"
+  local line_number="$2"
+  local failed_command="$3"
+  trap - ERR
+  printf 'incus boundary payload failed: phase=%s line=%s exit=%s command=%q\n' \
+    "${current_phase}" "${line_number}" "${exit_code}" "${failed_command}" >&2
+  exit "${exit_code}"
+}
+trap 'report_payload_failure "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 readonly expected_distro='Ubuntu-24.04-CI'
 readonly project='ci-jit'
@@ -38,6 +51,7 @@ grep -qw ext4 /proc/filesystems || { printf 'the WSL kernel does not expose ext4
 grep -Eq '(^|[[:space:]])loop([[:space:]]|$)' /proc/devices || { printf 'the WSL kernel does not expose loop devices\n' >&2; exit 1; }
 losetup -f >/dev/null || { printf 'no free loop device is available\n' >&2; exit 1; }
 
+current_phase='bounded-storage-image'
 install -d -o root -g root -m 0700 "${storage_root}"
 if [[ -e "${storage_image}" ]]; then
   [[ ! -e "${storage_staging}" ]] || { printf 'completed storage image coexists with staging state\n' >&2; exit 1; }
@@ -119,6 +133,7 @@ install_exact_systemd_file() {
 install -d -o root -g root -m 0755 "${incus_dropin_dir}"
 install_exact_systemd_file "${mount_unit_path}" "${mount_unit_content}"
 install_exact_systemd_file "${incus_dropin_path}" "${incus_dropin_content}"
+current_phase='bounded-storage-mount'
 systemctl stop incus.socket incus.service
 systemctl daemon-reload
 systemctl enable --now "${mount_unit}"
@@ -156,6 +171,7 @@ install -d -o root -g root -m 0700 "${storage_pool_path}"
 
 # Initialization is deliberately a one-time database transition. Existing
 # Incus state is never reinitialized or replaced by this installer.
+current_phase='incus-daemon-initialization'
 if [[ ! -e /var/lib/incus/database/global/db.bin ]]; then
   incus admin init --preseed <<'EOF'
 config: {}
@@ -219,18 +235,45 @@ if [[ "${pool_exists}" == false ]]; then
   [[ -z "$(find "${storage_pool_path}" -mindepth 1 -maxdepth 1 -print -quit)" ]] || { printf 'Incus pool source is not empty before creation\n' >&2; exit 1; }
   incus storage create "${pool}" dir source="${storage_pool_path}"
 fi
+current_phase='incus-storage-pool'
 [[ "$(incus storage list --format json | json_names)" == "${pool}" ]]
 storage_json="$(incus query "/1.0/storage-pools/${pool}")"
 pool_source="$(STORAGE_JSON="${storage_json}" python3 -c 'import json,os; print(json.loads(os.environ["STORAGE_JSON"]).get("config", {}).get("source", ""))')"
 [[ "${pool_source}" == "${storage_pool_path}" ]]
 [[ -z "$(incus storage volume list "${pool}" --all-projects --format csv)" ]] || { printf 'new Incus pool is not volume-empty\n' >&2; exit 1; }
 
+current_phase='incus-isolated-network'
+readonly -a isolated_network_config=(
+  'ipv4.address=10.254.0.1/28'
+  'ipv4.dhcp=true'
+  'ipv4.dhcp.ranges=10.254.0.2-10.254.0.2'
+  'ipv4.dhcp.gateway=10.254.0.1'
+  'ipv4.routing=false'
+  'ipv4.nat=false'
+  'ipv4.firewall=false'
+  'ipv6.address=none'
+  'ipv6.routing=false'
+  'ipv6.nat=false'
+  'ipv6.firewall=false'
+  'dns.mode=none'
+)
 if ! incus network list --format json | json_has_name "${bridge}"; then
-  incus network create "${bridge}" ipv4.address=10.254.0.1/28 ipv4.dhcp=true ipv4.dhcp.ranges=10.254.0.2-10.254.0.2 ipv4.dhcp.gateway=none ipv4.nat=false ipv4.firewall=false ipv6.address=none ipv6.nat=false ipv6.firewall=false dns.mode=none
+  incus network create "${bridge}" "${isolated_network_config[@]}"
+else
+  # Incus 6.0 predates the `ipv4.dhcp.gateway=none` sentinel. Keep dnsmasq's
+  # AppArmor confinement instead of using raw.dnsmasq: announce only the
+  # bridge-local endpoint. Incus must not enable routing or NAT, and the
+  # runtime nftables service supplies the mandatory default-deny boundary.
+  for stale_network_key in \
+    bridge.external_interfaces raw.dnsmasq ipv4.nat.address \
+    ipv4.routes ipv4.ovn.ranges ipv6.nat.address ipv6.routes ipv6.ovn.ranges; do
+    incus network unset "${bridge}" "${stale_network_key}"
+  done
+  incus network set "${bridge}" "${isolated_network_config[@]}"
 fi
-incus network set "${bridge}" ipv4.address=10.254.0.1/28 ipv4.dhcp=true ipv4.dhcp.ranges=10.254.0.2-10.254.0.2 ipv4.dhcp.gateway=none ipv4.nat=false ipv4.firewall=false ipv6.address=none ipv6.nat=false ipv6.firewall=false dns.mode=none
 [[ "$(incus network list --format json | json_names | sort)" == "${bridge}" ]] || { printf 'unexpected Incus network inventory\n' >&2; exit 1; }
 
+current_phase='incus-restricted-project'
 if ! incus project list --format json | json_has_name "${project}"; then
   incus project create "${project}"
 fi
@@ -256,6 +299,7 @@ if profile.get("config", {}) != {} or profile.get("devices", {}) != {}:
 verify_default_profile_neutral default
 verify_default_profile_neutral "${project}"
 
+current_phase='incus-runner-profile'
 if ! incus profile list --project "${project}" --format json | json_has_name "${profile}"; then
   incus profile create "${profile}" --project "${project}"
 fi
@@ -310,14 +354,21 @@ network_config = network.get("config", {})
 required_network = {
     "ipv4.address": "10.254.0.1/28", "ipv4.dhcp": "true",
     "ipv4.dhcp.ranges": "10.254.0.2-10.254.0.2",
-    "ipv4.dhcp.gateway": "none", "ipv4.nat": "false",
+    "ipv4.dhcp.gateway": "10.254.0.1",
+    "ipv4.routing": "false", "ipv4.nat": "false",
     "ipv4.firewall": "false", "ipv6.address": "none",
-    "ipv6.nat": "false", "ipv6.firewall": "false", "dns.mode": "none",
+    "ipv6.routing": "false", "ipv6.nat": "false",
+    "ipv6.firewall": "false", "dns.mode": "none",
 }
 if any(network_config.get(key) != value for key, value in required_network.items()):
     raise SystemExit("isolated bridge addressing or NAT drift")
-if network_config.get("bridge.external_interfaces") not in (None, ""):
-    raise SystemExit("isolated bridge has an external interface")
+for forbidden_key in (
+    "bridge.external_interfaces", "raw.dnsmasq", "ipv4.nat.address",
+    "ipv4.routes", "ipv4.ovn.ranges", "ipv6.nat.address", "ipv6.routes",
+    "ipv6.ovn.ranges",
+):
+    if network_config.get(forbidden_key) not in (None, ""):
+        raise SystemExit(f"isolated bridge retains forbidden key: {forbidden_key}")
 
 if storage.get("driver") != "dir":
     raise SystemExit("dedicated storage pool does not use the dir driver")
@@ -365,7 +416,7 @@ for device in devices.values():
     if device.get("type") in {"proxy", "unix-char", "unix-block"}:
         raise SystemExit("forbidden host-facing device type")
 PY
-
+current_phase='incus-negative-policy-canaries'
 for required_flag in --empty --no-profiles --device; do
   incus init --help | grep -Fq -- "${required_flag}" || { printf 'Incus init lacks required flag: %s\n' "${required_flag}" >&2; exit 1; }
 done
@@ -484,6 +535,7 @@ expect_policy_rejection idmap 'idmap|isolat|security[.]idmap' \
 
 cleanup_canaries
 trap - EXIT
+current_phase='final-evidence'
 network_sha256="$(printf '%s' "${network_json}" | sha256sum | cut -d' ' -f1)"
 profile_sha256="$(printf '%s' "${profile_json}" | sha256sum | cut -d' ' -f1)"
 storage_image_apparent_bytes="$(stat -c %s -- "${storage_image}")"

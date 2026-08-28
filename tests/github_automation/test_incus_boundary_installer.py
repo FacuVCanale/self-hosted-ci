@@ -123,7 +123,8 @@ class IncusBoundaryInstallerTests(unittest.TestCase):
             "limits.disk=12GiB",
             "restricted.containers.privilege=isolated",
             "ipv4.address=10.254.0.1/28",
-            "ipv4.dhcp.gateway=none",
+            "ipv4.dhcp.gateway=10.254.0.1",
+            "ipv4.routing=false",
             "ipv4.nat=false",
             "ipv6.address=none",
             "systemctl start incus.service",
@@ -152,7 +153,10 @@ class IncusBoundaryInstallerTests(unittest.TestCase):
             'set(devices) != {"root", "eth0"}',
             'root != {"type": "disk", "path": "/", "pool": "ci-jit-dedicated", "size": "12GiB"}',
             '{"proxy", "unix-char", "unix-block"}',
-            'network_config.get("bridge.external_interfaces") not in (None, "")',
+            '"bridge.external_interfaces", "raw.dnsmasq"',
+            '"ipv4.dhcp.gateway": "10.254.0.1"',
+            '"ipv4.routing": "false"',
+            '"ipv6.routing": "false"',
             '"ipv4.nat": "false"',
             '"ipv6.nat": "false"',
             '"root_is_only_disk":true',
@@ -220,6 +224,44 @@ class IncusBoundaryInstallerTests(unittest.TestCase):
         ):
             self.assertIn(token, source)
         self.assertNotIn("no space left on device", source.lower())
+
+    def test_incident_regression_uses_the_safe_incus_6_0_gateway_contract(
+        self,
+    ) -> None:
+        source = PAYLOAD.read_text(encoding="utf-8")
+        self.assertNotIn("'ipv4.dhcp.gateway=none'", source)
+        self.assertNotIn("raw.dnsmasq=dhcp-option=3", source)
+        self.assertIn("'ipv4.dhcp.gateway=10.254.0.1'", source)
+        self.assertIn("'ipv4.routing=false'", source)
+        self.assertIn("'ipv4.nat=false'", source)
+        self.assertIn("'ipv4.firewall=false'", source)
+        self.assertIn(
+            'incus network unset "${bridge}" "${stale_network_key}"', source
+        )
+        self.assertIn(
+            'bridge.external_interfaces raw.dnsmasq ipv4.nat.address', source
+        )
+        self.assertIn(
+            '"bridge.external_interfaces", "raw.dnsmasq", "ipv4.nat.address"',
+            source,
+        )
+        self.assertIn(
+            "Incus 6.0 predates the `ipv4.dhcp.gateway=none` sentinel", source
+        )
+        self.assertIn("AppArmor confinement instead of using raw.dnsmasq", source)
+
+    def test_payload_failures_report_the_exact_phase_line_and_command(self) -> None:
+        source = PAYLOAD.read_text(encoding="utf-8")
+        for token in (
+            "current_phase='preflight'",
+            'trap \'report_payload_failure "$?" "$LINENO" "$BASH_COMMAND"\' ERR',
+            "phase=%s line=%s exit=%s command=%q",
+            "current_phase='incus-isolated-network'",
+            "current_phase='incus-restricted-project'",
+            "current_phase='incus-runner-profile'",
+            "current_phase='incus-negative-policy-canaries'",
+        ):
+            self.assertIn(token, source)
 
     def test_systemd_owns_mount_persistence_and_pool_uses_empty_child(self) -> None:
         source = PAYLOAD.read_text(encoding="utf-8")

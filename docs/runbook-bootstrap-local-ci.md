@@ -137,7 +137,8 @@ Apply requiere dos acknowledgements separados:
 Este paso inicializa Incus una sola vez si su base todavía no existe y crea
 únicamente `ci-jit`, el pool `dir` sobre un filesystem ext4 loop-backed
 `ci-jit-dedicated`, el bridge host-only `ci-jit-isolated` sobre
-`10.254.0.1/28`, con una única lease DHCP (`10.254.0.2`) y sin gateway, uplink,
+`10.254.0.1/28`, con una única lease DHCP (`10.254.0.2`), gateway local
+anunciado pero no enrutable, y sin uplink,
 NAT ni IPv6, y el perfil `ci-jit`. El proyecto queda
 `restricted`, limitado a un container/una instancia, 2 CPU, 4 GiB de memoria,
 2048 procesos y un volumen root de 12 GiB dentro de un pool cuyo loop file
@@ -371,7 +372,9 @@ sudo /usr/local/lib/self-hosted-ci/configure-garm-jit.sh --apply \
 Esta etapa verifica la imagen local por fingerprint, configura callback y
 metadata directos en `10.254.0.1:8080`, e inyecta en el bootstrap del runner
 `HTTP_PROXY`/`HTTPS_PROXY=http://10.254.0.1:3128` con
-`NO_PROXY=10.254.0.1,127.0.0.1,localhost`. El bridge no necesita gateway ni NAT.
+`NO_PROXY=10.254.0.1,127.0.0.1,localhost`. El bridge anuncia solamente su
+gateway local, con routing y NAT desactivados; nftables mantiene el egress
+default-deny.
 GARM se inicia sólo en una unidad transitoria, el scale set queda deshabilitado
 con `max=1` y `min_idle=0`, y no se crea ningún runner. `health-state.json` se
 escribe atómicamente desde el resultado real del API, incluyendo ID, nombre,
