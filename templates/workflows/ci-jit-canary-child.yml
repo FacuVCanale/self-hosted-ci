@@ -50,6 +50,7 @@ jobs:
       group: jit-canary-${{ needs.validate-package.outputs.repository }}-${{ needs.validate-package.outputs.pr_number }}
       cancel-in-progress: false
     env:
+      CI_GATE_TRUSTED_TESTED_SHA: ${{ needs.validate-package.outputs.tested_merge_sha }}
       CANARY_SCENARIO: ${{ needs.validate-package.outputs.scenario }}
       EXPECTED_BASE_SHA: ${{ needs.validate-package.outputs.base_sha }}
       EXPECTED_HEAD_SHA: ${{ needs.validate-package.outputs.head_sha }}
