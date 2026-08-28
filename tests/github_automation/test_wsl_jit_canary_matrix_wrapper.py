@@ -29,18 +29,19 @@ class CanaryMatrixWrapperTests(unittest.TestCase):
         self.assertIn('transport="Windows-to-WSL-stdin-no-drvfs"', self.source)
         self.assertNotIn("/mnt/c/", self.source.lower())
 
-    def test_canary_executes_the_staged_source_without_mutating_receipt_targets(self):
-        self.assertIn("export PYTHONPATH=/opt/self-hosted-ci/source", self.source)
+    def test_canary_executes_the_installed_runtime_from_receipt_targets(self):
+        self.assertIn("export PYTHONPATH=/usr/local/lib/self-hosted-ci", self.source)
         self.assertIn(
-            "/opt/self-hosted-ci/source/scripts/host/run-wsl-jit-canary-matrix.py",
+            "/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py",
             self.source,
         )
         self.assertLess(
-            self.source.index("export PYTHONPATH=/opt/self-hosted-ci/source"),
+            self.source.index("export PYTHONPATH=/usr/local/lib/self-hosted-ci"),
             self.source.index(
-                "/opt/self-hosted-ci/source/scripts/host/run-wsl-jit-canary-matrix.py \"${args[@]}\""
+                "/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py \"${args[@]}\""
             ),
         )
+        self.assertNotIn("/opt/self-hosted-ci/source", self.source)
 
     def test_pre_live_canary_uses_the_bootstrap_reviewer_key(self):
         self.assertIn(

@@ -159,9 +159,9 @@ if value.get("authorized") is not True or value.get("nonce") != sys.argv[2]:
     raise SystemExit("canary nonce or authorization verification mismatch")
 PY
 args=(execute --config /etc/self-hosted-ci/canary-runtime.json --authorization /etc/self-hosted-ci/canary-authorization.json)
-export PYTHONPATH=/opt/self-hosted-ci/source
+export PYTHONPATH=/usr/local/lib/self-hosted-ci
 set +e
-/opt/self-hosted-ci/source/scripts/host/run-wsl-jit-canary-matrix.py "${args[@]}"
+/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py "${args[@]}"
 status=$?
 set -e
 if [[ "$status" == 75 && "$phase" == initial ]]; then
@@ -169,7 +169,7 @@ if [[ "$status" == 75 && "$phase" == initial ]]; then
   exit 75
 fi
 [[ "$status" == 0 ]] || exit "$status"
-/opt/self-hosted-ci/source/scripts/host/run-wsl-jit-canary-matrix.py production-fence
+/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py production-fence
 printf '{"status":"terminal","nonce":"%s","runtime_empty":true,"production_activation_changed":false,"outbound_worker_started":false}\n' "$nonce"
 '@
     $payloadB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($linuxPayload))
