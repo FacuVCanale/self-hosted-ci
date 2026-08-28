@@ -184,8 +184,11 @@ Antes de aplicar se deben completar y revisar, en el WSL dedicado:
    una creación privilegiada sean rechazados. No usa el socket Unix ni el
    grupo `incus-admin`, y no habilita GARM ni registra runners.
 4. GARM pineado, con secretos desde un store externo.
-5. Egress default-deny/proxy-only instalado en estado inerte y probado después
-   de reboot. La activación aplica atómicamente una tabla nftables propia,
+5. Cuarentena default-deny instalada con `systemctl enable --now` antes de
+   cualquier rama de activación. Su unit tiene `DefaultDependencies=no`, corre
+   después de `local-fs.target` y antes de `incus.service`, de modo que persiste
+   después de reboot sin una ventana de red abierta. La activación reemplaza
+   atómicamente esa cuarentena por la policy proxy-only,
    permite desde el bridge sólo DHCP y los proxies locales, bloquea forwarding,
    limita Squid a `CONNECT` 443 contra la allowlist y expone un callback proxy
    acotado a metadata y callbacks GARM. Los units siguen gateados por
@@ -202,6 +205,13 @@ Antes de aplicar se deben completar y revisar, en el WSL dedicado:
    Ese manifiesto también fija los hashes de `garm`, `garm-cli` y el provider.
    Excluye deliberadamente secretos, certificados, claves y el `config.toml`
    materializado de GARM.
+7. El mismo payload firmado de `runner-boundary-v2` contiene la autorización
+   canary Ed25519 y el proof set de seis escenarios. Cada proof liga nonce,
+   authorization digest, repo/SHA, allocation, scale set, run/job, receipts y
+   cleanup global. También en reboot debe existir exactamente un job reclamado
+   (`jobs_started=1`) con `started_at`; cero jobs ya no constituye evidencia.
+   El evaluator deriva desde esos proofs cualquier vista legacy
+   necesaria; `host_security` ya no acepta `runner_lifecycle_runs` booleanos.
 
 Recolectar y validar evidencia sin activar nada:
 
@@ -330,14 +340,40 @@ fingerprint y mapping de alias exactos, con GARM apagado y cero registros de
 runners.
 
 La configuración de GARM es una transacción separada e inerte. Antes de
-activarlo, crear fuera del repo cuatro archivos root-only (`0600`) con el secreto
-JWT, la passphrase de SQLite y el username/password del administrador GARM.
-El password se envía únicamente en el body de un login loopback; nunca aparece
-en argv, variables de entorno ni logs. El bearer se valida como JWT `HS256`
+activarlo, crear fuera del repo siete archivos root-only (`0600`): el secreto
+JWT, la passphrase de SQLite, el username/password del administrador GARM y tres
+configuraciones GitHub App con tres PEM distintos.
+El password se envía únicamente en el body de `POST /first-run` o del login
+loopback; nunca aparece
+en argv, variables de entorno ni logs. El bootstrap inicializa el controller de
+forma idempotente: una respuesta `409 already initialized` es esperable en un
+retry y luego se prueba el login con las credenciales root-only. El bearer se
+valida como JWT `HS256`
 administrador firmado por el secreto configurado, se renueva si falta o vence
 en menos de cinco minutos y sólo existe en `/run/self-hosted-ci/garm-cli`
-(`0700`, config `0600`), por lo que desaparece al reiniciar. La entidad de GARM
-(repo u organización) ya debe existir y su UUID se usa como identidad exacta.
+(`0700`, config `0600`), por lo que desaparece al reiniciar.
+
+La entidad ya no se prepara a mano. El comando valida primero tres identidades:
+
+- runner-manager: `Metadata: read`, `Actions: read`, `Administration: write`;
+- dispatcher: `Metadata: read`, `Actions: write`;
+- live-job verifier: `Metadata: read`, `Actions: read`.
+
+Sus app IDs, installation IDs, rutas PEM y fingerprints SPKI-SHA256 deben ser
+distintos. El configurador abre los tres PEM root-only, exige RSA de al menos
+2048 bits y compara la clave pública real, por lo que copiar la misma clave a
+otra ruta también bloquea el apply. GARM recibe únicamente
+runner-manager; dispatcher queda reservado para `workflow_dispatch`; el
+verificador nunca recibe permisos de escritura. Reutilizar una identidad o una
+clave bloquea el apply.
+
+Después reconcilia la credencial GitHub App exacta
+`self-hosted-ci-sandbox-app`, crea o
+actualiza el repo sandbox sin instalar webhooks y recién entonces deriva su UUID
+desde GARM. `--entity-id` es opcional y sirve sólo como postcondición si ya se
+conoce. Los tres archivos usan los contratos
+`runner-manager-app.json.example`, `dispatcher-app.json.example` y
+`live-job-verifier-app.json.example`; cada JSON y PEM debe ser root-only `0600`.
 
 Primero revisar el plan:
 
@@ -357,13 +393,17 @@ sudo /usr/local/lib/self-hosted-ci/configure-garm-jit.sh --apply \
   --database-passphrase-file /root/self-hosted-ci-secrets/garm-db-passphrase \
   --garm-admin-username-file /root/self-hosted-ci-secrets/garm-admin-username \
   --garm-admin-password-file /root/self-hosted-ci-secrets/garm-admin-password \
+  --runner-manager-app-config-file /etc/self-hosted-ci/runner-manager-app.json \
+  --dispatcher-app-config-file /etc/self-hosted-ci/dispatcher-app.json \
+  --live-job-verifier-app-config-file /etc/self-hosted-ci/live-job-verifier-app.json \
   --garm-cli-home /run/self-hosted-ci/garm-cli \
   --authority-kind personal-repository \
-  --entity-id <garm-repository-uuid> \
   --entity-name <owner/repo> \
-  --scale-set-name wsl-jit \
+  --repository-id <github-numeric-repository-id> \
   --image-alias <local-pinned-alias> \
   --image-fingerprint <64-hex-sha256> \
+  --allocation-authority-public-key /etc/self-hosted-ci/allocation-authority-public-key.pem \
+  --live-job-verifier /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py \
   --acknowledge-root-secret-installation \
   --acknowledge-garm-database-mutation \
   --acknowledge-external-github-configuration
@@ -375,13 +415,15 @@ metadata directos en `10.254.0.1:8080`, e inyecta en el bootstrap del runner
 `NO_PROXY=10.254.0.1,127.0.0.1,localhost`. El bridge anuncia solamente su
 gateway local, con routing y NAT desactivados; nftables mantiene el egress
 default-deny.
-GARM se inicia sólo en una unidad transitoria, el scale set queda deshabilitado
-con `max=1` y `min_idle=0`, y no se crea ningún runner. `health-state.json` se
+GARM se inicia sólo en una unidad transitoria y esta fase exige cero scale sets
+y cero instancias Incus: no se crea ni registra ningún runner. `health-state.json` se
 escribe atómicamente desde el resultado real del API, incluyendo ID, nombre,
 provider, imagen, label, autoridad y runner group; no es una declaración manual.
-Si falla, config y health-state vuelven a su versión anterior. La mutación
-inerte de la base de GARM puede quedar parcialmente reconciliada y se corrige
-re-ejecutando el mismo comando.
+Si falla, config, health-state y la base SQLite vuelven a su versión anterior
+después de detener la unidad transitoria; los recursos creados durante el intento
+también se eliminan por API cuando todavía está disponible. Un corte entre esas
+dos defensas sigue siendo retry-safe porque cada objeto se busca por identidad
+exacta antes de crearlo o actualizarlo.
 
 La activación viene recién después. Revisar su plan y aplicar únicamente cuando
 la configuración anterior haya devuelto el ID del scale set exacto:

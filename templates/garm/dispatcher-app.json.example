@@ -1,0 +1,1 @@
+{"schema_version":1,"purpose":"workflow-dispatch","app_id":124,"app_slug":"self-hosted-ci-dispatcher","installation_id":457,"repository":"OWNER/REPO","repository_id":789,"repository_selection":"selected","permissions":{"metadata":"read","actions":"write"},"private_key_file":"/etc/self-hosted-ci/secrets/dispatcher-github-app.pem"}

@@ -178,6 +178,41 @@ PUBLIC_ARTIFACTS = (
         "garm",
     ),
     (
+        "scripts/host/verify-bootstrap-install.py",
+        "/usr/local/lib/self-hosted-ci/verify-bootstrap-install.py",
+        "0755",
+        "script",
+        "wsl-distro",
+    ),
+    (
+        "scripts/host/sign-jit-canary-authorization.py",
+        "/usr/local/lib/self-hosted-ci/sign-jit-canary-authorization.py",
+        "0755",
+        "script",
+        "garm",
+    ),
+    (
+        "scripts/host/verify-jit-canary-authorization.py",
+        "/usr/local/lib/self-hosted-ci/verify-jit-canary-authorization.py",
+        "0755",
+        "script",
+        "garm",
+    ),
+    (
+        "scripts/host/build-wsl-jit-lifecycle-evidence.py",
+        "/usr/local/lib/self-hosted-ci/build-wsl-jit-lifecycle-evidence.py",
+        "0755",
+        "script",
+        "garm",
+    ),
+    (
+        "scripts/host/run-wsl-jit-canary-matrix.py",
+        "/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py",
+        "0755",
+        "script",
+        "garm",
+    ),
+    (
         "scripts/host/collect-wsl-jit-semantic-observations.py",
         "/usr/local/lib/self-hosted-ci/collect-wsl-jit-semantic-observations.py",
         "0755",
@@ -218,6 +253,20 @@ PUBLIC_ARTIFACTS = (
         "0644",
         "python-module",
         "wsl-distro",
+    ),
+    (
+        "github_automation/canary_boundary.py",
+        "/usr/local/lib/self-hosted-ci/github_automation/canary_boundary.py",
+        "0644",
+        "python-module",
+        "garm",
+    ),
+    (
+        "github_automation/canary_worker.py",
+        "/usr/local/lib/self-hosted-ci/github_automation/canary_worker.py",
+        "0644",
+        "python-module",
+        "garm",
     ),
     (
         "github_automation/host_security.py",
@@ -339,6 +388,20 @@ PUBLIC_ARTIFACTS = (
         "garm",
     ),
     (
+        "schemas/jit-canary-authorization-v1.schema.json",
+        "/usr/local/share/self-hosted-ci/schemas/jit-canary-authorization-v1.schema.json",
+        "0644",
+        "schema",
+        "garm",
+    ),
+    (
+        "schemas/runner-lifecycle-proof-v1.schema.json",
+        "/usr/local/share/self-hosted-ci/schemas/runner-lifecycle-proof-v1.schema.json",
+        "0644",
+        "schema",
+        "garm",
+    ),
+    (
         "templates/incus/runner-profile.yaml",
         "/etc/self-hosted-ci/incus/runner-profile.yaml",
         "0640",
@@ -365,6 +428,16 @@ PUBLIC_ARTIFACTS = (
         "0644",
         "public-config",
         "garm",
+    ),
+    *(
+        (
+            f"templates/garm/{name}.json.example",
+            f"/usr/local/share/self-hosted-ci/{name}.json.example",
+            "0644",
+            "public-config",
+            "garm",
+        )
+        for name in ("runner-manager-app", "dispatcher-app", "live-job-verifier-app")
     ),
     (
         "templates/garm/garm-provider-incus.toml",
@@ -435,6 +508,55 @@ PUBLIC_ARTIFACTS = (
         "0644",
         "unit",
         "garm",
+    ),
+    (
+        "packaging/systemd/self-hosted-ci-canary.target",
+        "/etc/systemd/system/self-hosted-ci-canary.target",
+        "0644",
+        "unit",
+        "garm",
+    ),
+    (
+        "packaging/systemd/self-hosted-ci-canary-broker.service",
+        "/etc/systemd/system/self-hosted-ci-canary-broker.service",
+        "0644",
+        "unit",
+        "garm",
+    ),
+    (
+        "packaging/systemd/self-hosted-ci-canary-cleanup.service",
+        "/etc/systemd/system/self-hosted-ci-canary-cleanup.service",
+        "0644",
+        "unit",
+        "garm",
+    ),
+    (
+        "packaging/systemd/self-hosted-ci-canary-egress-proxy.service",
+        "/etc/systemd/system/self-hosted-ci-canary-egress-proxy.service",
+        "0644",
+        "unit",
+        "network-policy",
+    ),
+    (
+        "packaging/systemd/self-hosted-ci-canary-garm.service",
+        "/etc/systemd/system/self-hosted-ci-canary-garm.service",
+        "0644",
+        "unit",
+        "garm",
+    ),
+    (
+        "packaging/systemd/self-hosted-ci-canary-network-policy.service",
+        "/etc/systemd/system/self-hosted-ci-canary-network-policy.service",
+        "0644",
+        "unit",
+        "network-policy",
+    ),
+    (
+        "packaging/systemd/self-hosted-ci-network-quarantine.service",
+        "/etc/systemd/system/self-hosted-ci-network-quarantine.service",
+        "0644",
+        "unit",
+        "network-policy",
     ),
 )
 PINNED_BINARIES = (

@@ -200,9 +200,7 @@ def evaluate_runner_lifecycle(value: Mapping[str, Any]) -> tuple[str, ...]:
     if value["jit"] is not True or value["ephemeral_registration"] is not True:
         blockers.append("runner-lifecycle:not-jit-ephemeral")
     mode = value["terminal_mode"]
-    if (mode == "reboot" and value["jobs_started"] not in {0, 1}) or (
-        mode != "reboot" and value["jobs_started"] != 1
-    ):
+    if value["jobs_started"] != 1:
         blockers.append("runner-lifecycle:not-exactly-one-job")
     for field in ("registration_removed", "workspace_removed", "token_removed", "container_removed", "allocation_removed"):
         if value[field] is not True:

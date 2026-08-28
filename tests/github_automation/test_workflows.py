@@ -134,6 +134,7 @@ class ReconcilerAndConsumerBoundaryTests(unittest.TestCase):
                 "ci-gate-child.yml",
                 "ci-gate-coordinator.yml",
                 "ci-gate-reconciler.yml",
+                "ci-jit-canary-child.yml",
                 "ci-jit-pilot-child.yml",
             },
             names,

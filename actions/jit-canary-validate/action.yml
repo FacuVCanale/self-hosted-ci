@@ -1,0 +1,38 @@
+name: Validate signed non-gating JIT canary package
+description: Verify one reviewer-signed canary scenario and bind it to the live pull request and dispatch.
+inputs:
+  canary-package:
+    required: true
+    description: Exact jit-canary-package-v1 JSON.
+  reviewer-public-key:
+    required: true
+    description: Base64-encoded Ed25519 reviewer public key PEM.
+  reviewer-fingerprint:
+    required: true
+    description: Pinned lowercase SHA-256 SPKI fingerprint.
+outputs:
+  scenario:
+    value: ${{ steps.validate.outputs.scenario }}
+  repository:
+    value: ${{ steps.validate.outputs.repository }}
+  pr_number:
+    value: ${{ steps.validate.outputs.pr_number }}
+  base_sha:
+    value: ${{ steps.validate.outputs.base_sha }}
+  head_sha:
+    value: ${{ steps.validate.outputs.head_sha }}
+  tested_merge_sha:
+    value: ${{ steps.validate.outputs.tested_merge_sha }}
+  runner_label:
+    value: ${{ steps.validate.outputs.runner_label }}
+runs:
+  using: composite
+  steps:
+    - id: validate
+      shell: bash
+      env:
+        JIT_CANARY_PACKAGE: ${{ inputs.canary-package }}
+        JIT_CANARY_REVIEWER_PUBLIC_KEY_B64: ${{ inputs.reviewer-public-key }}
+        JIT_CANARY_REVIEWER_FINGERPRINT: ${{ inputs.reviewer-fingerprint }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: python3 "$GITHUB_ACTION_PATH/run.py"

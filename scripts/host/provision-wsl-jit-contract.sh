@@ -122,7 +122,7 @@ if [[ "${contract_mode}" == "bootstrap-inert" ]]; then
   [[ ! -e "${TARGET_ROOT}/outbound-worker.runtime-ready" ]] || die "bootstrap requires runtime-ready state to be absent"
 fi
 if [[ "${contract_mode}" == "bootstrap-inert" ]]; then
-  for inert_service in garm.service self-hosted-ci-boundary-verify.service self-hosted-ci-network-policy.service self-hosted-ci-egress-proxy.service self-hosted-ci-allocation-broker.service self-hosted-ci-outbound-worker.service "${SERVICE_NAME}"; do
+  for inert_service in garm.service self-hosted-ci-boundary-verify.service self-hosted-ci-network-policy.service self-hosted-ci-egress-proxy.service self-hosted-ci-allocation-broker.service self-hosted-ci-outbound-worker.service self-hosted-ci-canary.target self-hosted-ci-canary-broker.service self-hosted-ci-canary-cleanup.service self-hosted-ci-canary-egress-proxy.service self-hosted-ci-canary-garm.service self-hosted-ci-canary-network-policy.service "${SERVICE_NAME}"; do
     make_service_inert "${inert_service}"
   done
 fi
@@ -131,8 +131,13 @@ install -d -o root -g root -m 0750 "${TARGET_ROOT}" "${TARGET_ROOT}/garm" "${TAR
 install -d -o root -g root -m 0700 "${STATE_ROOT}"
 install -d -o root -g root -m 0700 "${STATE_ROOT}/health"
 install -d -o root -g root -m 0700 "${STATE_ROOT}/garm" "${STATE_ROOT}/outbound-worker"
+if [[ "${contract_mode}" == "bootstrap-inert" ]]; then
+  install -d -o root -g root -m 0700 "${TARGET_ROOT}/bootstrap" "${STATE_ROOT}/bootstrap"
+  rm -f "${STATE_ROOT}/bootstrap/bootstrap-install-receipt-v1.json"
+fi
 install -d -o root -g root -m 0755 "/usr/local/lib/self-hosted-ci/github_automation"
 install -d -o root -g root -m 0755 "/usr/local/libexec/self-hosted-ci"
+install -d -o root -g root -m 0755 "/usr/local/share/self-hosted-ci/schemas"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/verify-wsl-jit-readiness.py" "/usr/local/lib/self-hosted-ci/verify-wsl-jit-readiness.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/verify-live-artifact-contract.py" "/usr/local/lib/self-hosted-ci/verify-live-artifact-contract.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/collect-wsl-jit-measurements.py" "/usr/local/lib/self-hosted-ci/collect-wsl-jit-measurements.py"
@@ -146,9 +151,17 @@ install -o root -g root -m 0755 "${repo_root}/scripts/host/runner-job-started-ho
 install -o root -g root -m 0755 "${repo_root}/scripts/host/outbound-coordinator-worker.py" "/usr/local/lib/self-hosted-ci/outbound-coordinator-worker.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/install-outbound-worker-runtime.py" "/usr/local/lib/self-hosted-ci/install-outbound-worker-runtime.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/jit-pilot-terminal-monitor.py" "/usr/local/lib/self-hosted-ci/jit-pilot-terminal-monitor.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/verify-bootstrap-install.py" "/usr/local/lib/self-hosted-ci/verify-bootstrap-install.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/sign-jit-canary-authorization.py" "/usr/local/lib/self-hosted-ci/sign-jit-canary-authorization.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/verify-jit-canary-authorization.py" "/usr/local/lib/self-hosted-ci/verify-jit-canary-authorization.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/build-wsl-jit-lifecycle-evidence.py" "/usr/local/lib/self-hosted-ci/build-wsl-jit-lifecycle-evidence.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/run-wsl-jit-canary-matrix.py" "/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py"
 install -d -o root -g root -m 0755 /usr/local/lib/self-hosted-ci/github_automation
-for python_module in __init__.py bootstrap_boundary.py crypto.py host_security.py runner_boundary.py runner_jit.py runner_jit_broker.py github.py github_adapter.py check_delivery.py inventory.py policy.py registry.py coordinator.py outbound_worker.py worker_authority.py gatestore.py jit_pilot.py local_approval.py; do
+for python_module in __init__.py bootstrap_boundary.py canary_boundary.py canary_worker.py crypto.py host_security.py runner_boundary.py runner_jit.py runner_jit_broker.py github.py github_adapter.py check_delivery.py inventory.py policy.py registry.py coordinator.py outbound_worker.py worker_authority.py gatestore.py jit_pilot.py local_approval.py; do
   install -o root -g root -m 0644 "${repo_root}/github_automation/${python_module}" "/usr/local/lib/self-hosted-ci/github_automation/${python_module}"
+done
+for schema_file in jit-canary-authorization-v1.schema.json runner-lifecycle-proof-v1.schema.json; do
+  install -o root -g root -m 0644 "${repo_root}/schemas/${schema_file}" "/usr/local/share/self-hosted-ci/schemas/${schema_file}"
 done
 for collector_script in collect-wsl-jit-semantic-observations.py collect-wsl-jit-semantic-observations.sh verify-wsl-jit-bootstrap.py; do
   install -o root -g root -m 0755 "${repo_root}/scripts/host/${collector_script}" "/usr/local/lib/self-hosted-ci/${collector_script}"
@@ -169,12 +182,20 @@ install -d -o root -g root -m 0755 "/usr/local/share/self-hosted-ci"
 install -o root -g root -m 0644 "${repo_root}/templates/garm/garm-provider-incus.toml" "/usr/local/share/self-hosted-ci/garm-provider-incus.toml"
 install -o root -g root -m 0644 "${repo_root}/templates/garm/outbound-worker.json.example" "/usr/local/share/self-hosted-ci/outbound-worker.json.example"
 install -o root -g root -m 0644 "${repo_root}/templates/garm/worker-app-authority.json.example" "/usr/local/share/self-hosted-ci/worker-app-authority.json.example"
+for app_contract in runner-manager-app dispatcher-app live-job-verifier-app; do
+  install -o root -g root -m 0644 "${repo_root}/templates/garm/${app_contract}.json.example" "/usr/local/share/self-hosted-ci/${app_contract}.json.example"
+done
 install -o root -g root -m 0755 "${repo_root}/scripts/host/install-incus-garm-tls.sh" "/usr/local/lib/self-hosted-ci/install-incus-garm-tls.sh"
 "/usr/local/lib/self-hosted-ci/install-incus-garm-tls.sh" --apply \
   --provider-template "/usr/local/share/self-hosted-ci/garm-provider-incus.toml" \
   --acknowledge-loopback-tls-boundary >/dev/null
 install -o root -g root -m 0755 "${repo_root}/scripts/host/install-runner-network-runtime.sh" "/usr/local/lib/self-hosted-ci/install-runner-network-runtime.sh"
 bash "${repo_root}/scripts/host/install-runner-network-runtime.sh" >/dev/null
+install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-network-quarantine.service" "/etc/systemd/system/self-hosted-ci-network-quarantine.service"
+systemctl daemon-reload
+systemctl enable --now self-hosted-ci-network-quarantine.service
+systemctl is-enabled --quiet self-hosted-ci-network-quarantine.service || die "network quarantine is not reboot-persistent"
+systemctl is-active --quiet self-hosted-ci-network-quarantine.service || die "network quarantine did not become active"
 if [[ "${contract_mode}" == "runner-final" ]]; then
   install -o root -g root -m 0644 "${reviewer_public_key}" "${TARGET_ROOT}/boundary-reviewer-public-key.pem"
   printf '%s\n' "${reviewer_key_fingerprint}" >"${TARGET_ROOT}/boundary-reviewer-key.sha256"
@@ -192,6 +213,9 @@ install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-n
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-egress-proxy.service" "/etc/systemd/system/self-hosted-ci-egress-proxy.service"
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-health-heartbeat.service" "/etc/systemd/system/self-hosted-ci-health-heartbeat.service"
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-health-heartbeat.timer" "/etc/systemd/system/self-hosted-ci-health-heartbeat.timer"
+for canary_unit in self-hosted-ci-canary.target self-hosted-ci-canary-broker.service self-hosted-ci-canary-cleanup.service self-hosted-ci-canary-egress-proxy.service self-hosted-ci-canary-garm.service self-hosted-ci-canary-network-policy.service; do
+  install -o root -g root -m 0644 "${repo_root}/packaging/systemd/${canary_unit}" "/etc/systemd/system/${canary_unit}"
+done
 systemctl daemon-reload
 rm -f "${TARGET_ROOT}/ACTIVATION_APPROVED"
 if [[ "${contract_mode}" == "runner-final" ]]; then
@@ -205,9 +229,17 @@ if [[ "${contract_mode}" == "runner-final" ]]; then
   systemctl is-active --quiet self-hosted-ci-boundary-verify.service || die "boundary verification unit did not become active"
   systemctl enable --now self-hosted-ci-health-heartbeat.timer
 else
-  for inert_service in garm.service self-hosted-ci-boundary-verify.service self-hosted-ci-network-policy.service self-hosted-ci-egress-proxy.service self-hosted-ci-allocation-broker.service self-hosted-ci-outbound-worker.service; do
+  for inert_service in garm.service self-hosted-ci-boundary-verify.service self-hosted-ci-network-policy.service self-hosted-ci-egress-proxy.service self-hosted-ci-allocation-broker.service self-hosted-ci-outbound-worker.service self-hosted-ci-canary.target self-hosted-ci-canary-broker.service self-hosted-ci-canary-cleanup.service self-hosted-ci-canary-egress-proxy.service self-hosted-ci-canary-garm.service self-hosted-ci-canary-network-policy.service; do
     make_service_inert "${inert_service}"
   done
+  install -o root -g root -m 0600 "${bootstrap_evidence}" "${TARGET_ROOT}/bootstrap/bootstrap-boundary-v1.signed.json"
+  install -o root -g root -m 0600 "${public_manifest}" "${TARGET_ROOT}/bootstrap/bootstrap-public-manifest-v1.json"
+  install -o root -g root -m 0600 "${reviewer_public_key}" "${TARGET_ROOT}/bootstrap/reviewer-public-key.pem"
+  printf '%s\n' "${reviewer_key_fingerprint}" >"${TARGET_ROOT}/bootstrap/reviewer-key.sha256"
+  chmod 0600 "${TARGET_ROOT}/bootstrap/reviewer-key.sha256"
+  install -o root -g root -m 0755 "${repo_root}/scripts/host/provision-wsl-jit-contract.sh" "${TARGET_ROOT}/bootstrap/provision-wsl-jit-contract.sh"
+  /usr/local/lib/self-hosted-ci/verify-bootstrap-install.py --write-receipt || \
+    die "installed inert bootstrap failed exact target remeasurement"
 fi
 make_service_inert "${SERVICE_NAME}"
 printf 'Contract templates installed in %s mode. %s remains disabled; no runner was registered.\n' "${contract_mode}" "${SERVICE_NAME}"

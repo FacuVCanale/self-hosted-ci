@@ -1,0 +1,27 @@
+[Unit]
+Description=Persistent fail-closed quarantine for self-hosted-ci runner bridge
+DefaultDependencies=no
+Before=incus.service self-hosted-ci-canary-network-policy.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh quarantine
+ExecReload=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh quarantine
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

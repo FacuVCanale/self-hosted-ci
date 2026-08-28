@@ -1,0 +1,1 @@
+{"schema_version":1,"purpose":"garm-runner-manager","app_id":123,"app_slug":"self-hosted-ci-runner-manager","installation_id":456,"repository":"OWNER/REPO","repository_id":789,"repository_selection":"selected","permissions":{"metadata":"read","actions":"read","administration":"write"},"private_key_file":"/etc/self-hosted-ci/secrets/runner-manager-github-app.pem"}

@@ -1,5 +1,7 @@
 [Unit]
 Description=self-hosted-ci fail-closed runner network policy
+Requires=self-hosted-ci-network-quarantine.service
+After=self-hosted-ci-network-quarantine.service
 Before=self-hosted-ci-egress-proxy.service self-hosted-ci-garm.service
 ConditionPathExists=/etc/self-hosted-ci/ACTIVATION_APPROVED
 ConditionPathExists=/sys/class/net/ci-jit-isolated
@@ -8,6 +10,7 @@ ConditionPathExists=/sys/class/net/ci-jit-isolated
 Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=/usr/local/lib/self-hosted-ci/verify-live-artifact-contract.py --evidence /etc/self-hosted-ci/runner-boundary-v2.json --measurement-root /etc/self-hosted-ci/host-evidence --reviewer-public-key /etc/self-hosted-ci/boundary-reviewer-public-key.pem --pinned-fingerprint-file /etc/self-hosted-ci/boundary-reviewer-key.sha256
+ExecStartPre=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh quarantine
 ExecStart=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh apply
 ExecStartPost=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh verify
 ExecReload=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh apply

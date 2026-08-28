@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/FacuVCanale/self-hosted-ci/schemas/jit-canary-authorization-v1.schema.json",
+  "title": "Signed JIT canary lifecycle-proof authorization v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "purpose", "production_activation_authorized", "outbound_worker_authorized", "required_check_authorized", "github_contact_authorized", "runner_registration_authorized", "repository", "repository_id", "pull_request", "base_sha", "head_sha", "tested_merge_sha", "workflow_ref", "dispatch_sha", "garm_entity", "image_alias", "image_fingerprint", "allocation_signer_fingerprint", "github_app_config_digest", "live_job_verifier_digest", "network_policy_digest", "bootstrap_install_receipt_digest", "scenarios", "max_allocations", "max_concurrency", "max_jobs_per_allocation", "issued_at", "expires_at", "nonce", "attestation"],
+  "properties": {
+    "schema_version": {"const": 1}, "purpose": {"const": "runner-lifecycle-proof-only"},
+    "production_activation_authorized": {"const": false}, "outbound_worker_authorized": {"const": false}, "required_check_authorized": {"const": false},
+    "github_contact_authorized": {"const": true}, "runner_registration_authorized": {"const": true},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "repository_id": {"type": "integer", "minimum": 1}, "pull_request": {"type": "integer", "minimum": 1},
+    "base_sha": {"$ref": "#/$defs/sha"}, "head_sha": {"$ref": "#/$defs/sha"}, "tested_merge_sha": {"$ref": "#/$defs/sha"}, "dispatch_sha": {"$ref": "#/$defs/sha"},
+    "workflow_ref": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/ci-jit-canary-child\\.yml@refs/heads/[A-Za-z0-9._/-]+$"},
+    "garm_entity": {"type": "object", "additionalProperties": false, "required": ["authority_kind", "entity_id", "entity_name", "runner_group"], "properties": {"authority_kind": {"enum": ["personal-repository", "organization-runner-group"]}, "entity_id": {"type": "string", "format": "uuid"}, "entity_name": {"type": "string", "minLength": 1}, "runner_group": {"type": ["string", "null"], "minLength": 1}}},
+    "image_alias": {"type": "string", "minLength": 1}, "image_fingerprint": {"$ref": "#/$defs/digest"}, "allocation_signer_fingerprint": {"$ref": "#/$defs/digest"},
+    "github_app_config_digest": {"$ref": "#/$defs/digest"}, "live_job_verifier_digest": {"$ref": "#/$defs/digest"}, "network_policy_digest": {"$ref": "#/$defs/digest"}, "bootstrap_install_receipt_digest": {"$ref": "#/$defs/digest"},
+    "scenarios": {"const": ["success", "failure", "cancel", "timeout", "force-cancel", "reboot"]},
+    "max_allocations": {"const": 6}, "max_concurrency": {"const": 1}, "max_jobs_per_allocation": {"const": 1},
+    "issued_at": {"$ref": "#/$defs/time"}, "expires_at": {"$ref": "#/$defs/time"}, "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "attestation": {"type": "object", "additionalProperties": false, "required": ["attestation_version", "signer_fingerprint", "signature"], "properties": {"attestation_version": {"const": 1}, "signer_fingerprint": {"$ref": "#/$defs/digest"}, "signature": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}$"}}}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "time": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}}
+}

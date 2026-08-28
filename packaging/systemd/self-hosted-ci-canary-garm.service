@@ -1,0 +1,27 @@
+[Unit]
+Description=Temporary GARM control plane for the JIT canary lane
+Requires=self-hosted-ci-canary-network-policy.service self-hosted-ci-canary-egress-proxy.service incus.service
+BindsTo=self-hosted-ci-canary-network-policy.service self-hosted-ci-canary-egress-proxy.service
+After=incus.service self-hosted-ci-canary-network-policy.service self-hosted-ci-canary-egress-proxy.service
+Before=self-hosted-ci-canary-broker.service
+ConditionPathExists=/run/self-hosted-ci/CANARY_APPROVED
+Conflicts=self-hosted-ci-garm.service
+
+[Service]
+Type=simple
+User=garm-manager
+Group=garm-manager
+ExecStartPre=+/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py verify
+ExecStart=/usr/local/bin/garm --config /etc/self-hosted-ci/garm/config.toml
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/self-hosted-ci/garm
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0077

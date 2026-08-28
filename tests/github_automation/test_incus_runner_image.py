@@ -99,6 +99,16 @@ class IncusRunnerImageTests(unittest.TestCase):
         self.assertIn(target, STAGER.read_text(encoding="utf-8"))
         self.assertIn(target, VERIFIER.read_text(encoding="utf-8"))
 
+    def test_garm_configuration_uses_incus_6_compatible_image_info(self) -> None:
+        configure = (ROOT / "scripts/host/configure-garm-jit.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('incus image info "${image_alias}" --project ci-jit', configure)
+        self.assertNotIn(
+            'incus image info "${image_alias}" --project ci-jit --format json',
+            configure,
+        )
+
     def test_script_parses(self) -> None:
         result = subprocess.run(
             ["bash", "-n", str(SCRIPT)], text=True, capture_output=True

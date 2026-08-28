@@ -1,0 +1,94 @@
+name: non-gating JIT lifecycle canary
+
+# INERT DISTRIBUTION TEMPLATE. Install only the output of
+# scripts/render-consumer-workflows.py with a reviewed non-zero full commit SHA.
+# This placeholder file is never a dispatch target.
+
+on:
+  workflow_dispatch:
+    inputs:
+      canary_package:
+        description: Exact signed jit-canary-package-v1 JSON
+        required: true
+        type: string
+
+# This workflow is evidence-only. It never creates a Check Run, never reports
+# a commit status, and must never be configured as a required status check.
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+jobs:
+  validate-package:
+    name: validate signed non-gating canary package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      scenario: ${{ steps.validate.outputs.scenario }}
+      repository: ${{ steps.validate.outputs.repository }}
+      pr_number: ${{ steps.validate.outputs.pr_number }}
+      base_sha: ${{ steps.validate.outputs.base_sha }}
+      head_sha: ${{ steps.validate.outputs.head_sha }}
+      tested_merge_sha: ${{ steps.validate.outputs.tested_merge_sha }}
+      runner_label: ${{ steps.validate.outputs.runner_label }}
+    steps:
+      - name: Revalidate signed package and exact live GitHub identities
+        id: validate
+        uses: FacuVCanale/self-hosted-ci/actions/jit-canary-validate@0000000000000000000000000000000000000000
+        with:
+          canary-package: ${{ inputs.canary_package }}
+          reviewer-public-key: ${{ vars.JIT_CANARY_REVIEWER_PUBLIC_KEY_B64 }}
+          reviewer-fingerprint: ${{ vars.JIT_CANARY_REVIEWER_FINGERPRINT }}
+
+  local-canary:
+    name: local-jit-canary-${{ needs.validate-package.outputs.scenario }}
+    needs: validate-package
+    runs-on: ${{ needs.validate-package.outputs.runner_label }}
+    timeout-minutes: 15
+    concurrency:
+      group: jit-canary-${{ needs.validate-package.outputs.repository }}-${{ needs.validate-package.outputs.pr_number }}
+      cancel-in-progress: false
+    env:
+      CANARY_SCENARIO: ${{ needs.validate-package.outputs.scenario }}
+      EXPECTED_BASE_SHA: ${{ needs.validate-package.outputs.base_sha }}
+      EXPECTED_HEAD_SHA: ${{ needs.validate-package.outputs.head_sha }}
+      EXPECTED_MERGE_SHA: ${{ needs.validate-package.outputs.tested_merge_sha }}
+      PR_NUMBER: ${{ needs.validate-package.outputs.pr_number }}
+    steps:
+      - name: Check out exact base without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.validate-package.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact pull request merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+          git config --local core.hooksPath /dev/null
+          git config --local core.attributesFile /dev/null
+          git config --local protocol.file.allow never
+          git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head:refs/jit-canary/head" "refs/pull/${PR_NUMBER}/merge:refs/jit-canary/merge"
+          test "$(git rev-parse refs/jit-canary/head)" = "$EXPECTED_HEAD_SHA"
+          test "$(git rev-parse refs/jit-canary/merge)" = "$EXPECTED_MERGE_SHA"
+          test "$(git rev-parse refs/jit-canary/merge^1)" = "$EXPECTED_BASE_SHA"
+          test "$(git rev-parse refs/jit-canary/merge^2)" = "$EXPECTED_HEAD_SHA"
+          git checkout --detach "$EXPECTED_MERGE_SHA"
+      - name: Run exactly one authorized lifecycle scenario
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$CANARY_SCENARIO" in
+            success) exit 0 ;;
+            failure) exit 1 ;;
+            cancel) exec sleep 900 ;;
+            timeout) exec sleep 1200 ;;
+            force-cancel) trap '' TERM; exec sleep 1200 ;;
+            reboot) printf '%s\n' reboot-checkpoint-created ;;
+            *) exit 64 ;;
+          esac
+
+# Deliberately no ci-gate job, checks:write, statuses:write, fallback backend,
+# deployment environment, or production secret.
