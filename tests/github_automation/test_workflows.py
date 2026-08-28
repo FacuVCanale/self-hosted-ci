@@ -115,6 +115,13 @@ class ChildWorkflowTests(unittest.TestCase):
 
 
 class ReconcilerAndConsumerBoundaryTests(unittest.TestCase):
+    def test_canary_exports_validated_merge_sha_to_job_started_hook(self) -> None:
+        text = read("ci-jit-canary-child.yml")
+        self.assertIn(
+            "CI_GATE_TRUSTED_TESTED_SHA: ${{ needs.validate-package.outputs.tested_merge_sha }}",
+            text,
+        )
+
     def test_reconciler_has_schedule_and_workflow_run_recovery(self) -> None:
         text = read("ci-gate-reconciler.yml")
         self.assertIn('GITHUB_API_VERSION: "2026-03-10"', text)
