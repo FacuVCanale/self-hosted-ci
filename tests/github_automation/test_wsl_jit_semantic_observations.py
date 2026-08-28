@@ -202,6 +202,10 @@ class SemanticObservationCollectorTests(unittest.TestCase):
                 module.pwd,
                 "getpwnam",
                 return_value=SimpleNamespace(pw_dir=str(garm_home)),
+            ), mock.patch.object(
+                module,
+                "credential_scan_roots",
+                return_value=(garm_home,),
             ):
                 result = collector.credential_surfaces()
 
