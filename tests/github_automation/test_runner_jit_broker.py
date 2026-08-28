@@ -391,6 +391,22 @@ class AllocationBrokerTests(unittest.TestCase):
         self.assertEqual([], self.broker.recover_all())
         self.assertEqual({}, self.driver.scales)
 
+    def test_recovery_accepts_already_absent_bound_scale_set(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        self.driver.scales.pop(self.payload["scale_set_name"])
+        self.driver.events.clear()
+
+        recovered = self.broker.recover_all()
+
+        self.assertEqual([self.payload["allocation_id"]], recovered)
+        self.assertEqual(
+            "cleaned", self.ledger.get(self.payload["allocation_id"]).state
+        )
+        self.assertNotIn("disable", self.driver.events)
+        self.assertNotIn("delete", self.driver.events)
+        self.assertIn("absent", self.driver.events)
+
     def test_reboot_between_reserve_and_dispatch_cleans_disabled_scale_set(self):
         self.broker.reserve(self.reservation, now=NOW)
         recovered = self.broker.recover_all()

@@ -57,6 +57,43 @@ class CanaryMatrixWrapperTests(unittest.TestCase):
             worker,
         )
 
+    def test_garm_config_access_is_reconciled_exactly_before_canary_execution(self):
+        worker = self.source.split("function Write-Worker", 1)[1].split(
+            "function Wait-OneShot", 1
+        )[0]
+        for contract in (
+            "[[ -d /etc/self-hosted-ci && ! -L /etc/self-hosted-ci ]]",
+            "[[ -d /etc/self-hosted-ci/garm && ! -L /etc/self-hosted-ci/garm ]]",
+            "install -d -o root -g garm-manager -m 0751 /etc/self-hosted-ci",
+            "install -d -o root -g garm-manager -m 0750 /etc/self-hosted-ci/garm",
+            '[[ "$(stat -c \'%U:%G:%a\' /etc/self-hosted-ci)" == root:garm-manager:751 ]]',
+            '[[ "$(stat -c \'%U:%G:%a\' /etc/self-hosted-ci/garm)" == root:garm-manager:750 ]]',
+            '[[ "$(stat -c \'%U:%G:%a\' /etc/self-hosted-ci/garm/config.toml)" == root:garm-manager:640 ]]',
+            "runuser -u garm-manager -- test -r /etc/self-hosted-ci/garm/config.toml",
+            "[[ -d /var/lib/self-hosted-ci && ! -L /var/lib/self-hosted-ci ]]",
+            "[[ -d /var/lib/self-hosted-ci/garm && ! -L /var/lib/self-hosted-ci/garm ]]",
+            "install -d -o root -g garm-manager -m 0710 /var/lib/self-hosted-ci",
+            "install -d -o garm-manager -g garm-manager -m 0700 /var/lib/self-hosted-ci/garm",
+            '[[ "$(stat -c \'%U:%G:%a\' /var/lib/self-hosted-ci)" == root:garm-manager:710 ]]',
+            '[[ "$(stat -c \'%U:%G:%a\' /var/lib/self-hosted-ci/garm)" == garm-manager:garm-manager:700 ]]',
+            "runuser -u garm-manager -- test -x /var/lib/self-hosted-ci",
+            "runuser -u garm-manager -- test -r /var/lib/self-hosted-ci/garm",
+            "runuser -u garm-manager -- test -w /var/lib/self-hosted-ci/garm",
+            "runuser -u garm-manager -- test -x /var/lib/self-hosted-ci/garm",
+        ):
+            self.assertIn(contract, worker)
+        effective_read = worker.index(
+            "runuser -u garm-manager -- test -x /var/lib/self-hosted-ci/garm"
+        )
+        execute = worker.index(
+            "args=(execute --config /etc/self-hosted-ci/canary-runtime.json"
+        )
+        self.assertLess(effective_read, execute)
+        self.assertNotIn("chmod 0755 /etc/self-hosted-ci/garm", worker)
+        self.assertNotIn("chmod 0644 /etc/self-hosted-ci/garm/config.toml", worker)
+        self.assertNotIn("chmod 0755 /var/lib/self-hosted-ci", worker)
+        self.assertNotIn("chmod 0777 /var/lib/self-hosted-ci/garm", worker)
+
     def test_reboot_requires_checkpoint_then_resumes_same_nonce_and_bundle(self):
         checkpoint = self.source.index('status -ne "reboot-checkpoint"')
         terminate = self.source.index("--terminate $DistroName", checkpoint)
