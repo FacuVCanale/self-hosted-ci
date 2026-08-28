@@ -74,9 +74,11 @@ class JitPrerequisiteInstallerTests(unittest.TestCase):
             "11176acb8a725f914b9b947891b4837d374fb616195562cc0ad45a7be8b6c746",
             "garm_cli_version='0.2.1'",
             "983fa54557f3f5ce3aa1eeb2387499f5f823d14512a0559ba888667bc3b3e88e",
+            "a973c9061cf7962b4f90c8220ed6f6cc8abeeed20780ea8b9e31ce6dfc99bd9b",
             "garm-cli-linux-amd64.tgz",
             'tar -tzf "${tx}/garm-cli.tgz"',
-            "garm-cli version",
+            'printf \'%s  %s\\n\' "${garm_cli_binary_sha256}" /usr/local/bin/garm-cli',
+            "/usr/local/bin/garm-cli --help",
             "root:root:755",
             "garm_provider_incus_version='0.1.5'",
             "1489b5f9b3f01528e338c604c13dabe8321ed6f1bc6de77c7344119d7731c43f",
@@ -125,6 +127,7 @@ class JitPrerequisiteInstallerTests(unittest.TestCase):
             self.assertIn(token, source)
         for forbidden in ("config.sh", "--url", "--token", "runner register"):
             self.assertNotIn(forbidden, source)
+        self.assertNotIn("/usr/local/bin/garm-cli version", source)
 
     def test_payload_failures_are_phase_diagnostic_and_service_checks_fail_closed(
         self,
