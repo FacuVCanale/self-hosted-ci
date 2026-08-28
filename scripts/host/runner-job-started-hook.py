@@ -48,7 +48,7 @@ def read_tested_sha() -> str:
     value = json.loads(ALLOCATION_FILE.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or not isinstance(value.get("payload"), dict):
         raise ValueError("allocation binding envelope is invalid")
-    tested_sha = value["payload"].get("tested_merge_sha")
+    tested_sha = value["payload"].get("tested_sha")
     if not isinstance(tested_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", tested_sha):
         raise ValueError("allocation binding tested merge SHA is invalid")
     return tested_sha

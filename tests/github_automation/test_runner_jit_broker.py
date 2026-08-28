@@ -356,7 +356,8 @@ class AllocationBrokerTests(unittest.TestCase):
         ):
             self.assertIn(field, source)
         self.assertIn('ALLOCATION_FILE = Path("/etc/self-hosted-ci/allocation.json")', source)
-        self.assertIn('value["payload"].get("tested_merge_sha")', source)
+        self.assertIn('value["payload"].get("tested_sha")', source)
+        self.assertNotIn('value["payload"].get("tested_merge_sha")', source)
         self.assertNotIn('required_env("CI_GATE_TRUSTED_TESTED_SHA")', source)
         self.assertIn("response.status != 204 or response_body", source)
 
