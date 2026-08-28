@@ -33,8 +33,8 @@ class BootstrapEvidenceCollectorTests(unittest.TestCase):
             "collect-wsl-jit-semantic-observations.py",
             'WSL_DISTRO_NAME") != "Ubuntu-24.04-CI"',
             "WSL collector sha256 mismatch",
-            "self-hosted-ci-bootstrap-evidence-collect",
-            "RuntimeMaxSec=600",
+            'collectionUnit = "self-hosted-ci-bootstrap-evidence-collect-$attemptId"',
+            "RuntimeMaxSec=$SystemdTimeoutSeconds",
             "KillMode=control-group",
             "Stop-WslCollectionUnit",
             "WSL collection unit cgroup still contains processes",
@@ -43,7 +43,7 @@ class BootstrapEvidenceCollectorTests(unittest.TestCase):
 
     def test_stages_wsl_collector_by_stdin_without_drvfs(self):
         for token in (
-            'collectorLinuxRoot = "/run/self-hosted-ci-bootstrap-evidence"',
+            'collectorLinuxRoot = "/run/self-hosted-ci-bootstrap-evidence-$attemptId"',
             "RedirectStandardInput = `$true",
             "StandardInput.BaseStream.Write",
             "WSL collector byte count mismatch",
@@ -69,8 +69,12 @@ class BootstrapEvidenceCollectorTests(unittest.TestCase):
             "finally {",
             "`$stageAttempted = `$true",
             "if (`$stageAttempted)",
-            'if (`$collectionFailure) { throw `$collectionFailure }',
-            "WSL evidence collector timed out and its systemd unit was terminated",
+            "if (`$collectionFailure) {",
+            "throw `$collectionFailure",
+            "WSL evidence transport exceeded its nested timeout",
+            "Complete-WslCollectionCleanup",
+            "Assert-WslCollectorStageAbsent",
+            "cleanup_verified=`$true",
         ):
             self.assertIn(token, self.source)
 
@@ -94,12 +98,74 @@ class BootstrapEvidenceCollectorTests(unittest.TestCase):
             'Save-ContentAddressedJson $WslStagingPath "wsl-jit-semantic-observations"',
             '"$Prefix-$sha256.json"',
             "content-addressed evidence collision",
+            "evidence source changed while it was being preserved",
+            "[IO.File]::Move($temporary, $destination)",
             "New-PrivateAcl $false",
             "SetAccessRuleProtection($true, $false)",
             "foreach ($sid in @($system, $admins))",
             "bootstrap_ready = $true",
         ):
             self.assertIn(token, self.source)
+
+    def test_scheduler_polling_waits_for_a_real_run_and_allows_pending_codes(self):
+        for token in (
+            "$baselineLastRunTime = [DateTime]$baselineInfo.LastRunTime",
+            "$lastRunAdvanced = [DateTime]$info.LastRunTime -gt $baselineLastRunTime",
+            '$taskState -eq "Running"',
+            "$resultPresent",
+            "$runObserved = $runObserved -or $lastRunAdvanced",
+            "[uint32]267008, [uint32]267009, [uint32]267011",
+            "$complete = $runObserved",
+            "result_present=$resultPresent",
+        ):
+            self.assertIn(token, self.source)
+        start = self.source.index("Start-ScheduledTask -TaskName $TaskName")
+        baseline = self.source.index("$baselineLastRunTime")
+        self.assertLess(baseline, start)
+
+    def test_timeouts_are_strictly_nested_and_reserve_cleanup(self):
+        expected = (
+            "$StageTimeoutSeconds = 45",
+            "$CollectorTimeoutSeconds = 330",
+            "$SystemdTimeoutSeconds = 360",
+            "$WslTimeoutSeconds = 390",
+            "$WorkerCleanupBudgetSeconds = 60",
+            "$TaskTimeoutSeconds = 570",
+            "$ParentTimeoutSeconds = 600",
+            "$CleanupBudgetSeconds = $ParentTimeoutSeconds - $TaskTimeoutSeconds",
+            'ExecutionTimeLimit = "PT9M"',
+            "$StageTimeoutSeconds + $WslTimeoutSeconds + $WorkerCleanupBudgetSeconds",
+            "runtime timeout hierarchy is invalid",
+        )
+        for token in expected:
+            self.assertIn(token, self.source)
+
+    def test_worker_and_parent_preserve_diagnostics_before_cleanup(self):
+        for token in (
+            'DiagnosticsRoot = "C:\\ProgramData\\self-hosted-ci\\diagnostics\\bootstrap-evidence\\v1"',
+            "function Save-FailureDiagnostics",
+            'status=\'failed\'; error=`$collectionFailure',
+            "worker.stdout.log",
+            "worker.stderr.log",
+            "collect-result.json",
+            "failure.json",
+            "Task state/result:",
+        ):
+            self.assertIn(token, self.source)
+        preserve = self.source.rindex("Save-FailureDiagnostics $original")
+        cleanup = self.source.rindex("Remove-Item -LiteralPath $Root -Recurse -Force")
+        self.assertLess(preserve, cleanup)
+        quiesce = self.source.rindex("Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop")
+        self.assertLess(quiesce, preserve)
+        self.assertIn("task did not quiesce before diagnostic preservation", self.source)
+
+    def test_stage_drains_pipes_before_writing_stdin(self):
+        start = self.source.index("if (-not `$stageProcess.Start())")
+        stdout = self.source.index("`$stageStdoutTask =", start)
+        stderr = self.source.index("`$stageStderrTask =", start)
+        write = self.source.index("StandardInput.BaseStream.Write", start)
+        self.assertLess(stdout, write)
+        self.assertLess(stderr, write)
 
     def test_rotates_credentials_and_cleans_task_and_staging(self):
         for token in (
