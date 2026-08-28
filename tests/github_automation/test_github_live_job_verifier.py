@@ -94,7 +94,7 @@ class FakeOpener:
                 "name": "local-quality",
                 "labels": expected["labels"],
                 "runner_name": "wsl-jit-runner-1",
-                "runner_group_name": None,
+                "runner_group_name": expected["runner_group"] or "Default",
                 "status": "in_progress",
             }
             if self.mutate_job:
@@ -164,7 +164,7 @@ class GitHubLiveJobVerifierTests(unittest.TestCase):
             "name": lambda value: value.update(name="other"),
             "labels": lambda value: value.update(labels=["self-hosted"]),
             "runner": lambda value: value.update(runner_name="other"),
-            "group": lambda value: value.update(runner_group_name="Default"),
+            "group": lambda value: value.update(runner_group_name="Other"),
             "status": lambda value: value.update(status="queued"),
         }
         for name, mutate in job_drifts.items():
@@ -177,6 +177,14 @@ class GitHubLiveJobVerifierTests(unittest.TestCase):
                 FakeOpener(mutate_job=lambda value: value.update(run_attempt=999))
             )["verified"]
         )
+
+    def test_named_runner_group_remains_exact(self) -> None:
+        value = request()
+        value["runner_group"] = "Restricted"
+        opener = FakeOpener(
+            mutate_job=lambda response: response.update(runner_group_name="Restricted")
+        )
+        self.assertTrue(self.verify(opener, value)["verified"])
         run_drifts = {
             "run": lambda value: value.update(id=999),
             "attempt": lambda value: value.update(run_attempt=3),

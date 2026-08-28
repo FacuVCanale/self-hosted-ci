@@ -312,7 +312,7 @@ def verify_live_job(
         "name": request["job_name"],
         "labels": request["labels"],
         "runner_name": request["runner_name"],
-        "runner_group_name": request["runner_group"],
+        "runner_group_name": request["runner_group"] or "Default",
         "status": request["required_status"],
     }
     if any(job.get(field) != expected for field, expected in expected_job.items()):
