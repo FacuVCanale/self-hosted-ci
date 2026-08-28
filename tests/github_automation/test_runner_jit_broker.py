@@ -348,7 +348,6 @@ class AllocationBrokerTests(unittest.TestCase):
         for field in (
             "GITHUB_REPOSITORY_ID",
             "GITHUB_REPOSITORY",
-            "CI_GATE_TRUSTED_TESTED_SHA",
             "GITHUB_WORKFLOW_REF",
             "GITHUB_RUN_ID",
             "GITHUB_RUN_ATTEMPT",
@@ -356,6 +355,9 @@ class AllocationBrokerTests(unittest.TestCase):
             "RUNNER_NAME",
         ):
             self.assertIn(field, source)
+        self.assertIn('ALLOCATION_FILE = Path("/etc/self-hosted-ci/allocation.json")', source)
+        self.assertIn('value["payload"].get("tested_merge_sha")', source)
+        self.assertNotIn('required_env("CI_GATE_TRUSTED_TESTED_SHA")', source)
         self.assertIn("response.status != 204 or response_body", source)
 
     def test_broker_http_threads_are_strictly_bounded(self):
