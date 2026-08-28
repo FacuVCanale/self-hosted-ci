@@ -81,7 +81,7 @@ def validate_package(raw:bytes,*,public_key_pem:bytes,pinned_fingerprint:str,env
     auth=verify_auth(value.get("authorization"),public_key_pem,pinned_fingerprint,now())
     repo,rid,sha,wref,token=(environment.get(k,"") for k in ("GITHUB_REPOSITORY","GITHUB_REPOSITORY_ID","GITHUB_SHA","GITHUB_WORKFLOW_REF","GITHUB_TOKEN"))
     if auth.get("repository")!=repo or str(auth.get("repository_id"))!=rid or auth.get("dispatch_sha")!=sha or auth.get("workflow_ref")!=wref or not SHA.fullmatch(sha) or not token: raise CanaryPackageError("dispatch identity crossed signed authorization")
-    live_repo=api(f"/repos/{repo}",token); pull=api(f"/repos/{repo}/pulls/{auth['pull_request']}",token); workflow=api(f"/repos/{repo}/actions/workflows/{WORKFLOW}",token)
+    live_repo=api(f"/repos/{repo}",token); pull=api(f"/repos/{repo}/pulls/{auth['pull_request']}",token); workflow=api(f"/repos/{repo}/actions/workflows/{Path(WORKFLOW).name}",token)
     live_merge_sha=pull.get("merge_commit_sha")
     if live_repo.get("id")!=auth["repository_id"] or live_repo.get("full_name")!=repo or pull.get("number")!=auth["pull_request"] or pull.get("state")!="open" or not isinstance(pull.get("base"),dict) or not isinstance(pull.get("head"),dict) or pull["base"].get("sha")!=auth["base_sha"] or pull["head"].get("sha")!=auth["head_sha"] or live_merge_sha not in (None,auth["tested_merge_sha"]) or workflow.get("path")!=WORKFLOW or workflow.get("state")!="active": raise CanaryPackageError("live repository PR merge or workflow drifted")
     return {"scenario":scenario,"repository":repo,"pr_number":str(auth["pull_request"]),"base_sha":auth["base_sha"],"head_sha":auth["head_sha"],"tested_merge_sha":auth["tested_merge_sha"],"runner_label":label}

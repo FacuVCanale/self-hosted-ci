@@ -58,7 +58,11 @@ def load_action():
 
 
 class Api:
+    def __init__(self):
+        self.paths = []
+
     def __call__(self, path, token):
+        self.paths.append(path)
         auth = authorization()
         if path.endswith("/pulls/7"):
             return {"number": 7, "state": "open", "base": {"sha": auth["base_sha"]}, "head": {"sha": auth["head_sha"]}, "merge_commit_sha": auth["tested_merge_sha"]}
@@ -73,9 +77,12 @@ class JitCanaryActionTests(unittest.TestCase):
         auth = authorization()
         package = {"canary_package_version": 1, "scenario": "success", "runner_label": "wsl-jit-" + "8" * 32, "authorization": sign_canary_authorization(auth, PRIVATE)}
         env = {"GITHUB_REPOSITORY": auth["repository"], "GITHUB_REPOSITORY_ID": "123", "GITHUB_SHA": auth["dispatch_sha"], "GITHUB_WORKFLOW_REF": auth["workflow_ref"], "GITHUB_TOKEN": "token"}
-        output = module.validate_package(json.dumps(package).encode(), public_key_pem=PUBLIC, pinned_fingerprint=FINGERPRINT, environment=env, api=Api(), now=lambda: NOW)
+        api = Api()
+        output = module.validate_package(json.dumps(package).encode(), public_key_pem=PUBLIC, pinned_fingerprint=FINGERPRINT, environment=env, api=api, now=lambda: NOW)
         self.assertEqual("success", output["scenario"])
         self.assertEqual(auth["tested_merge_sha"], output["tested_merge_sha"])
+        self.assertIn("/repos/FacuVCanale/self-hosted-ci-sandbox/actions/workflows/ci-jit-canary-child.yml", api.paths)
+        self.assertNotIn("/repos/FacuVCanale/self-hosted-ci-sandbox/actions/workflows/.github/workflows/ci-jit-canary-child.yml", api.paths)
 
     def test_app_pr_response_may_omit_synthetic_merge_sha(self):
         module = load_action()
