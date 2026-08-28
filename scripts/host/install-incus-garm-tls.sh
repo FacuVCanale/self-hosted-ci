@@ -81,8 +81,18 @@ else
 fi
 install -o root -g garm-manager -m 0640 /var/lib/incus/server.crt "${server_cert}"
 install -o root -g garm-manager -m 0640 "${template}" "${provider_config}"
-server_name="$(openssl x509 -in "${server_cert}" -noout -subject -nameopt RFC2253 | sed -n 's/^subject=.*CN=\([^,]*\).*$/\1/p')"
-[[ "${server_name}" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]] || die 'Incus server certificate has no safe DNS common name'
+server_name=''
+if openssl x509 -in "${server_cert}" -noout -checkip 127.0.0.1 >/dev/null 2>&1; then
+  server_name='127.0.0.1'
+else
+  server_name="$(openssl x509 -in "${server_cert}" -noout -subject -nameopt RFC2253 | sed -n 's/^subject=.*CN=\([^,]*\).*$/\1/p')"
+  if [[ ! "${server_name}" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]] || \
+     ! openssl x509 -in "${server_cert}" -noout -checkhost "${server_name}" >/dev/null 2>&1; then
+    server_name="$(openssl x509 -in "${server_cert}" -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' | sed -n 's/^[[:space:]]*DNS:\([A-Za-z0-9][A-Za-z0-9.-]*\)[[:space:]]*$/\1/p' | head -n 1)"
+  fi
+  [[ "${server_name}" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]] || die 'Incus server certificate has no safe loopback IP or DNS identity'
+  openssl x509 -in "${server_cert}" -noout -checkhost "${server_name}" >/dev/null 2>&1 || die 'Incus server certificate identity verification failed'
+fi
 readonly api_endpoint="https://${server_name}:8443"
 
 incus config set core.https_address=127.0.0.1:8443
