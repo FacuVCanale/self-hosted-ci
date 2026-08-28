@@ -29,6 +29,33 @@ class CanaryMatrixWrapperTests(unittest.TestCase):
         self.assertIn('transport="Windows-to-WSL-stdin-no-drvfs"', self.source)
         self.assertNotIn("/mnt/c/", self.source.lower())
 
+    def test_canary_executes_the_staged_source_without_mutating_receipt_targets(self):
+        self.assertIn("export PYTHONPATH=/opt/self-hosted-ci/source", self.source)
+        self.assertIn(
+            "/opt/self-hosted-ci/source/scripts/host/run-wsl-jit-canary-matrix.py",
+            self.source,
+        )
+        self.assertLess(
+            self.source.index("export PYTHONPATH=/opt/self-hosted-ci/source"),
+            self.source.index(
+                "/opt/self-hosted-ci/source/scripts/host/run-wsl-jit-canary-matrix.py \"${args[@]}\""
+            ),
+        )
+
+    def test_pre_live_canary_uses_the_bootstrap_reviewer_key(self):
+        self.assertIn(
+            "--reviewer-public-key /etc/self-hosted-ci/bootstrap/reviewer-public-key.pem",
+            self.source,
+        )
+        worker = self.source.split("function Write-Worker", 1)[1].split(
+            "function Wait-OneShot", 1
+        )[0]
+        self.assertNotIn("boundary-reviewer-public-key.pem", worker)
+        self.assertIn(
+            "install -d -o root -g garm-manager -m 0751 /etc/self-hosted-ci",
+            worker,
+        )
+
     def test_reboot_requires_checkpoint_then_resumes_same_nonce_and_bundle(self):
         checkpoint = self.source.index('status -ne "reboot-checkpoint"')
         terminate = self.source.index("--terminate $DistroName", checkpoint)

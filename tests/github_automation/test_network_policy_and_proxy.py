@@ -112,6 +112,17 @@ class NetworkPolicyAndProxyTests(unittest.TestCase):
             )
             self.assertNotIn("ExecStart=/usr/bin/false", source)
 
+    def test_proxy_units_allow_only_required_socket_families(self) -> None:
+        expected = "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"
+        for name in (
+            "self-hosted-ci-egress-proxy.service",
+            "self-hosted-ci-canary-egress-proxy.service",
+        ):
+            source = (ROOT / "packaging/systemd" / name).read_text()
+            self.assertIn(expected, source)
+            self.assertIn("LogsDirectory=self-hosted-ci", source)
+            self.assertIn("LogsDirectoryMode=0750", source)
+
     def test_installer_is_inert_and_installs_every_runtime_file(self) -> None:
         source = INSTALL_SCRIPT.read_text()
         self.assertIn('[[ ! -e "${target_root}/ACTIVATION_APPROVED" ]]', source)

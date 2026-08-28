@@ -152,7 +152,8 @@ systemctl is-enabled --quiet self-hosted-ci-garm.service && die 'persistent GARM
 systemctl is-active --quiet self-hosted-ci-garm.service && die 'persistent GARM service must be inactive during configuration'
 [[ ! -e /etc/self-hosted-ci/ACTIVATION_APPROVED ]] || die 'activation sentinel must be absent during configuration'
 
-install -d -o root -g garm-manager -m 0750 /etc/self-hosted-ci /etc/self-hosted-ci/garm
+install -d -o root -g garm-manager -m 0751 /etc/self-hosted-ci
+install -d -o root -g garm-manager -m 0750 /etc/self-hosted-ci/garm
 install -d -o root -g garm-manager -m 0710 /var/lib/self-hosted-ci
 install -d -o garm-manager -g garm-manager -m 0700 /var/lib/self-hosted-ci/garm
 [[ ! -e "${GARM_CONFIG}" || ( -f "${GARM_CONFIG}" && ! -L "${GARM_CONFIG}" ) ]] || die 'existing GARM config is not a regular file'
@@ -396,7 +397,7 @@ target={"authority_kind":authority,"entity_flag":"--repo" if authority=="persona
 der=key.public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo)
 broker={"allocation_signer_fingerprint":hashlib.sha256(der).hexdigest(),"garm_cli_home":cli_home,"provider_name":"incus_ci_jit","image_alias":image,"image_fingerprint":fingerprint,"live_job_verifier":verifier,"targets":{repository_id:target}}
 state={"schema_version":3,"garm_cli_home":cli_home,"manager_configured":True,"provider_configured":True,"image_configured":True,"broker_configured":True,"zero_scale_sets":True,"image":{"alias":image,"fingerprint":fingerprint},"targets":{repository_id:target}}
-for path,value,mode in ((broker_path,broker,0o640),(health_path,state,0o640)):
+for path,value,mode in ((broker_path,broker,0o600),(health_path,state,0o600)):
     path.parent.mkdir(mode=0o750,parents=True,exist_ok=True)
     fd,tmp=tempfile.mkstemp(prefix=f".{path.name}.",dir=path.parent)
     try:

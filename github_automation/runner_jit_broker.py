@@ -367,14 +367,19 @@ class GarmCliAllocationDriver:
         self._timeout = 180
 
     def _run(self, *args: str) -> Any:
-        env = {**os.environ, "HOME": str(self.config["garm_cli_home"])}
         result = subprocess.run(
-            ["/usr/local/bin/garm-cli", "--format", "json", *args],
+            [
+                "/usr/local/lib/self-hosted-ci/garm-cli-session.py",
+                "run",
+                "--",
+                "--format",
+                "json",
+                *args,
+            ],
             check=True,
             capture_output=True,
             text=True,
             timeout=30,
-            env=env,
         )
         return json.loads(result.stdout) if result.stdout.strip() else None
 
@@ -558,9 +563,17 @@ systemctl daemon-reexec
             or value.get("name") != scale_set_name
         ):
             raise RunnerJitError("GARM scale-set identity drifted")
-        if enabled is not None and value.get("enabled") is not enabled:
+        observed_enabled = value.get("enabled", False)
+        if type(observed_enabled) is not bool:
             raise RunnerJitError("GARM scale-set enabled state drifted")
-        if value.get("max_runners") != 1 or value.get("min_idle_runners") != 0:
+        if enabled is not None and observed_enabled is not enabled:
+            raise RunnerJitError("GARM scale-set enabled state drifted")
+        observed_min_idle = value.get("min_idle_runners", 0)
+        if (
+            value.get("max_runners") != 1
+            or type(observed_min_idle) is not int
+            or observed_min_idle != 0
+        ):
             raise RunnerJitError("GARM scale set is not one-job/JIT")
         return value
 
@@ -612,12 +625,16 @@ systemctl daemon-reexec
             raise RunnerJitError("transient GARM scale set survived deletion")
 
     def _incus_instances(self) -> list[Mapping[str, Any]]:
+        incus_config = Path("/run/self-hosted-ci/incus-client")
+        incus_config.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(incus_config, 0o700)
         result = subprocess.run(
             ["/usr/bin/incus", "--project", "ci-jit", "list", "--format", "json"],
             check=True,
             capture_output=True,
             text=True,
             timeout=30,
+            env={**os.environ, "INCUS_CONF": str(incus_config)},
         )
         value = json.loads(result.stdout)
         if not isinstance(value, list) or any(

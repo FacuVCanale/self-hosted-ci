@@ -455,6 +455,58 @@ class BrokerCanaryDriverTests(unittest.TestCase):
 
 
 class LiveCanaryDispatchAdapterTests(unittest.TestCase):
+    def test_target_revalidation_accepts_omitted_merge_sha_but_not_drift(self):
+        adapter = LiveCanaryDispatchAdapter.__new__(LiveCanaryDispatchAdapter)
+        adapter.authorization = {
+            "repository_id": 1,
+            "repository": "x/y",
+            "pull_request": 2,
+            "head_sha": "a" * 40,
+            "base_sha": "b" * 40,
+            "tested_merge_sha": "c" * 40,
+        }
+        adapter.authority = SimpleNamespace(workflow_path=".github/workflows/canary.yml")
+
+        class Client:
+            merge_sha = None
+            def repository(self, token):
+                return {"id": 1, "full_name": "x/y"}
+            def pull_request(self, number, token):
+                return {
+                    "number": 2, "state": "open", "head": {"sha": "a" * 40},
+                    "base": {"sha": "b" * 40}, "merge_commit_sha": self.merge_sha,
+                }
+            def workflow(self, token):
+                return {"path": ".github/workflows/canary.yml", "state": "active"}
+
+        adapter.client = Client()
+        adapter._revalidate_target(object())
+        adapter.client.merge_sha = "d" * 40
+        with self.assertRaisesRegex(CanaryRuntimeError, "crossed authorization"):
+            adapter._revalidate_target(object())
+
+    def test_reservation_never_exceeds_the_five_minute_allocation_contract(self):
+        adapter = LiveCanaryDispatchAdapter.__new__(LiveCanaryDispatchAdapter)
+        adapter.authorization = {
+            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1))
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z"),
+            "garm_entity": {
+                "authority_kind": "personal-repository",
+                "runner_group": None,
+            },
+            "repository_id": 1,
+            "repository": "x/y",
+            "head_sha": "a" * 40,
+            "workflow_ref": "x/y/.github/workflows/canary.yml@refs/heads/main",
+            "image_fingerprint": "b" * 64,
+        }
+        adapter._reservation = None
+        reservation_value = adapter.reservation("success")
+        issued = datetime.fromisoformat(reservation_value["issued_at"].replace("Z", "+00:00"))
+        expires = datetime.fromisoformat(reservation_value["expires_at"].replace("Z", "+00:00"))
+        self.assertEqual(timedelta(minutes=5), expires - issued)
+
     def test_github_runner_inventory_pages_until_total_count(self):
         class Transport:
             def __init__(self):
