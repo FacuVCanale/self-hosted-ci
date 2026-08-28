@@ -55,6 +55,7 @@ table ${table_family} ${table_name} {
     type filter hook output priority -10; policy accept;
     meta skuid ${proxy_uid} oifname "lo" counter accept
     meta skuid ${proxy_uid} ip daddr ${resolver} counter accept
+    meta skuid ${proxy_uid} oifname "${bridge}" ip daddr ${runner_subnet} counter accept
     meta skuid ${proxy_uid} ip daddr @forbidden_v4 counter drop
     meta skuid ${proxy_uid} ip6 daddr @forbidden_v6 counter drop
   }
@@ -73,6 +74,7 @@ verify_policy() {
   [[ "$(grep -Fc "iifname \"${bridge}\"" <<<"${rules}")" -ge 6 ]] || die "runner input policy incomplete"
   grep -Fq "oifname \"${bridge}\" counter packets" <<<"${rules}" || die "runner forward deny drift"
   grep -Fq "meta skuid ${proxy_uid} ip daddr ${resolver} counter packets" <<<"${rules}" || die "proxy resolver exception drift"
+  grep -Fq "meta skuid ${proxy_uid} oifname \"${bridge}\" ip daddr ${runner_subnet} counter packets" <<<"${rules}" || die "proxy runner-return exception drift"
   grep -Fq "meta skuid ${proxy_uid} ip daddr @forbidden_v4" <<<"${rules}" || die "proxy IPv4 rebinding guard drift"
   grep -Fq "meta skuid ${proxy_uid} ip6 daddr @forbidden_v6" <<<"${rules}" || die "proxy IPv6 rebinding guard drift"
 }

@@ -61,6 +61,12 @@ class NetworkPolicyAndProxyTests(unittest.TestCase):
         self.assertIn("ip daddr 10.254.0.1 tcp dport 53", source)
         self.assertIn('iifname "${bridge}" counter drop', source)
         self.assertIn('oifname "${bridge}" counter drop', source)
+        runner_return = 'oifname "${bridge}" ip daddr ${runner_subnet} counter accept'
+        self.assertIn(runner_return, source)
+        self.assertLess(
+            source.index(runner_return),
+            source.index("ip daddr @forbidden_v4 counter drop"),
+        )
         self.assertIn("quarantine_policy", source)
         self.assertIn(
             "ExecStop=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh quarantine",
