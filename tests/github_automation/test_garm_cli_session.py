@@ -166,6 +166,18 @@ class GarmCliSessionTests(unittest.TestCase):
         self.assertNotIn('"PASSWORD"', source)
         self.assertNotIn('"TOKEN"', source)
 
+    def test_session_always_logs_in_instead_of_reusing_a_stale_generation(self) -> None:
+        source = HELPER.read_text(encoding="utf-8")
+        ensure_session = source[source.index("def ensure_session()") : source.index("def main()")]
+        self.assertNotIn("_token_from_config(config, secret)", ensure_session)
+        self.assertIn("token = _login(", ensure_session)
+
+    def test_username_contract_is_alphanumeric(self) -> None:
+        helper = load_helper()
+        secret = b"j" * 32
+        with self.assertRaises(helper.SessionError):
+            helper._login(b"admin-name", b"password", secret)
+
 
 def stat_mode(path: Path) -> int:
     return path.stat().st_mode & 0o777
