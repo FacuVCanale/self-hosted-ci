@@ -1,6 +1,4 @@
-)
-
-var CloudConfigTemplate = `#!/bin/bash
+#!/bin/bash
 
 set -e
 set -o pipefail
@@ -181,4 +179,3 @@ set -e
 {{- end}}
 systemInfo $AGENT_ID
 success "runner successfully installed" $AGENT_ID
-
