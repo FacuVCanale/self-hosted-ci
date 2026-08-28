@@ -64,6 +64,12 @@ class GarmActivationTransactionTests(unittest.TestCase):
         ):
             self.assertIn(token, source)
         self.assertIn('systemctl start "$BOUNDARY_SERVICE"', source)
+        self.assertIn("require_canary_production_fence", source)
+        self.assertIn("production-fence", library)
+        self.assertLess(
+            source.index("require_canary_production_fence"),
+            source.index("require_live_artifact_contract"),
+        )
         self.assertLess(
             source.index('systemctl start "$BOUNDARY_SERVICE"'),
             source.index("require_base_health"),

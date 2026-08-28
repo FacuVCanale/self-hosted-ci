@@ -1,0 +1,25 @@
+[Unit]
+Description=Temporary allocation broker for the JIT canary lane
+Requires=self-hosted-ci-canary-garm.service self-hosted-ci-canary-network-policy.service
+After=self-hosted-ci-canary-garm.service self-hosted-ci-canary-network-policy.service
+ConditionPathExists=/run/self-hosted-ci/CANARY_APPROVED
+Conflicts=self-hosted-ci-allocation-broker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStartPre=/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py verify
+ExecStartPre=/usr/local/lib/self-hosted-ci/garm-allocation-broker.py recover
+ExecStart=/usr/local/lib/self-hosted-ci/garm-allocation-broker.py serve
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/self-hosted-ci/garm /var/lib/self-hosted-ci/canary
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+UMask=0077

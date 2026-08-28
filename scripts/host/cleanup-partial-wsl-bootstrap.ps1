@@ -76,4 +76,5 @@ if (`$LASTEXITCODE -ne 0) { throw 'exact WSL cleanup failed' }
     if ($registered) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
     if ($passwordChanged) { $replacement = New-RandomPassword; try { Set-LocalUser -Name $ServiceAccount -Password $replacement } finally { $replacement.Dispose() } }
     if ($password) { $password.Dispose() }
+    if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
 }

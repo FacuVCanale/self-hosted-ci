@@ -29,8 +29,8 @@
       "required": ["bootstrap_public_manifest_version", "mapping_digest", "artifact_count", "sha256"],
       "properties": {
         "bootstrap_public_manifest_version": {"const": 1},
-        "mapping_digest": {"const": "2419930b80c9b10d89b9f485ae60757301e3e23d9b72ef18e28f31b951a591d7"},
-        "artifact_count": {"const": 61},
+        "mapping_digest": {"const": "9f9cc82e1d65be945898bd45518ccb6fa78aa18844b979f1412e239436d1a930"},
+        "artifact_count": {"const": 80},
         "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       }
     },

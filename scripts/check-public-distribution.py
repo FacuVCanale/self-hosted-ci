@@ -38,6 +38,7 @@ def main() -> int:
                 )
     expected_action_counts = {
         "actions/ci-control": 6,
+        "actions/jit-canary-validate": 1,
         "actions/jit-pilot-validate": 1,
     }
     observed_action_counts = {

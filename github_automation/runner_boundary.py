@@ -12,6 +12,7 @@ from typing import Any, Mapping
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from .crypto import canonicalize_jcs, sign_detached, spki_fingerprint, verify_detached
+from .canary_boundary import CANARY_SCENARIOS, CanaryBoundaryError, authorization_digest, verify_canary_authorization
 from .host_security import BLOCKED_NETWORK_CIDRS, evaluate_host_security
 
 
@@ -25,6 +26,15 @@ REQUIRED_COMPONENTS = frozenset(
 BOUNDARY_ATTESTATION_DOMAIN = b"self-hosted-ci/wsl-jit-boundary-attestation/v1"
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_PROOF_SET_SHARED = ("repository", "repository_id", "head_sha", "tested_merge_sha", "dispatch_sha", "image_fingerprint", "network_policy_digest", "github_app_config_digest", "allocation_signer_fingerprint")
+_LIFECYCLE_PROOF_FIELDS = {
+    "authorization_digest", "nonce", "scenario", "allocation_id", "scale_set_id", "scale_set_name",
+    "run_id", "run_attempt", "job_id", "runner_name", "repository", "repository_id", "dispatch_sha",
+    "head_sha", "tested_merge_sha", "image_fingerprint", "network_policy_digest", "github_app_config_digest",
+    "allocation_signer_fingerprint", "reserved_at", "started_at", "finished_at", "jobs_started", "conclusion",
+    "normal_cancel_receipt", "force_cancel_receipt", "cleanup_record", "garm_inventory_post", "incus_inventory_post",
+    "github_inventory_post", "proof_digest",
+}
 
 
 @dataclass(frozen=True)
@@ -32,6 +42,76 @@ class RunnerBoundaryDecision:
     enabled: bool
     status: str
     blockers: tuple[str, ...]
+
+
+def _verify_lifecycle_proof_set(
+    authorization: Mapping[str, Any], proof_set: Mapping[str, Any],
+    public_key: ed25519.Ed25519PublicKey, fingerprint: str,
+) -> tuple[dict[str, Any], ...]:
+    decision = verify_canary_authorization(
+        authorization, public_key, pinned_fingerprint=fingerprint
+    )
+    if not decision.authorized:
+        raise RunnerBoundaryError("lifecycle authorization is not valid: " + ",".join(decision.blockers))
+    expected_set = {"schema_version", "authorization_digest", "nonce", *_PROOF_SET_SHARED, "proofs"}
+    if not isinstance(proof_set, Mapping) or set(proof_set) != expected_set or proof_set.get("schema_version") != 1:
+        raise RunnerBoundaryError("lifecycle proof set requires exact v1 fields")
+    digest = authorization_digest(authorization)
+    if proof_set.get("authorization_digest") != digest or proof_set.get("nonce") != authorization.get("nonce"):
+        raise RunnerBoundaryError("lifecycle proof set crossed signed authorization")
+    if any(proof_set.get(field) != authorization.get(field) for field in _PROOF_SET_SHARED):
+        raise RunnerBoundaryError("lifecycle proof set crossed signed repository/runtime binding")
+    proofs = proof_set.get("proofs")
+    if not isinstance(proofs, list) or [item.get("scenario") if isinstance(item, Mapping) else None for item in proofs] != list(CANARY_SCENARIOS):
+        raise RunnerBoundaryError("lifecycle proof set must contain six canonical scenarios")
+    legacy: list[dict[str, Any]] = []
+    allocation_ids: set[Any] = set(); run_ids: set[Any] = set(); job_ids: set[Any] = set()
+    for proof in proofs:
+        if not isinstance(proof, Mapping) or set(proof) != _LIFECYCLE_PROOF_FIELDS:
+            raise RunnerBoundaryError("lifecycle proof requires exact fields")
+        supplied = proof.get("proof_digest")
+        expected = hashlib.sha256(canonicalize_jcs({key: value for key, value in proof.items() if key != "proof_digest"})).hexdigest()
+        if supplied != expected or not isinstance(supplied, str) or not _HEX_DIGEST.fullmatch(supplied):
+            raise RunnerBoundaryError("lifecycle proof digest is invalid")
+        if proof.get("authorization_digest") != digest or proof.get("nonce") != authorization.get("nonce"):
+            raise RunnerBoundaryError("lifecycle proof crossed signed authorization")
+        if any(proof.get(field) != authorization.get(field) for field in _PROOF_SET_SHARED):
+            raise RunnerBoundaryError("lifecycle proof crossed signed runtime binding")
+        scenario = proof.get("scenario")
+        if proof.get("conclusion") != scenario:
+            raise RunnerBoundaryError("lifecycle proof conclusion crossed scenario")
+        if not isinstance(proof.get("scale_set_id"), str) or not re.fullmatch(r"[1-9][0-9]*", proof["scale_set_id"]):
+            raise RunnerBoundaryError("lifecycle proof scale set ID is invalid")
+        if any(type(proof.get(field)) is not int or proof[field] < 1 for field in ("run_id", "run_attempt", "job_id")):
+            raise RunnerBoundaryError("lifecycle proof GitHub IDs are invalid")
+        jobs_started = proof.get("jobs_started")
+        if jobs_started != 1:
+            raise RunnerBoundaryError("lifecycle proof jobs_started is invalid")
+        cleanup = proof.get("cleanup_record")
+        if not isinstance(cleanup, Mapping) or any(cleanup.get(field) is not True for field in ("registration_removed", "workspace_removed", "token_removed", "container_removed", "allocation_removed")):
+            raise RunnerBoundaryError("lifecycle proof cleanup is incomplete")
+        for inventory in ("garm_inventory_post", "incus_inventory_post", "github_inventory_post"):
+            if not isinstance(proof.get(inventory), Mapping) or proof[inventory].get("remaining") != 0:
+                raise RunnerBoundaryError("lifecycle proof global cleanup is incomplete")
+        if scenario == "force-cancel" and (proof.get("normal_cancel_receipt") is None or proof.get("force_cancel_receipt") is None):
+            raise RunnerBoundaryError("force-cancel proof lacks ordered cancel receipts")
+        if scenario == "cancel" and proof.get("normal_cancel_receipt") is None:
+            raise RunnerBoundaryError("cancel proof lacks normal cancel receipt")
+        if scenario not in {"cancel", "force-cancel"} and proof.get("normal_cancel_receipt") is not None:
+            raise RunnerBoundaryError("lifecycle proof has an unexpected cancel receipt")
+        if scenario != "force-cancel" and proof.get("force_cancel_receipt") is not None:
+            raise RunnerBoundaryError("lifecycle proof has an unexpected force receipt")
+        allocation_ids.add(proof.get("allocation_id")); run_ids.add(proof.get("run_id")); job_ids.add(proof.get("job_id"))
+        legacy.append({
+            "jit": True, "ephemeral_registration": True, "jobs_started": jobs_started,
+            "registration_removed": True, "workspace_removed": True, "token_removed": True,
+            "container_removed": True, "allocation_removed": True,
+            "normal_cancel_attempted_before_force": scenario == "force-cancel",
+            "terminal_mode": scenario, "orphan_registrations": 0,
+        })
+    if not all(len(values) == 6 for values in (allocation_ids, run_ids, job_ids)):
+        raise RunnerBoundaryError("lifecycle allocation/run/job identities must be unique")
+    return tuple(legacy)
 
 
 def _aggregate_digest(records: list[Mapping[str, Any]]) -> str:
@@ -241,6 +321,8 @@ def evaluate_runner_boundary(
         "host_security",
         "network_policy",
         "measurements",
+        "jit_canary_authorization",
+        "runner_lifecycle_proof_set",
         "attestation",
     }
     if (
@@ -300,7 +382,21 @@ def evaluate_runner_boundary(
     blockers.extend(
         f"component-missing:{item}" for item in sorted(REQUIRED_COMPONENTS - seen)
     )
-    host = evaluate_host_security(value["host_security"])
+    if reviewer_public_key is None or pinned_reviewer_fingerprint is None:
+        blockers.append("lifecycle-proof-signature-not-verified")
+        lifecycle_runs: tuple[dict[str, Any], ...] = ()
+    else:
+        try:
+            lifecycle_runs = _verify_lifecycle_proof_set(
+                value["jit_canary_authorization"], value["runner_lifecycle_proof_set"],
+                reviewer_public_key, pinned_reviewer_fingerprint,
+            )
+        except (RunnerBoundaryError, CanaryBoundaryError, ValueError, TypeError) as exc:
+            blockers.append(f"lifecycle-proof-invalid:{exc}")
+            lifecycle_runs = ()
+    host_input = dict(value["host_security"])
+    host_input["runner_lifecycle_runs"] = list(lifecycle_runs)
+    host = evaluate_host_security(host_input)
     blockers.extend(f"host:{item}" for item in host.blockers)
     if value["host_security"].get("distro_name") != "Ubuntu-24.04-CI":
         blockers.append("host:unexpected-dedicated-distro-name")

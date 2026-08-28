@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from github_automation.crypto import canonicalize_jcs, spki_fingerprint
+from github_automation.canary_boundary import CANARY_SCENARIOS, sign_canary_authorization
 from github_automation.host_security import BLOCKED_NETWORK_CIDRS, REQUIRED_CHECKS
 from github_automation.host_security import evaluate_runner_lifecycle
 from github_automation.runner_boundary import (
@@ -21,6 +22,8 @@ from github_automation.runner_boundary import (
     verify_runner_boundary_attestation,
     verify_host_measurements,
 )
+from tests.github_automation.test_canary_boundary import authorization
+from tests.github_automation.test_lifecycle_proof_builder import BUILDER, proof
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -83,21 +86,15 @@ def host_evidence() -> dict:
             "windows_reboot_verified": True,
             "wsl_reboot_verified": True,
         },
-        "runner_lifecycle_runs": [
-            lifecycle(mode)
-            for mode in (
-                "success",
-                "failure",
-                "cancel",
-                "timeout",
-                "force-cancel",
-                "reboot",
-            )
-        ],
     }
 
 
 def boundary() -> dict:
+    canary_authorization = sign_canary_authorization(authorization(), REVIEWER_PRIVATE)
+    proof_set = BUILDER.build(
+        canary_authorization,
+        [proof(canary_authorization, scenario, index) for index, scenario in enumerate(CANARY_SCENARIOS, 1)],
+    )
     value = {
         "runner_boundary_version": 2,
         "activation_requested": True,
@@ -111,6 +108,8 @@ def boundary() -> dict:
             for item in sorted(REQUIRED_COMPONENTS)
         ],
         "host_security": host_evidence(),
+        "jit_canary_authorization": canary_authorization,
+        "runner_lifecycle_proof_set": proof_set,
         "network_policy": {
             "network_policy_version": 2,
             "enabled": True,
@@ -238,6 +237,22 @@ class RunnerBoundaryV2Tests(unittest.TestCase):
             )
             self.assertTrue(decision.enabled, decision.blockers)
 
+    def test_lifecycle_is_bound_by_proof_digests_and_final_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            value, _ = materialize(Path(directory))
+            self.assertNotIn("runner_lifecycle_runs", value["host_security"])
+            forged = json.loads(json.dumps(value)); forged.pop("attestation")
+            forged["runner_lifecycle_proof_set"]["proofs"][0]["jobs_started"] = 0
+            forged = sign_runner_boundary(forged, REVIEWER_PRIVATE)
+            measured, blockers = verify_host_measurements(forged, Path(directory))
+            decision = evaluate_runner_boundary(
+                forged, measured_component_digests=measured,
+                measurement_blockers=blockers,
+                reviewer_public_key=REVIEWER_PRIVATE.public_key(),
+                pinned_reviewer_fingerprint=REVIEWER_FINGERPRINT,
+            )
+            self.assertTrue(any("lifecycle-proof-invalid" in item for item in decision.blockers))
+
     def test_activation_component_network_and_host_gaps_block(self) -> None:
         mutations = (
             (
@@ -298,11 +313,14 @@ class RunnerBoundaryV2Tests(unittest.TestCase):
         self.assertFalse(policy["enabled"])
         self.assertEqual([], policy["allowed_destinations"])
 
-    def test_reboot_cleanup_accepts_zero_or_one_started_job_only(self) -> None:
-        for jobs_started in (0, 1):
-            run = lifecycle("reboot")
-            run["jobs_started"] = jobs_started
-            self.assertEqual((), evaluate_runner_lifecycle(run))
+    def test_reboot_cleanup_requires_exactly_one_started_job(self) -> None:
+        run = lifecycle("reboot")
+        self.assertEqual((), evaluate_runner_lifecycle(run))
+        run = lifecycle("reboot")
+        run["jobs_started"] = 0
+        self.assertIn(
+            "runner-lifecycle:not-exactly-one-job", evaluate_runner_lifecycle(run)
+        )
         run = lifecycle("reboot")
         run["jobs_started"] = 2
         self.assertIn(

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/FacuVCanale/self-hosted-ci/schemas/runner-lifecycle-proof-v1.schema.json",
+  "title": "Complete JIT runner lifecycle proof set v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "authorization_digest", "nonce", "repository", "repository_id", "head_sha", "tested_merge_sha", "dispatch_sha", "image_fingerprint", "network_policy_digest", "github_app_config_digest", "allocation_signer_fingerprint", "proofs"],
+  "properties": {
+    "schema_version": {"const": 1}, "authorization_digest": {"$ref": "#/$defs/digest"}, "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"}, "repository_id": {"type": "integer", "minimum": 1},
+    "head_sha": {"$ref": "#/$defs/sha"}, "tested_merge_sha": {"$ref": "#/$defs/sha"}, "dispatch_sha": {"$ref": "#/$defs/sha"},
+    "image_fingerprint": {"$ref": "#/$defs/digest"}, "network_policy_digest": {"$ref": "#/$defs/digest"}, "github_app_config_digest": {"$ref": "#/$defs/digest"}, "allocation_signer_fingerprint": {"$ref": "#/$defs/digest"},
+    "proofs": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/proof"}}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "uuid": {"type": "string", "format": "uuid"}, "time": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "receipt": {"type": ["object", "null"], "additionalProperties": false, "required": ["operation_id", "observed_at", "receipt_digest"], "properties": {"operation_id": {"type": "string", "minLength": 1}, "observed_at": {"$ref": "#/$defs/time"}, "receipt_digest": {"$ref": "#/$defs/digest"}}},
+    "inventory": {"type": "object", "additionalProperties": false, "required": ["remaining", "inventory_digest"], "properties": {"remaining": {"const": 0}, "inventory_digest": {"$ref": "#/$defs/digest"}}},
+    "cleanup": {"type": "object", "additionalProperties": false, "required": ["registration_removed", "workspace_removed", "token_removed", "container_removed", "allocation_removed", "cleanup_digest"], "properties": {"registration_removed": {"const": true}, "workspace_removed": {"const": true}, "token_removed": {"const": true}, "container_removed": {"const": true}, "allocation_removed": {"const": true}, "cleanup_digest": {"$ref": "#/$defs/digest"}}},
+    "proof": {"type": "object", "additionalProperties": false, "required": ["authorization_digest", "nonce", "scenario", "allocation_id", "scale_set_id", "scale_set_name", "run_id", "run_attempt", "job_id", "runner_name", "repository", "repository_id", "dispatch_sha", "head_sha", "tested_merge_sha", "image_fingerprint", "network_policy_digest", "github_app_config_digest", "allocation_signer_fingerprint", "reserved_at", "started_at", "finished_at", "jobs_started", "conclusion", "normal_cancel_receipt", "force_cancel_receipt", "cleanup_record", "garm_inventory_post", "incus_inventory_post", "github_inventory_post", "proof_digest"], "properties": {
+      "authorization_digest": {"$ref": "#/$defs/digest"}, "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"}, "scenario": {"enum": ["success", "failure", "cancel", "timeout", "force-cancel", "reboot"]},
+      "allocation_id": {"$ref": "#/$defs/uuid"}, "scale_set_id": {"type": "string", "pattern": "^[1-9][0-9]*$"}, "scale_set_name": {"type": "string", "minLength": 1}, "run_id": {"type": "integer", "minimum": 1}, "run_attempt": {"type": "integer", "minimum": 1}, "job_id": {"type": "integer", "minimum": 1}, "runner_name": {"type": "string", "minLength": 1},
+      "repository": {"type": "string", "minLength": 1}, "repository_id": {"type": "integer", "minimum": 1}, "dispatch_sha": {"$ref": "#/$defs/sha"}, "head_sha": {"$ref": "#/$defs/sha"}, "tested_merge_sha": {"$ref": "#/$defs/sha"}, "image_fingerprint": {"$ref": "#/$defs/digest"}, "network_policy_digest": {"$ref": "#/$defs/digest"}, "github_app_config_digest": {"$ref": "#/$defs/digest"}, "allocation_signer_fingerprint": {"$ref": "#/$defs/digest"},
+      "reserved_at": {"$ref": "#/$defs/time"}, "started_at": {"$ref": "#/$defs/time"}, "finished_at": {"$ref": "#/$defs/time"}, "jobs_started": {"const": 1}, "conclusion": {"enum": ["success", "failure", "cancel", "timeout", "force-cancel", "reboot"]},
+      "normal_cancel_receipt": {"$ref": "#/$defs/receipt"}, "force_cancel_receipt": {"$ref": "#/$defs/receipt"}, "cleanup_record": {"$ref": "#/$defs/cleanup"}, "garm_inventory_post": {"$ref": "#/$defs/inventory"}, "incus_inventory_post": {"$ref": "#/$defs/inventory"}, "github_inventory_post": {"$ref": "#/$defs/inventory"}, "proof_digest": {"$ref": "#/$defs/digest"}
+    }}
+  }
+}

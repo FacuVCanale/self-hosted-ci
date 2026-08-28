@@ -1,0 +1,14 @@
+[Unit]
+Description=Quarantine the runner bridge after the JIT canary lane
+After=self-hosted-ci-canary-broker.service self-hosted-ci-canary-garm.service self-hosted-ci-canary-egress-proxy.service
+Conflicts=self-hosted-ci-canary.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/self-hosted-ci/garm-allocation-broker.py recover
+ExecStart=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh quarantine
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/self-hosted-ci/garm /var/lib/self-hosted-ci/canary

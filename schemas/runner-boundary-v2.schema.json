@@ -4,7 +4,7 @@
   "title": "WSL JIT runner boundary evidence v2",
   "type": "object",
   "additionalProperties": false,
-  "required": ["runner_boundary_version", "activation_requested", "components", "host_security", "network_policy", "measurements", "attestation"],
+  "required": ["runner_boundary_version", "activation_requested", "components", "host_security", "network_policy", "measurements", "jit_canary_authorization", "runner_lifecycle_proof_set", "attestation"],
   "properties": {
     "runner_boundary_version": {"const": 2},
     "activation_requested": {"type": "boolean"},
@@ -27,7 +27,7 @@
     "host_security": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["host_security_schema_version", "platform", "distro_name", "personal_distro_names", "wsl_conf", "checks", "observed_artifact_kinds", "network_policy", "runner_lifecycle_runs"],
+      "required": ["host_security_schema_version", "platform", "distro_name", "personal_distro_names", "wsl_conf", "checks", "observed_artifact_kinds", "network_policy"],
       "properties": {
         "host_security_schema_version": {"const": 1},
         "platform": {"const": "wsl2"},
@@ -60,25 +60,11 @@
             "loaded_before_registration": {"type": "boolean"}, "windows_reboot_verified": {"type": "boolean"},
             "wsl_reboot_verified": {"type": "boolean"}
           }
-        },
-        "runner_lifecycle_runs": {
-          "type": "array",
-          "items": {
-            "type": "object", "additionalProperties": false,
-            "required": ["jit", "ephemeral_registration", "jobs_started", "registration_removed", "workspace_removed", "token_removed", "container_removed", "allocation_removed", "normal_cancel_attempted_before_force", "terminal_mode", "orphan_registrations"],
-            "properties": {
-              "jit": {"type": "boolean"}, "ephemeral_registration": {"type": "boolean"},
-              "jobs_started": {"type": "integer", "minimum": 0, "maximum": 1}, "registration_removed": {"type": "boolean"},
-              "workspace_removed": {"type": "boolean"}, "token_removed": {"type": "boolean"},
-              "container_removed": {"type": "boolean"}, "allocation_removed": {"type": "boolean"},
-              "normal_cancel_attempted_before_force": {"type": "boolean"},
-              "terminal_mode": {"enum": ["success", "failure", "cancel", "timeout", "force-cancel", "reboot"]},
-              "orphan_registrations": {"type": "integer", "minimum": 0}
-            }
-          }
         }
       }
     },
+    "jit_canary_authorization": {"type": "object"},
+    "runner_lifecycle_proof_set": {"type": "object"},
     "network_policy": {
       "type": "object",
       "additionalProperties": false,

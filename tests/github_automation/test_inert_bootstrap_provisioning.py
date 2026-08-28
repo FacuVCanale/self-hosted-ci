@@ -68,6 +68,26 @@ class InertBootstrapProvisioningTests(unittest.TestCase):
         self.assertNotIn('systemctl disable --now "${inert_service}" >/dev/null 2>&1 || true', self.source)
         self.assertNotIn('systemctl show --property=LoadState --value "${service}" 2>/dev/null || true', self.source)
 
+    def test_quarantine_is_enabled_now_and_ordered_before_incus(self):
+        enabled = "systemctl enable --now self-hosted-ci-network-quarantine.service"
+        self.assertIn(enabled, self.source)
+        self.assertIn("network quarantine is not reboot-persistent", self.source)
+        self.assertIn("network quarantine did not become active", self.source)
+        self.assertLess(
+            self.source.index(enabled),
+            self.source.index('install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-boundary-verify.service"'),
+        )
+        unit = (ROOT / "packaging/systemd/self-hosted-ci-network-quarantine.service").read_text(encoding="utf-8")
+        self.assertIn("DefaultDependencies=no", unit)
+        self.assertIn("Before=incus.service self-hosted-ci-canary-network-policy.service", unit)
+        self.assertIn("WantedBy=multi-user.target", unit)
+        production = (ROOT / "packaging/systemd/self-hosted-ci-network-policy.service").read_text(encoding="utf-8")
+        self.assertIn("Requires=self-hosted-ci-network-quarantine.service", production)
+        self.assertIn("After=self-hosted-ci-network-quarantine.service", production)
+        self.assertIn("ExecStartPre=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh quarantine", production)
+        self.assertIn("ExecStart=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh apply", production)
+        self.assertIn("ExecStartPost=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh verify", production)
+
 
 if __name__ == "__main__":
     unittest.main()

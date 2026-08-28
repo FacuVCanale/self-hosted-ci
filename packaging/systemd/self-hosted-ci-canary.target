@@ -1,0 +1,5 @@
+[Unit]
+Description=Isolated self-hosted-ci JIT lifecycle canary
+Requires=self-hosted-ci-canary-network-policy.service self-hosted-ci-canary-egress-proxy.service self-hosted-ci-canary-garm.service self-hosted-ci-canary-broker.service
+After=self-hosted-ci-canary-network-policy.service self-hosted-ci-canary-egress-proxy.service self-hosted-ci-canary-garm.service self-hosted-ci-canary-broker.service
+StopWhenUnneeded=yes

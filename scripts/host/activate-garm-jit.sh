@@ -7,7 +7,7 @@ while [[ $# -gt 0 ]]; do case "$1" in --plan) mode=plan;shift;; --apply) mode=ap
 if [[ "$mode" == plan ]]; then printf '%s\n' '{"mode":"plan","external_calls":"not_performed","host_changes":false,"sequence":["verify broker and outbound worker configuration and zero runtime","start policy and proxy","start GARM","prove zero scale sets and instances","start allocation broker","start outbound worker"]}'; exit 0; fi
 [[ "$ack_external" == true && "$ack_activation" == true ]]||die "--apply requires both explicit acknowledgements"
 [[ "$incus_project" == ci-jit && "$garm_cli_home" == "$GARM_RUNTIME_HOME" ]]||die "exact Incus project and garm-cli home are required"
-require_exact_distro; acquire_transaction_lock; require_command_contracts; require_live_artifact_contract; require_real_policy_units
+require_exact_distro; acquire_transaction_lock; require_command_contracts; require_canary_production_fence; require_live_artifact_contract; require_real_policy_units
 systemctl start "$BOUNDARY_SERVICE"; systemctl is-active --quiet "$BOUNDARY_SERVICE"||die "boundary verification failed"
 require_base_health; require_health_configuration
 [[ ! -e "$ACTIVATION_SENTINEL" && ! -e "$NETWORK_SENTINEL" ]]||die "prior activation state exists; run deactivation to reconcile it"

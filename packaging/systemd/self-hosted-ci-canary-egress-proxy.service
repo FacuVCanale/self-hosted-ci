@@ -1,0 +1,31 @@
+[Unit]
+Description=Temporary allowlisted egress proxies for the JIT canary lane
+Requires=self-hosted-ci-canary-network-policy.service
+After=self-hosted-ci-canary-network-policy.service
+Before=self-hosted-ci-canary-garm.service
+ConditionPathExists=/run/self-hosted-ci/CANARY_APPROVED
+Conflicts=self-hosted-ci-egress-proxy.service
+
+[Service]
+Type=simple
+User=proxy
+Group=proxy
+ExecStartPre=+/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py verify
+ExecStartPre=/usr/local/lib/self-hosted-ci/run-egress-proxies.sh check
+ExecStart=/usr/local/lib/self-hosted-ci/run-egress-proxies.sh run
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+UMask=0077
