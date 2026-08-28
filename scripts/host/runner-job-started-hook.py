@@ -15,6 +15,7 @@ from pathlib import Path
 BROKER_URL = "http://10.254.0.1:8079/v1/job-started"
 ALLOCATION_ID_FILE = Path("/etc/self-hosted-ci/allocation-id")
 SCALE_SET_NAME_FILE = Path("/etc/self-hosted-ci/scale-set-name")
+ALLOCATION_FILE = Path("/etc/self-hosted-ci/allocation.json")
 
 
 def read_root_binding(path: Path, pattern: str) -> str:
@@ -36,6 +37,23 @@ def required_env(name: str) -> str:
     return value
 
 
+def read_tested_sha() -> str:
+    info = os.lstat(ALLOCATION_FILE)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1:
+        raise ValueError(f"unsafe allocation binding file: {ALLOCATION_FILE}")
+    if info.st_mode & 0o022 or info.st_size > 16384:
+        raise ValueError(
+            f"allocation binding file permissions/size are unsafe: {ALLOCATION_FILE}"
+        )
+    value = json.loads(ALLOCATION_FILE.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or not isinstance(value.get("payload"), dict):
+        raise ValueError("allocation binding envelope is invalid")
+    tested_sha = value["payload"].get("tested_merge_sha")
+    if not isinstance(tested_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", tested_sha):
+        raise ValueError("allocation binding tested merge SHA is invalid")
+    return tested_sha
+
+
 def main() -> int:
     try:
         allocation_id = read_root_binding(
@@ -52,7 +70,7 @@ def main() -> int:
                 "repository_id": required_env("GITHUB_REPOSITORY_ID"),
                 "repository": required_env("GITHUB_REPOSITORY"),
                 "dispatch_sha": required_env("GITHUB_SHA"),
-                "tested_sha": required_env("CI_GATE_TRUSTED_TESTED_SHA"),
+                "tested_sha": read_tested_sha(),
                 "workflow_ref": required_env("GITHUB_WORKFLOW_REF"),
                 "run_id": required_env("GITHUB_RUN_ID"),
                 "run_attempt": int(attempt),
