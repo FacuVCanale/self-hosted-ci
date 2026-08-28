@@ -182,6 +182,7 @@ install -o root -g root -m 0640 "${repo_root}/templates/garm/config.toml.example
 install -o root -g root -m 0640 "${repo_root}/templates/incus/runner-profile.yaml" "${TARGET_ROOT}/incus/runner-profile.yaml"
 install -d -o root -g root -m 0755 "/usr/local/share/self-hosted-ci"
 install -o root -g root -m 0644 "${repo_root}/templates/garm/garm-provider-incus.toml" "/usr/local/share/self-hosted-ci/garm-provider-incus.toml"
+install -o root -g root -m 0644 "${repo_root}/templates/garm/runner-install-offline.sh.tmpl" "/usr/local/share/self-hosted-ci/runner-install-offline.sh.tmpl"
 install -o root -g root -m 0644 "${repo_root}/templates/garm/outbound-worker.json.example" "/usr/local/share/self-hosted-ci/outbound-worker.json.example"
 install -o root -g root -m 0644 "${repo_root}/templates/garm/worker-app-authority.json.example" "/usr/local/share/self-hosted-ci/worker-app-authority.json.example"
 for app_contract in runner-manager-app dispatcher-app live-job-verifier-app; do

@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
+import base64
+import json
 import tempfile
 import unittest
 
@@ -209,6 +211,63 @@ class AllocationBrokerTests(unittest.TestCase):
         )
         self.assertIn("chmod 0644 /etc/profile.d/self-hosted-ci-runner-proxy.sh", bootstrap)
         self.assertIn("systemctl daemon-reexec", bootstrap)
+
+    def test_scale_set_binds_complete_offline_runner_template(self):
+        hook = Path(self.tempdir.name) / "hook.py"
+        hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        template = Path(self.tempdir.name) / "runner-install.tmpl"
+        template.write_text("#!/bin/bash\necho '{{ .DownloadURL }}'\n", encoding="utf-8")
+        driver = GarmCliAllocationDriver(
+            {
+                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "provider_name": "incus_ci_jit",
+                "image_alias": "runner-pinned",
+                "image_fingerprint": "b" * 64,
+                "targets": {},
+            },
+            hook,
+        )
+        observed = {}
+
+        def run(*args):
+            if args[:2] == ("scaleset", "update"):
+                path = Path(args[args.index("--extra-specs-file") + 1])
+                observed["extra_specs"] = json.loads(path.read_text(encoding="utf-8"))
+            return {}
+
+        driver._run = run
+        show_calls = 0
+
+        def show_exact(*_args):
+            nonlocal show_calls
+            show_calls += 1
+            return {"id": "1", "name": "jit"} if show_calls == 1 else dict(observed)
+
+        driver._show_exact = show_exact
+        with mock.patch(
+            "github_automation.runner_jit_broker.RUNNER_INSTALL_TEMPLATE", template
+        ):
+            driver.bind_signed_allocation("1", self.payload, self.envelope)
+        decoded = base64.b64decode(observed["extra_specs"]["runner_install_template"])
+        self.assertEqual(template.read_bytes(), decoded)
+        self.assertNotIn(b"installdependencies.sh", decoded)
+
+    def test_offline_template_keeps_full_jit_lifecycle_without_apt(self):
+        template = (
+            Path(__file__).resolve().parents[2]
+            / "templates/garm/runner-install-offline.sh.tmpl"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "{{ .DownloadURL }}",
+            "{{ .MetadataURL }}",
+            "{{ .CallbackURL }}",
+            "{{- if .UseJITConfig }}",
+            "systemctl start $SVC_NAME",
+            "verifying pre-baked runner dependencies",
+        ):
+            self.assertIn(required, template)
+        for forbidden in ("installdependencies.sh", "apt-get", " apt "):
+            self.assertNotIn(forbidden, template)
 
     def test_garm_cli_commands_always_recreate_the_ephemeral_session(self):
         hook = Path(self.tempdir.name) / "hook.py"

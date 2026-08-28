@@ -24,6 +24,10 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from .coordinator import ReservePartialFailure
 from .runner_jit import RunnerJitError, SqliteAllocationLedger
 
+RUNNER_INSTALL_TEMPLATE = Path(
+    "/usr/local/share/self-hosted-ci/runner-install-offline.sh.tmpl"
+)
+
 
 @dataclass(frozen=True)
 class JobStartedContext:
@@ -532,8 +536,17 @@ systemctl daemon-reexec
         self, scale_set_id: str, payload: Mapping[str, Any], envelope: Mapping[str, Any]
     ) -> None:
         self._show_exact(scale_set_id, payload["scale_set_name"], False)
+        try:
+            runner_install_template = RUNNER_INSTALL_TEMPLATE.read_bytes()
+        except OSError as exc:
+            raise RunnerJitError("offline runner install template is unavailable") from exc
+        if not runner_install_template.startswith(b"#!/bin/bash\n"):
+            raise RunnerJitError("offline runner install template is invalid")
         extra_specs = {
             "disable_updates": True,
+            "runner_install_template": base64.b64encode(
+                runner_install_template
+            ).decode("ascii"),
             "pre_install_scripts": {
                 "20-self-hosted-ci-allocation.sh": base64.b64encode(
                     self._bootstrap(envelope)

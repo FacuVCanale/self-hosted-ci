@@ -90,6 +90,7 @@ REQUIRED_LIVE_TARGETS = {
     "/etc/self-hosted-ci/garm/config.toml.example",
     "/etc/self-hosted-ci/incus/runner-profile.yaml",
     "/usr/local/share/self-hosted-ci/garm-provider-incus.toml",
+    "/usr/local/share/self-hosted-ci/runner-install-offline.sh.tmpl",
     "/usr/local/share/self-hosted-ci/outbound-worker.json.example",
     "/usr/local/share/self-hosted-ci/worker-app-authority.json.example",
     "/usr/local/share/self-hosted-ci/runner-manager-app.json.example",

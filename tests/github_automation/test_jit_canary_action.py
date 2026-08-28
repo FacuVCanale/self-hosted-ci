@@ -118,6 +118,7 @@ class JitCanaryActionTests(unittest.TestCase):
         self.assertEqual(1, text.count("canary_package:"))
         for scenario in CANARY_SCENARIOS:
             self.assertIn(scenario + ")", text)
+        self.assertIn("force-cancel) trap '' INT TERM; exec sleep 240 ;;", text)
         for forbidden in ("checks: write", "statuses: write", "name: ci-gate", "secrets.", "environment: production"):
             self.assertNotIn(forbidden, text)
 
