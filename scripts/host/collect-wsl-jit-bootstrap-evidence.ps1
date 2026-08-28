@@ -324,12 +324,54 @@ except subprocess.TimeoutExpired:
 raise SystemExit(completed.returncode)
 '@
     $bootstrapB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bootstrap))
+    $cleanupProgram = @'
+import os, sys
+root, target = sys.argv[1], sys.argv[2]
+temporary = os.path.join(root, ".collector.tmp")
+errors = []
+for label, path in (("target", target), ("temporary", temporary)):
+    try:
+        if os.path.lexists(path):
+            os.unlink(path)
+    except OSError as error:
+        errors.append(f"{label} cleanup failed ({type(error).__name__}): {error}")
+try:
+    if os.path.lexists(root):
+        os.rmdir(root)
+except OSError as error:
+    entries = sorted(os.listdir(root)) if os.path.isdir(root) else []
+    errors.append(f"root cleanup failed ({type(error).__name__}): {error}; entries={entries}")
+remaining = [label for label, path in (("root", root), ("target", target), ("temporary", temporary)) if os.path.lexists(path)]
+if remaining:
+    errors.append("remaining=" + ",".join(remaining))
+if errors:
+    print("; ".join(errors), file=sys.stderr)
+raise SystemExit(1 if errors else 0)
+'@
+    $cleanupProgramB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cleanupProgram))
+    $cgroupProgram = @'
+import os, sys
+path = "/sys/fs/cgroup" + sys.argv[1]
+procs = os.path.join(path, "cgroup.procs")
+empty = not os.path.exists(path) or (os.path.isfile(procs) and not open(procs, encoding="ascii").read().strip())
+raise SystemExit(0 if empty else 1)
+'@
+    $cgroupProgramB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cgroupProgram))
+    $verifyProgram = @'
+import os, sys
+root, target = sys.argv[1], sys.argv[2]
+temporary = os.path.join(root, ".collector.tmp")
+remaining = [label for label, path in (("root", root), ("target", target), ("temporary", temporary)) if os.path.lexists(path)]
+if remaining:
+    print("remaining=" + ",".join(remaining), file=sys.stderr)
+raise SystemExit(1 if remaining else 0)
+'@
+    $verifyProgramB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($verifyProgram))
     $worker = @"
 `$ErrorActionPreference = 'Stop'
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '$ExpectedServiceAccountSid') { throw 'worker service SID mismatch' }
 function Remove-WslCollectorStage {
-    `$cleanupProgram = 'import os,sys; root=sys.argv[1]; target=sys.argv[2]; temporary=os.path.join(root,".collector.tmp"); errors=[]; paths=(("target",target),("temporary",temporary)); exec("for label,path in paths:\n try:\n  if os.path.lexists(path): os.unlink(path)\n except OSError as error:\n  errors.append(f\"{label} cleanup failed ({type(error).__name__}): {error}\")"); exec("try:\n if os.path.lexists(root): os.rmdir(root)\nexcept OSError as error:\n errors.append(f\"root cleanup failed ({type(error).__name__}): {error}; entries={sorted(os.listdir(root)) if os.path.isdir(root) else []}\")"); remaining=[label for label,path in (("root",root),)+paths if os.path.lexists(path)]; errors.append("remaining="+",".join(remaining)) if remaining else None; print("; ".join(errors),file=sys.stderr) if errors else None; raise SystemExit(1 if errors else 0)'
-    `$cleanup = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', `$cleanupProgram, '$collectorLinuxRoot', '$collectorLinuxPath')
+    `$cleanup = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', 'import base64,sys;exec(base64.b64decode(sys.argv[1]))', '$cleanupProgramB64', '$collectorLinuxRoot', '$collectorLinuxPath')
     if (`$cleanup.ExitCode -ne 0) { throw "WSL collector staging cleanup failed (exit=`$(`$cleanup.ExitCode)): `$(`$cleanup.Output)" }
 }
 function Stage-WslCollector {
@@ -406,13 +448,11 @@ function Stop-WslCollectionUnit {
         } while ((Get-Date) -lt `$unitDeadline)
         if (-not (Test-WslCollectionUnitNotFound `$unitShow)) { throw "WSL collection unit remains loaded after termination (LoadState=`$(`$unitShow.Output))" }
     }
-    `$cgroupProgram = 'import os,sys; path="/sys/fs/cgroup"+sys.argv[1]; procs=os.path.join(path,"cgroup.procs"); raise SystemExit(0 if not os.path.exists(path) or (os.path.isfile(procs) and not open(procs,encoding="ascii").read().strip()) else 1)'
-    `$cgroup = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', `$cgroupProgram, `$controlGroup)
+    `$cgroup = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', 'import base64,sys;exec(base64.b64decode(sys.argv[1]))', '$cgroupProgramB64', `$controlGroup)
     if (`$cgroup.ExitCode -ne 0) { throw "WSL collection unit cgroup still contains processes or is unobservable (exit=`$(`$cgroup.ExitCode)): `$(`$cgroup.Output)" }
 }
 function Assert-WslCollectorStageAbsent {
-    `$verifyProgram = 'import os,sys; root=sys.argv[1]; target=sys.argv[2]; temporary=os.path.join(root,".collector.tmp"); remaining=[label for label,path in (("root",root),("target",target),("temporary",temporary)) if os.path.lexists(path)]; print("remaining="+",".join(remaining),file=sys.stderr) if remaining else None; raise SystemExit(1 if remaining else 0)'
-    `$verify = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', `$verifyProgram, '$collectorLinuxRoot', '$collectorLinuxPath')
+    `$verify = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', 'import base64,sys;exec(base64.b64decode(sys.argv[1]))', '$verifyProgramB64', '$collectorLinuxRoot', '$collectorLinuxPath')
     if (`$verify.ExitCode -ne 0) { throw "WSL collector staging absence could not be verified (exit=`$(`$verify.ExitCode)): `$(`$verify.Output)" }
 }
 function Merge-CollectionFailure([string]`$Existing, [string]`$Additional) {

@@ -64,8 +64,9 @@ class BootstrapEvidenceCollectorTests(unittest.TestCase):
     def test_wsl_staging_cleanup_is_fail_closed_on_all_collection_paths(self):
         for token in (
             "function Remove-WslCollectorStage",
-            "if os.path.lexists(path): os.unlink(path)",
-            'temporary=os.path.join(root,".collector.tmp")',
+            "if os.path.lexists(path):",
+            "os.unlink(path)",
+            'temporary = os.path.join(root, ".collector.tmp")',
             "os.rmdir(root)",
             "WSL collector staging cleanup failed",
             "finally {",
@@ -82,7 +83,7 @@ class BootstrapEvidenceCollectorTests(unittest.TestCase):
 
     def test_staging_cleanup_program_is_idempotent_and_reports_exact_residue(self):
         match = re.search(
-            r"`\$cleanupProgram = '(.*?)'\n    `\$cleanup =",
+            r"    \$cleanupProgram = @'\n(.*?)\n'@\n    \$cleanupProgramB64 =",
             self.source,
             re.DOTALL,
         )
