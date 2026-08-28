@@ -119,6 +119,7 @@ readonly garm_sha256='11176acb8a725f914b9b947891b4837d374fb616195562cc0ad45a7be8
 readonly garm_url='https://github.com/cloudbase/garm/releases/download/v0.2.1/garm-linux-amd64.tgz'
 readonly garm_cli_version='0.2.1'
 readonly garm_cli_sha256='983fa54557f3f5ce3aa1eeb2387499f5f823d14512a0559ba888667bc3b3e88e'
+readonly garm_cli_binary_sha256='a973c9061cf7962b4f90c8220ed6f6cc8abeeed20780ea8b9e31ce6dfc99bd9b'
 readonly garm_cli_url='https://github.com/cloudbase/garm/releases/download/v0.2.1/garm-cli-linux-amd64.tgz'
 readonly garm_provider_incus_version='0.1.5'
 readonly garm_provider_incus_sha256='1489b5f9b3f01528e338c604c13dabe8321ed6f1bc6de77c7344119d7731c43f'
@@ -186,7 +187,15 @@ tar -xzf "${tx}/garm-cli.tgz" -C "${tx}" --no-same-owner --no-same-permissions
 [[ -f "${tx}/garm-cli" && ! -L "${tx}/garm-cli" ]]
 install -o root -g root -m 0755 "${tx}/garm-cli" /usr/local/bin/garm-cli
 [[ "$(stat -c '%U:%G:%a' /usr/local/bin/garm-cli)" == root:root:755 ]]
-[[ "$(/usr/local/bin/garm-cli version 2>&1)" == *"garm-cli: v${garm_cli_version}"* ]]
+printf '%s  %s\n' "${garm_cli_binary_sha256}" /usr/local/bin/garm-cli \
+  | sha256sum --check --status \
+  || die "installed garm-cli binary does not match pinned v${garm_cli_version}"
+# `garm-cli version` loads the caller's persistent configuration before it
+# prints the local version and therefore is not a safe installation probe.
+# Help bypasses that initialization; the exact installed-binary digest above
+# establishes the release version while this verifies that the ELF executes.
+/usr/local/bin/garm-cli --help >/dev/null \
+  || die "installed garm-cli binary is not executable on this host"
 
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
   --output "${tx}/garm-provider-incus.tgz" "${garm_provider_incus_url}"
