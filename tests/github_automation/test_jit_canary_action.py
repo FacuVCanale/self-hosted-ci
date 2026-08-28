@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from github_automation.canary_boundary import CANARY_SCENARIOS, sign_canary_authorization
+from github_automation.canary_worker import CANARY_JOB_NAME
 from github_automation.crypto import spki_fingerprint
 
 
@@ -96,6 +97,12 @@ class JitCanaryActionTests(unittest.TestCase):
             self.assertIn(scenario + ")", text)
         for forbidden in ("checks: write", "statuses: write", "name: ci-gate", "secrets.", "environment: production"):
             self.assertNotIn(forbidden, text)
+
+    def test_workflow_display_job_name_matches_live_observer(self):
+        text = (ROOT / "templates/workflows/ci-jit-canary-child.yml").read_text()
+        local_job = text.split("  local-canary:\n", 1)[1]
+        self.assertIn(f"    name: {CANARY_JOB_NAME}\n", local_job)
+        self.assertNotIn("local-jit-canary-${{", local_job)
 
     def test_renderer_replaces_inert_action_placeholder_with_immutable_sha(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:

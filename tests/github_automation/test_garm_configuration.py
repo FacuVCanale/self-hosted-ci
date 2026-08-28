@@ -74,8 +74,27 @@ class GarmConfigurationTests(unittest.TestCase):
         self.assertIn('require_root_secret "${dispatcher_private_key}"', source)
         self.assertIn("SubjectPublicKeyInfo", source)
         self.assertIn('{"metadata":"read","actions":"read","administration":"write"}', source)
-        self.assertIn('{"metadata":"read","actions":"write"}', source)
+        self.assertIn(
+            '{"metadata":"read","pull_requests":"read","actions":"write"}',
+            source,
+        )
         self.assertIn('("live-job-read",{"metadata":"read","actions":"read"})', source)
+        dispatcher = json.loads(
+            (ROOT / "templates/garm/dispatcher-app.json.example").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual("workflow-dispatch", dispatcher["purpose"])
+        self.assertEqual(
+            {"metadata": "read", "pull_requests": "read", "actions": "write"},
+            dispatcher["permissions"],
+        )
+        self.assertEqual("main", dispatcher["default_branch"])
+        self.assertEqual("ci-jit-canary-child.yml", dispatcher["workflow_id"])
+        self.assertEqual(
+            ".github/workflows/ci-jit-canary-child.yml",
+            dispatcher["workflow_path"],
+        )
         self.assertLess(source.index("github credentials add"), source.index('scaleset list'))
         self.assertLess(source.index("repo add"), source.index('scaleset list'))
 

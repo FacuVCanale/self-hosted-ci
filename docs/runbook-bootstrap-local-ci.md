@@ -205,15 +205,18 @@ Antes de aplicar se deben completar y revisar, en el WSL dedicado:
    Ese manifiesto también fija los hashes de `garm`, `garm-cli` y el provider.
    Excluye deliberadamente secretos, certificados, claves y el `config.toml`
    materializado de GARM.
-7. El mismo payload firmado de `runner-boundary-v2` contiene la autorización
-   canary Ed25519 y el proof set de seis escenarios. Cada proof liga nonce,
+7. El payload **final** firmado de `runner-boundary-v2` contiene la autorización
+   canary Ed25519 y el proof set de seis escenarios. Este requisito no se
+   fabrica durante el bootstrap inerte: se completa después de configurar GARM
+   con inventario cero y ejecutar la matriz canary descrita más abajo. Cada proof liga nonce,
    authorization digest, repo/SHA, allocation, scale set, run/job, receipts y
    cleanup global. También en reboot debe existir exactamente un job reclamado
    (`jobs_started=1`) con `started_at`; cero jobs ya no constituye evidencia.
    El evaluator deriva desde esos proofs cualquier vista legacy
    necesaria; `host_security` ya no acepta `runner_lifecycle_runs` booleanos.
 
-Recolectar y validar evidencia sin activar nada:
+Una vez terminada la matriz canary y ensamblado su proof set, recolectar y
+validar la evidencia final sin activar producción:
 
 ```bash
 sudo python3 scripts/host/stage-wsl-jit-live-contract.py \
@@ -246,7 +249,9 @@ activation y los `ExecStartPre` de boundary, network policy, proxy y GARM lo
 revalidan otra vez. Cualquier cambio de bytes, owner, group, mode, hardlink o
 symlink bloquea el arranque.
 
-En Windows, la instalación o actualización reproducible usa un bundle tar
+Los comandos de live contract que siguen pertenecen a la fase final: no
+ejecutarlos durante el bootstrap inerte ni antes de obtener los seis proofs
+canary. En Windows, la instalación o actualización reproducible usa un bundle tar
 público dentro de `C:\ProgramData\self-hosted-ci\package`. El tar debe preservar
 owner/mode Unix y contener un único árbol `contract/` con:
 
@@ -356,7 +361,7 @@ en menos de cinco minutos y sólo existe en `/run/self-hosted-ci/garm-cli`
 La entidad ya no se prepara a mano. El comando valida primero tres identidades:
 
 - runner-manager: `Metadata: read`, `Actions: read`, `Administration: write`;
-- dispatcher: `Metadata: read`, `Actions: write`;
+- dispatcher: `Metadata: read`, `Pull requests: read`, `Actions: write`;
 - live-job verifier: `Metadata: read`, `Actions: read`.
 
 Sus app IDs, installation IDs, rutas PEM y fingerprints SPKI-SHA256 deben ser
@@ -366,6 +371,13 @@ otra ruta también bloquea el apply. GARM recibe únicamente
 runner-manager; dispatcher queda reservado para `workflow_dispatch`; el
 verificador nunca recibe permisos de escritura. Reutilizar una identidad o una
 clave bloquea el apply.
+
+El contrato del dispatcher también fija `default_branch=main`,
+`workflow_id=ci-jit-canary-child.yml` y
+`workflow_path=.github/workflows/ci-jit-canary-child.yml`. Es el mismo JSON
+root-only que consume la canary para despachar y volver a leer el PR antes de
+crear cada allocation; no existe una segunda configuración con permisos más
+amplios.
 
 Después reconcilia la credencial GitHub App exacta
 `self-hosted-ci-sandbox-app`, crea o
@@ -381,10 +393,12 @@ Primero revisar el plan:
 sudo /usr/local/lib/self-hosted-ci/configure-garm-jit.sh --plan
 ```
 
-Después materializar la configuración y reconciliar el scale set. Para un repo
-personal, omitir `--runner-group`; para una organización, usar
-`--authority-kind organization-runner-group`, `--entity-name <org>` y el runner
-group exacto seleccionado:
+Después materializar la configuración manteniendo inventario cero. Este comando
+no recibe ni crea un scale set: sólo configura manager, provider, imagen,
+entidad target y contrato del broker. El bootstrap actual acepta únicamente
+`personal-repository`: usar `owner/repo` y omitir `--runner-group`. La autoridad
+de organización requiere una implementación posterior y no debe improvisarse
+con flags que este script rechaza:
 
 ```bash
 sudo /usr/local/lib/self-hosted-ci/configure-garm-jit.sh --apply \
@@ -425,13 +439,154 @@ también se eliminan por API cuando todavía está disponible. Un corte entre es
 dos defensas sigue siendo retry-safe porque cada objeto se busca por identidad
 exacta antes de crearlo o actualizarlo.
 
-La activación viene recién después. Revisar su plan y aplicar únicamente cuando
-la configuración anterior haya devuelto el ID del scale set exacto:
+### Matriz lifecycle canary y ensamblado de evidencia
+
+La configuración exitosa debe terminar con `zero_scale_sets: true`, GARM
+inactivo y cero instancias. No crear un scale set manual ni conservar uno
+deshabilitado: el broker crea un scale set efímero por escenario, permite un único job y
+lo elimina antes de avanzar al siguiente. La autorización Ed25519 liga los seis
+escenarios canónicos (`success`, `failure`, `cancel`, `timeout`,
+`force-cancel`, `reboot`), `max_allocations: 6`, `max_concurrency: 1` y
+`max_jobs_per_allocation: 1`.
+
+Crear primero un template unsigned root-only `0600`. Debe contener el workflow,
+repo, PR, base/head/merge/dispatch SHA, nonce y ventana temporal; los cuatro
+digests live y el fingerprint del allocation signer pueden inicializarse con 64
+ceros porque el assembler los reemplaza después de medir los archivos reales.
+No copiar ni derivar otro JSON del dispatcher: se autoriza exactamente
+`/etc/self-hosted-ci/dispatcher-app.json`, el mismo archivo root-only que se pasó
+a `configure-garm-jit.sh`.
+
+Preparar los artefactos unsigned. El output debe ser una ruta nueva y el
+assembler no firma ni hace llamadas de red:
+
+```bash
+nonce=<32-hex-nonce>
+prepared="/var/lib/self-hosted-ci/canary-assembly/${nonce}"
+
+sudo python3 /path/to/self-hosted-ci/scripts/host/assemble-jit-canary-runtime.py prepare \
+  --output-directory "${prepared}" \
+  --authorization-template /root/self-hosted-ci-canary/authorization-template.json \
+  --dispatcher-app-config /etc/self-hosted-ci/dispatcher-app.json \
+  --default-branch main \
+  --reviewer-public-key /etc/self-hosted-ci/boundary-reviewer-public-key.pem \
+  --allocation-signer-private-key /etc/self-hosted-ci/secrets/allocation-ed25519.pem \
+  --garm-health-file /etc/self-hosted-ci/garm/health-state.json \
+  --broker-config-file /etc/self-hosted-ci/garm/allocation-broker.json \
+  --live-job-verifier /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py \
+  --network-policy /usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh \
+  --bootstrap-install-receipt /var/lib/self-hosted-ci/bootstrap/bootstrap-install-receipt-v1.json \
+  --reviewer-public-key-runtime-path /etc/self-hosted-ci/boundary-reviewer-public-key.pem \
+  --allocation-signer-runtime-path /etc/self-hosted-ci/secrets/allocation-ed25519.pem \
+  --garm-health-runtime-path /etc/self-hosted-ci/garm/health-state.json \
+  --broker-config-runtime-path /etc/self-hosted-ci/garm/allocation-broker.json \
+  --live-job-verifier-runtime-path /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py \
+  --network-policy-runtime-path /usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh \
+  --bootstrap-install-receipt-runtime-path /var/lib/self-hosted-ci/bootstrap/bootstrap-install-receipt-v1.json
+```
+
+El manifest de preparación debe decir
+`prepared-awaiting-external-signature`, `github_contacted: false` y registrar el
+path, SHA-256 y byte count de `/etc/self-hosted-ci/dispatcher-app.json`.
+`runtime-config.json` debe apuntar a esa misma ruta; no existe un
+`dispatcher-runtime.json` intermedio.
+
+Firmar fuera del checkout el unsigned exacto que produjo el assembler:
+
+```bash
+sudo python3 /path/to/self-hosted-ci/scripts/host/sign-jit-canary-authorization.py \
+  --input "${prepared}/authorization-unsigned.json" \
+  --output "/var/lib/self-hosted-ci/canary-assembly/${nonce}.signed.json" \
+  --reviewer-private-key </absolute/path/outside/repo/reviewer-private-key.pem>
+```
+
+Finalmente verificar la firma externa y crear el tar y su manifest. Ambos
+outputs deben ser nuevos:
+
+```bash
+sudo python3 /path/to/self-hosted-ci/scripts/host/assemble-jit-canary-runtime.py bundle \
+  --prepared-directory "${prepared}" \
+  --signed-authorization "/var/lib/self-hosted-ci/canary-assembly/${nonce}.signed.json" \
+  --reviewer-public-key /etc/self-hosted-ci/boundary-reviewer-public-key.pem \
+  --output-tar /root/self-hosted-ci-canary-output/canary-runtime-bundle.tar \
+  --output-manifest /root/self-hosted-ci-canary-output/canary-runtime-bundle.manifest.json
+
+sudo python3 - <<'PY'
+import json, pathlib
+p=pathlib.Path('/root/self-hosted-ci-canary-output/canary-runtime-bundle.manifest.json')
+v=json.loads(p.read_text())
+print('ExpectedBundleSha256='+v['bundle']['sha256'])
+print('ExpectedBundleBytes='+str(v['bundle']['bytes']))
+print('ExpectedReviewerFingerprint='+v['reviewer_fingerprint'])
+PY
+```
+
+El bundle USTAR resultante tiene owner `0:0`, modo `0600` y exactamente:
+
+```text
+canary/authorization.json
+canary/runtime-config.json
+```
+
+`authorization.json` es el documento firmado anterior. `runtime-config.json`
+usa las rutas root-only ya instaladas de reviewer key, dispatcher App,
+live-job verifier, policy, bootstrap receipt, health de GARM, broker y clave de
+allocation; no copia ninguna clave privada dentro del tar. Calcular SHA-256,
+tamaño y nonce desde el manifest, incorporar ambos archivos a
+`C:\ProgramData\self-hosted-ci\package\artifacts\canary` mediante el updater
+pinneado, y ejecutar desde PowerShell elevada:
+
+```powershell
+& "C:\ProgramData\self-hosted-ci\package\scripts\host\run-wsl-jit-canary-matrix.ps1" `
+  -ExpectedServiceAccountSid '<SID-from-local-inventory>' `
+  -ExpectedBundleSha256 '<64-hex-sha256>' `
+  -ExpectedBundleBytes <exact-positive-bytes> `
+  -ExpectedReviewerFingerprint '<64-hex-spki-sha256>' `
+  -ExpectedCanaryNonce '<32-hex-nonce>' `
+  -Apply `
+  -AcknowledgeCanaryGitHubContact `
+  -AcknowledgeTransientRunnerRegistration `
+  -AcknowledgeDistroRestart `
+  -AcknowledgeOneTimePasswordRotation
+```
+
+El wrapper transmite el mismo bundle por stdin, sin drvfs. Para `reboot`
+acepta únicamente el checkpoint durable, termina la distro exacta, reinserta
+el mismo bundle/nonce y reanuda. El éxito exige los seis scale sets efímeros ya
+eliminados, cero runners/registrations/instancias, servicios canary detenidos y
+cuarentena activa.
+
+Los proofs quedan bajo
+`/var/lib/self-hosted-ci/canary/<nonce>/proofs/`. Ensamblarlos en el orden
+canónico; `--output` debe ser nuevo:
+
+```bash
+sudo /usr/local/lib/self-hosted-ci/build-wsl-jit-lifecycle-evidence.py \
+  --authorization /etc/self-hosted-ci/canary-authorization.json \
+  --reviewer-public-key /etc/self-hosted-ci/boundary-reviewer-public-key.pem \
+  --pinned-fingerprint <64-hex-spki-sha256> \
+  --proof /var/lib/self-hosted-ci/canary/<nonce>/proofs/success.json \
+  --proof /var/lib/self-hosted-ci/canary/<nonce>/proofs/failure.json \
+  --proof /var/lib/self-hosted-ci/canary/<nonce>/proofs/cancel.json \
+  --proof /var/lib/self-hosted-ci/canary/<nonce>/proofs/timeout.json \
+  --proof /var/lib/self-hosted-ci/canary/<nonce>/proofs/force-cancel.json \
+  --proof /var/lib/self-hosted-ci/canary/<nonce>/proofs/reboot.json \
+  --output /var/lib/self-hosted-ci/canary/<nonce>/runner-lifecycle-proof-set-v1.json
+```
+
+Incorporar esa salida exacta como `runner_lifecycle_proof_set`, regenerar,
+medir, firmar y volver a instalar el live contract final con la ceremonia de
+`stage-wsl-jit-live-contract.py`, `collect-wsl-jit-measurements.py`,
+`sign-wsl-jit-boundary.py` e `install-wsl-jit-live-contract.ps1` documentada
+arriba. Recién ese boundary final habilita la activación de producción.
+
+La activación no recibe identidad de scale set porque debe empezar y terminar
+con inventario cero; las allocations posteriores son dinámicas y pertenecen al
+broker. Revisar el plan y aplicar:
 
 ```bash
 sudo /usr/local/lib/self-hosted-ci/activate-garm-jit.sh --plan
 sudo /usr/local/lib/self-hosted-ci/activate-garm-jit.sh --apply \
-  --scale-set-id <id> --scale-set-name <exact-name> \
   --incus-project ci-jit --garm-cli-home /run/self-hosted-ci/garm-cli \
   --acknowledge-external-github-mutation \
   --acknowledge-local-ci-activation
@@ -460,9 +615,10 @@ registrar cleanup durable y cero runners, tokens o containers huérfanos.
 
 El provisioning deja instalados GARM, el provider Incus, la frontera TLS y el
 runtime de red sin crear credenciales GitHub ni un scale set. La etapa inerte de
-configuración posterior reconcilia un scale set deshabilitado usando una entidad
-y credenciales ya cargadas en GARM; tampoco registra runners. Hasta que la
-GitHub App, el scale set, la imagen y el lifecycle real pasen el smoke live,
+configuración posterior instala la entidad y las credenciales exactas en GARM,
+pero exige cero scale sets y tampoco registra runners. Cada escenario canary y
+cada allocation de producción crea su propio scale set efímero y lo elimina al
+terminar. Hasta que la GitHub App, la imagen y el lifecycle real pasen el smoke live,
 ningún repositorio debe autorizar el backend local.
 
 ## Reintento, rollback y vuelta a GitHub-hosted
@@ -481,15 +637,14 @@ autoridad exacta de la App/runner group y conservar el workflow GitHub-hosted.
 La configuración ausente o inválida debe elegir GitHub-hosted y no una ejecución
 local histórica.
 
-La desactivación operativa debe apagar primero el scale set y probar drain antes
-de retirar GARM o la cuarentena de red:
+La desactivación operativa corta primero la admisión del outbound worker y del
+broker; después recupera, deshabilita, drena y elimina todas las allocations
+efímeras antes de retirar GARM o la policy de red. No recibe IDs manuales:
 
 ```bash
 sudo /usr/local/lib/self-hosted-ci/deactivate-garm-jit.sh --plan
 sudo /usr/local/lib/self-hosted-ci/deactivate-garm-jit.sh --apply \
-  --scale-set-id <id> --scale-set-name <exact-name> \
   --incus-project ci-jit --garm-cli-home /run/self-hosted-ci/garm-cli \
-  --drain-timeout-seconds 300 \
   --acknowledge-external-github-mutation \
   --acknowledge-local-ci-deactivation
 ```
@@ -497,7 +652,7 @@ sudo /usr/local/lib/self-hosted-ci/deactivate-garm-jit.sh --apply \
 Si el login renovable falla durante esta desactivación, el script conserva
 GARM, el sentinel y los servicios protectores, y aplica inmediatamente la
 política de cuarentena del bridge. No retira la frontera de red sin haber
-deshabilitado el scale set y probado cero runners/instancias.
+eliminado todos los scale sets efímeros y probado cero runners/instancias.
 
 ## Verificación final
 

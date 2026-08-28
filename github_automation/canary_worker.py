@@ -48,6 +48,7 @@ from .worker_authority import (
 
 
 SCENARIOS = ("success", "failure", "cancel", "timeout", "force-cancel", "reboot")
+CANARY_JOB_NAME = "local-canary"
 CANARY_UNITS = (
     "self-hosted-ci-canary-network-policy.service",
     "self-hosted-ci-canary-egress-proxy.service",
@@ -192,6 +193,7 @@ class LiveCanaryDispatchAdapter:
     ) -> None:
         expected_app_fields = {
             "schema_version",
+            "purpose",
             "app_id",
             "app_slug",
             "installation_id",
@@ -204,7 +206,11 @@ class LiveCanaryDispatchAdapter:
             "permissions",
             "private_key_file",
         }
-        if set(app_config) != expected_app_fields or app_config.get("schema_version") != 1:
+        if (
+            set(app_config) != expected_app_fields
+            or app_config.get("schema_version") != 1
+            or app_config.get("purpose") != "workflow-dispatch"
+        ):
             raise CanaryRuntimeError("canary GitHub App config fields are not exact")
         if (
             app_config["repository"] != authorization["repository"]
@@ -282,7 +288,7 @@ class LiveCanaryDispatchAdapter:
             "repository": self.authorization["repository"],
             "head_sha": self.authorization["head_sha"],
             "workflow_ref": self.authorization["workflow_ref"],
-            "job_name": "local-canary",
+            "job_name": CANARY_JOB_NAME,
             "authority_kind": entity["authority_kind"],
             "runner_group": entity["runner_group"],
             "scale_set_name": "",
@@ -394,7 +400,7 @@ class LiveCanaryDispatchAdapter:
                 job
                 for job in jobs or []
                 if isinstance(job, Mapping)
-                and job.get("name") == "local-canary"
+                and job.get("name") == CANARY_JOB_NAME
                 and runner_label in job.get("labels", [])
             ]
             if len(matches) == 1:
@@ -1133,9 +1139,7 @@ class CanaryStateStore:
             raise CanaryRuntimeError("canary proof fields are not exact")
         if value.get("conclusion") != scenario:
             raise CanaryRuntimeError("canary proof outcome crossed scenario")
-        if value.get("jobs_started") != 1 and not (
-            scenario == "reboot" and value.get("jobs_started") in {0, 1}
-        ):
+        if value.get("jobs_started") != 1:
             raise CanaryRuntimeError("canary proof did not prove one-job lifecycle")
         if value.get("cleanup_record", {}).get("allocation_removed") is not True:
             raise CanaryRuntimeError("canary cleanup proof is not exact")
