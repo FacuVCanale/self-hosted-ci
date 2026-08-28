@@ -98,15 +98,17 @@ import json, pathlib, sys
 paths=map(pathlib.Path,sys.argv[1:4]); repository=sys.argv[4]; repository_id=sys.argv[5]
 expected=(
  ("garm-runner-manager",{"metadata":"read","actions":"read","administration":"write"}),
- ("workflow-dispatch",{"metadata":"read","actions":"write"}),
+ ("workflow-dispatch",{"metadata":"read","pull_requests":"read","actions":"write"}),
  ("live-job-read",{"metadata":"read","actions":"read"}),
 )
 values=[]; required={"schema_version","purpose","app_id","app_slug","installation_id","repository","repository_id","repository_selection","permissions","private_key_file"}
 for path,(purpose,permissions) in zip(paths,expected,strict=True):
  v=json.loads(path.read_text(encoding="utf-8"))
- if set(v)!=required or v.get("schema_version")!=1 or v.get("purpose")!=purpose: raise SystemExit(purpose+" App config fields drifted")
+ role_required=required | ({"default_branch","workflow_id","workflow_path"} if purpose=="workflow-dispatch" else set())
+ if set(v)!=role_required or v.get("schema_version")!=1 or v.get("purpose")!=purpose: raise SystemExit(purpose+" App config fields drifted")
  if v.get("permissions")!=permissions: raise SystemExit(purpose+" App permissions drifted")
  if v.get("repository")!=repository or str(v.get("repository_id"))!=repository_id or v.get("repository_selection")!="selected": raise SystemExit(purpose+" App repository binding drifted")
+ if purpose=="workflow-dispatch" and (v.get("default_branch")!="main" or v.get("workflow_id")!="ci-jit-canary-child.yml" or v.get("workflow_path")!=".github/workflows/ci-jit-canary-child.yml"): raise SystemExit("workflow-dispatch App workflow binding drifted")
  if type(v.get("app_id")) is not int or v["app_id"]<1 or type(v.get("installation_id")) is not int or v["installation_id"]<1: raise SystemExit(purpose+" App IDs must be positive integers")
  key=v.get("private_key_file")
  if not isinstance(key,str) or not key.startswith("/etc/self-hosted-ci/secrets/"): raise SystemExit(purpose+" App key path is outside the protected secrets tree")

@@ -42,10 +42,10 @@ jobs:
           reviewer-fingerprint: ${{ vars.JIT_CANARY_REVIEWER_FINGERPRINT }}
 
   local-canary:
-    name: local-jit-canary-${{ needs.validate-package.outputs.scenario }}
+    name: local-canary
     needs: validate-package
     runs-on: ${{ needs.validate-package.outputs.runner_label }}
-    timeout-minutes: 15
+    timeout-minutes: 3
     concurrency:
       group: jit-canary-${{ needs.validate-package.outputs.repository }}-${{ needs.validate-package.outputs.pr_number }}
       cancel-in-progress: false
@@ -83,9 +83,9 @@ jobs:
           case "$CANARY_SCENARIO" in
             success) exit 0 ;;
             failure) exit 1 ;;
-            cancel) exec sleep 900 ;;
-            timeout) exec sleep 1200 ;;
-            force-cancel) trap '' TERM; exec sleep 1200 ;;
+            cancel) exec sleep 240 ;;
+            timeout) exec sleep 240 ;;
+            force-cancel) trap '' TERM; exec sleep 240 ;;
             reboot) printf '%s\n' reboot-checkpoint-created ;;
             *) exit 64 ;;
           esac

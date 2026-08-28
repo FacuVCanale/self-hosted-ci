@@ -11,6 +11,7 @@ ACTIVATE = ROOT / "scripts/host/activate-garm-jit.sh"
 DEACTIVATE = ROOT / "scripts/host/deactivate-garm-jit.sh"
 LIBRARY = ROOT / "scripts/host/garm-jit-transaction-lib.sh"
 SERVICE = ROOT / "packaging/systemd/self-hosted-ci-garm.service"
+RUNBOOK = ROOT / "docs/runbook-bootstrap-local-ci.md"
 
 
 class GarmActivationTransactionTests(unittest.TestCase):
@@ -168,6 +169,22 @@ class GarmActivationTransactionTests(unittest.TestCase):
                 ["bash", "-n", str(script)], text=True, capture_output=True
             )
             self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_runbook_matches_dynamic_scale_set_lifecycle(self) -> None:
+        source = RUNBOOK.read_text(encoding="utf-8")
+        self.assertNotIn("--scale-set-id", source)
+        self.assertNotIn("--scale-set-name", source)
+        self.assertNotIn("--drain-timeout-seconds", source)
+        self.assertNotIn("reconcilia un scale set deshabilitado", source)
+        self.assertIn("zero_scale_sets: true", source)
+        self.assertIn("scale set efímero por escenario", source)
+        self.assertIn("build-wsl-jit-lifecycle-evidence.py", source)
+        for scenario in ("success", "failure", "cancel", "timeout", "force-cancel", "reboot"):
+            self.assertIn(f"proofs/{scenario}.json", source)
+        activation = source.split("La activación no recibe identidad de scale set", 1)[1]
+        activation = activation.split("## Sandbox y GitHub App", 1)[0]
+        self.assertIn("activate-garm-jit.sh --apply", activation)
+        self.assertNotIn("--scale-set", activation)
 
 
 if __name__ == "__main__":

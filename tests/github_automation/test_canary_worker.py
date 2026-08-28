@@ -71,9 +71,9 @@ def proof_record(scenario):
         "github_app_config_digest": "3" * 64,
         "allocation_signer_fingerprint": "4" * 64,
         "reserved_at": "2026-08-28T12:00:00Z",
-        "started_at": None if scenario == "reboot" else "2026-08-28T12:00:01Z",
+        "started_at": "2026-08-28T12:00:01Z",
         "finished_at": "2026-08-28T12:00:02Z",
-        "jobs_started": 0 if scenario == "reboot" else 1,
+        "jobs_started": 1,
         "conclusion": scenario,
         "normal_cancel_receipt": None,
         "force_cancel_receipt": None,
@@ -324,6 +324,15 @@ class CanaryStateStoreTests(unittest.TestCase):
             base["cleanup_record"]["allocation_removed"] = False
             with self.assertRaisesRegex(CanaryRuntimeError, "cleanup"):
                 store.proof("success", base)
+
+    def test_reboot_proof_requires_exactly_one_started_job(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CanaryStateStore(Path(directory), "a" * 32)
+            store.initialize("b" * 64, "boot-one")
+            proof = proof_record("reboot")
+            proof["jobs_started"] = 0
+            with self.assertRaisesRegex(CanaryRuntimeError, "one-job lifecycle"):
+                store.proof("reboot", proof)
 
 
 class BrokerCanaryDriverTests(unittest.TestCase):
