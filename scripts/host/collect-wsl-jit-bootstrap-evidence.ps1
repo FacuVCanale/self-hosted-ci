@@ -371,7 +371,7 @@ raise SystemExit(1 if remaining else 0)
 `$ErrorActionPreference = 'Stop'
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '$ExpectedServiceAccountSid') { throw 'worker service SID mismatch' }
 function Remove-WslCollectorStage {
-    `$cleanup = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', 'import base64,sys;exec(base64.b64decode(sys.argv[1]))', '$cleanupProgramB64', '$collectorLinuxRoot', '$collectorLinuxPath')
+    `$cleanup = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', 'import base64,sys;exec(base64.b64decode(sys.argv.pop(1)))', '$cleanupProgramB64', '$collectorLinuxRoot', '$collectorLinuxPath')
     if (`$cleanup.ExitCode -ne 0) { throw "WSL collector staging cleanup failed (exit=`$(`$cleanup.ExitCode)): `$(`$cleanup.Output)" }
 }
 function Stage-WslCollector {
@@ -448,11 +448,11 @@ function Stop-WslCollectionUnit {
         } while ((Get-Date) -lt `$unitDeadline)
         if (-not (Test-WslCollectionUnitNotFound `$unitShow)) { throw "WSL collection unit remains loaded after termination (LoadState=`$(`$unitShow.Output))" }
     }
-    `$cgroup = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', 'import base64,sys;exec(base64.b64decode(sys.argv[1]))', '$cgroupProgramB64', `$controlGroup)
+    `$cgroup = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', 'import base64,sys;exec(base64.b64decode(sys.argv.pop(1)))', '$cgroupProgramB64', `$controlGroup)
     if (`$cgroup.ExitCode -ne 0) { throw "WSL collection unit cgroup still contains processes or is unobservable (exit=`$(`$cgroup.ExitCode)): `$(`$cgroup.Output)" }
 }
 function Assert-WslCollectorStageAbsent {
-    `$verify = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', 'import base64,sys;exec(base64.b64decode(sys.argv[1]))', '$verifyProgramB64', '$collectorLinuxRoot', '$collectorLinuxPath')
+    `$verify = Invoke-WslCleanupCommand '/usr/bin/python3' @('-c', 'import base64,sys;exec(base64.b64decode(sys.argv.pop(1)))', '$verifyProgramB64', '$collectorLinuxRoot', '$collectorLinuxPath')
     if (`$verify.ExitCode -ne 0) { throw "WSL collector staging absence could not be verified (exit=`$(`$verify.ExitCode)): `$(`$verify.Output)" }
 }
 function Merge-CollectionFailure([string]`$Existing, [string]`$Additional) {
