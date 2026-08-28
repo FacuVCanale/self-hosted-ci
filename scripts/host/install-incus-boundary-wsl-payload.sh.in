@@ -271,7 +271,10 @@ else
   done
   incus network set "${bridge}" "${isolated_network_config[@]}"
 fi
-[[ "$(incus network list --format json | json_names | sort)" == "${bridge}" ]] || { printf 'unexpected Incus network inventory\n' >&2; exit 1; }
+# Other global networks are outside the ci-jit project boundary and are not
+# mutated or deleted. The restricted project below can access only this exact
+# bridge, whose full configuration is verified fail-closed after reconciliation.
+incus network list --format json | json_has_name "${bridge}" || { printf 'isolated Incus network is absent after reconciliation\n' >&2; exit 1; }
 
 current_phase='incus-restricted-project'
 if ! incus project list --format json | json_has_name "${project}"; then
