@@ -454,13 +454,14 @@ class Collector:
                 "ipv4.dhcp",
                 "ipv4.dhcp.ranges",
                 "ipv4.dhcp.gateway",
+                "ipv4.routing",
                 "ipv4.nat",
                 "ipv4.firewall",
                 "ipv6.address",
+                "ipv6.routing",
                 "ipv6.nat",
                 "ipv6.firewall",
                 "dns.mode",
-                "bridge.external_interfaces",
             },
         }[name]
         config = payload.get("config")
@@ -469,6 +470,19 @@ class Collector:
             if isinstance(config, dict)
             else {}
         )
+        if name == "bridge" and isinstance(config, dict):
+            for forbidden_key in (
+                "bridge.external_interfaces",
+                "raw.dnsmasq",
+                "ipv4.nat.address",
+                "ipv4.routes",
+                "ipv4.ovn.ranges",
+                "ipv6.nat.address",
+                "ipv6.routes",
+                "ipv6.ovn.ranges",
+            ):
+                if config.get(forbidden_key) not in (None, ""):
+                    safe_config[f"{forbidden_key}.present"] = True
         result: dict[str, object] = {
             "present": True,
             "config": safe_config,

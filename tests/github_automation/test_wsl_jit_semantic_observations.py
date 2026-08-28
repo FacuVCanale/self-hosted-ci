@@ -109,7 +109,11 @@ class SemanticObservationCollectorTests(unittest.TestCase):
             },
             "/1.0/networks/ci-jit-isolated": {
                 "type": "bridge",
-                "config": {"ipv4.nat": "false"},
+                "config": {
+                    "ipv4.nat": "false",
+                    "raw.dnsmasq": "server=/private.example/10.0.0.9",
+                    "ipv4.routes": "10.0.0.0/8",
+                },
             },
         }
         collector = module.Collector(environ={})
@@ -124,6 +128,14 @@ class SemanticObservationCollectorTests(unittest.TestCase):
         serialized = json.dumps(result)
         self.assertNotIn("secret", serialized)
         self.assertNotIn("ephemeral-one", serialized)
+        self.assertNotIn("private.example", serialized)
+        self.assertNotIn("10.0.0.0/8", serialized)
+        self.assertIs(
+            result["bridge"]["config"]["raw.dnsmasq.present"], True
+        )
+        self.assertIs(
+            result["bridge"]["config"]["ipv4.routes.present"], True
+        )
         self.assertEqual(result["instances"]["count"], 1)
 
     def test_garm_empty_process_inventory_is_not_an_error(self):
