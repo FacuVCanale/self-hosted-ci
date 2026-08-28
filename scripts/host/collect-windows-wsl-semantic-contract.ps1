@@ -102,6 +102,20 @@ function Test-ExactBasePathAcl([object]$AclObservation, [string]$ServiceSid) {
     return $true
 }
 
+function Get-UserHiveRegistryOwnerSid([string]$Sid, [string]$RelativePath) {
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::Users, [Microsoft.Win32.RegistryView]::Default)
+    $key = $null
+    try {
+        $key = $base.OpenSubKey("$Sid\$RelativePath", [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree, [Security.AccessControl.RegistryRights]::ReadPermissions)
+        if ($null -eq $key) { throw "service registry key is absent" }
+        return $key.GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier]).Value
+    }
+    finally {
+        if ($null -ne $key) { $key.Dispose() }
+        $base.Dispose()
+    }
+}
+
 if ($env:OS -ne "Windows_NT" -or -not (Test-IsAdministrator)) { throw "collector requires an elevated Windows console" }
 if ($ServiceAccount -ne "selfhosted-ci-svc" -or $DistroName -ne "Ubuntu-24.04-CI") { throw "service account and distro names are pinned" }
 if ($ExpectedServiceAccountSid -notmatch '^S-1-[0-9]+(?:-[0-9]+)+$') { throw "invalid service SID" }
@@ -143,13 +157,12 @@ try {
     $matches = @(Get-ChildItem -LiteralPath $registryRoot -ErrorAction Stop | ForEach-Object {
         $value = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction Stop
         if ([string]$value.DistributionName -ceq $DistroName) {
-            $keyAcl = Get-Acl -LiteralPath $_.PSPath -ErrorAction Stop
             [ordered]@{
                 key = $_.PSChildName
                 distribution_name = [string]$value.DistributionName
                 version = [int]$value.Version
                 base_path = [string]$value.BasePath
-                owner_sid = $keyAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+                owner_sid = Get-UserHiveRegistryOwnerSid $ExpectedServiceAccountSid ("Software\Microsoft\Windows\CurrentVersion\Lxss\" + $_.PSChildName)
             }
         }
     })

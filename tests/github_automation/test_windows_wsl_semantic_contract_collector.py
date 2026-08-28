@@ -58,6 +58,8 @@ class WindowsWslSemanticContractCollectorTests(unittest.TestCase):
             "registration_base_path",
             "registration_owner",
             "owner must be the service SID",
+            "Get-UserHiveRegistryOwnerSid",
+            "RegistryKeyPermissionCheck]::ReadSubTree",
         ):
             self.assertIn(token, self.source)
         self.assertNotIn("HKEY_CURRENT_USER", self.source)
