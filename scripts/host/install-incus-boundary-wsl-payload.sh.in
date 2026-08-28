@@ -419,7 +419,7 @@ for device in devices.values():
     if device.get("type") in {"proxy", "unix-char", "unix-block"}:
         raise SystemExit("forbidden host-facing device type")
 PY
-current_phase='incus-negative-policy-canaries'
+current_phase='incus-storage-quota-canary'
 for required_flag in --empty --no-profiles --device; do
   incus init --help | grep -Fq -- "${required_flag}" || { printf 'Incus init lacks required flag: %s\n' "${required_flag}" >&2; exit 1; }
 done
@@ -454,15 +454,24 @@ quota_volume_source_path="${storage_pool_path}/custom/${project}_${canary_quota}
 [[ -d "${quota_volume_path}" && ! -L "${quota_volume_path}" ]] || { printf 'quota canary volume path is not an exact directory\n' >&2; exit 1; }
 [[ -d "${quota_volume_source_path}" && ! -L "${quota_volume_source_path}" ]] || { printf 'quota canary source path is not an exact directory\n' >&2; exit 1; }
 [[ "$(stat -c %d:%i -- "${quota_volume_path}")" == "$(stat -c %d:%i -- "${quota_volume_source_path}")" ]] || { printf 'quota canary escaped the dedicated pool\n' >&2; exit 1; }
-QUOTA_VOLUME_PATH="${quota_volume_path}" python3 - <<'PY'
+STORAGE_POOL_PATH="${storage_pool_path}" QUOTA_VOLUME_PATH="${quota_volume_path}" python3 - <<'PY'
 import errno
 import os
 
 mib = 1024 * 1024
 path = os.environ["QUOTA_VOLUME_PATH"]
-vfs = os.statvfs(path)
-if vfs.f_bavail * vfs.f_frsize < 64 * mib:
-    raise SystemExit("insufficient free pool space for an unambiguous quota canary")
+pool_path = os.environ["STORAGE_POOL_PATH"]
+pool_vfs = os.statvfs(pool_path)
+if pool_vfs.f_bavail * pool_vfs.f_frsize < 64 * mib:
+    raise SystemExit("insufficient backing-pool space for an unambiguous quota canary")
+
+quota_vfs = os.statvfs(path)
+# statvfs() is evaluated inside the quota-controlled custom volume. On the
+# dir driver it therefore reports the volume's 8 MiB quota, not the free space
+# of the 16 GiB backing filesystem. Require only enough room for the successful
+# side of the canary; the subsequent 2 MiB write proves the quota boundary.
+if quota_vfs.f_bavail * quota_vfs.f_frsize < 7 * mib:
+    raise SystemExit("insufficient quota headroom for the under-limit canary")
 
 def write_exact(target, byte_count):
     fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -514,6 +523,8 @@ expect_policy_rejection() {
     return 1
   }
 }
+
+current_phase='incus-negative-policy-canaries'
 
 expect_policy_rejection privileged 'privileg|security[.]privileged' \
   incus init --empty "${canary_privileged}" --project "${project}" --no-profiles \
