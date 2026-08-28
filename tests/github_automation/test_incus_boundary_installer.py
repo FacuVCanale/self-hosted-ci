@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import unittest
@@ -215,7 +216,9 @@ class IncusBoundaryInstallerTests(unittest.TestCase):
             'incus storage volume create "${pool}" "${canary_quota}" size=8MiB',
             'incus storage volume get "${pool}" "${canary_quota}" size',
             "== '8MiB'",
-            "vfs.f_bavail * vfs.f_frsize < 64 * mib",
+            "pool_vfs.f_bavail * pool_vfs.f_frsize < 64 * mib",
+            "quota_vfs.f_bavail * quota_vfs.f_frsize < 7 * mib",
+            "reports the volume's 8 MiB quota",
             "write_exact(under, 7 * mib)",
             "write_exact(over, 2 * mib)",
             "exc.errno != errno.EDQUOT",
@@ -224,6 +227,34 @@ class IncusBoundaryInstallerTests(unittest.TestCase):
         ):
             self.assertIn(token, source)
         self.assertNotIn("no space left on device", source.lower())
+        self.assertLess(
+            source.index("current_phase='incus-storage-quota-canary'"),
+            source.index('incus storage volume create "${pool}" "${canary_quota}"'),
+        )
+        self.assertLess(
+            source.rindex('incus storage volume delete "${pool}" "${canary_quota}"'),
+            source.index("current_phase='incus-negative-policy-canaries'"),
+        )
+
+    def test_quota_canary_sizes_form_a_reachable_boundary(self) -> None:
+        source = PAYLOAD.read_text(encoding="utf-8")
+        quota = int(
+            re.search(r"size=(\d+)MiB", source, re.MULTILINE).group(1)  # type: ignore[union-attr]
+        )
+        headroom = int(
+            re.search(r"quota_vfs\.f_bavail \* quota_vfs\.f_frsize < (\d+) \* mib", source).group(1)  # type: ignore[union-attr]
+        )
+        under = int(
+            re.search(r"write_exact\(under, (\d+) \* mib\)", source).group(1)  # type: ignore[union-attr]
+        )
+        crossing = int(
+            re.search(r"write_exact\(over, (\d+) \* mib\)", source).group(1)  # type: ignore[union-attr]
+        )
+
+        self.assertGreater(under, 0)
+        self.assertGreaterEqual(headroom, under)
+        self.assertLess(under, quota)
+        self.assertGreater(under + crossing, quota)
 
     def test_incident_regression_uses_the_safe_incus_6_0_gateway_contract(
         self,
