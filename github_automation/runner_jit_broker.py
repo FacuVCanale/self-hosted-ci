@@ -342,6 +342,13 @@ class AllocationBroker:
         return {"allocation_id": allocation_id, "state": "absent"}
 
     def _delete_exact(self, scale_set_id: str, scale_set_name: str) -> None:
+        # A prior cleanup may have removed the scale set before the durable
+        # ledger recorded completion.  Measure by the authorization-bound name
+        # first so recovery is idempotent without ever acting on a stale ID
+        # that GARM may later reuse for a different scale set.
+        if self.driver.find_scale_set(scale_set_name) is None:
+            self.driver.assert_scale_set_absent(scale_set_name)
+            return
         self.driver.disable_scale_set(scale_set_id, scale_set_name)
         self.driver.drain_scale_set(scale_set_id, scale_set_name)
         self.driver.delete_scale_set(scale_set_id, scale_set_name)

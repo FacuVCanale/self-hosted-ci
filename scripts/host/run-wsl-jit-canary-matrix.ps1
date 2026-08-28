@@ -145,7 +145,25 @@ with tarfile.open(source, "r:") as archive:
         raise SystemExit("canary bundle layout is invalid")
     archive.extractall(target, numeric_owner=True, filter="data")
 PY
+[[ -d /etc/self-hosted-ci && ! -L /etc/self-hosted-ci ]] || { echo 'GARM configuration root is absent or unsafe' >&2; exit 2; }
+[[ -d /etc/self-hosted-ci/garm && ! -L /etc/self-hosted-ci/garm ]] || { echo 'GARM configuration directory is absent or unsafe' >&2; exit 2; }
 install -d -o root -g garm-manager -m 0751 /etc/self-hosted-ci
+install -d -o root -g garm-manager -m 0750 /etc/self-hosted-ci/garm
+[[ "$(stat -c '%U:%G:%a' /etc/self-hosted-ci)" == root:garm-manager:751 ]] || { echo 'GARM configuration root metadata drifted' >&2; exit 2; }
+[[ "$(stat -c '%U:%G:%a' /etc/self-hosted-ci/garm)" == root:garm-manager:750 ]] || { echo 'GARM configuration directory metadata drifted' >&2; exit 2; }
+[[ -f /etc/self-hosted-ci/garm/config.toml && ! -L /etc/self-hosted-ci/garm/config.toml ]] || { echo 'GARM configuration is absent or unsafe' >&2; exit 2; }
+[[ "$(stat -c '%U:%G:%a' /etc/self-hosted-ci/garm/config.toml)" == root:garm-manager:640 ]] || { echo 'GARM configuration metadata drifted' >&2; exit 2; }
+runuser -u garm-manager -- test -r /etc/self-hosted-ci/garm/config.toml || { echo 'GARM configuration is unreadable by garm-manager' >&2; exit 2; }
+[[ -d /var/lib/self-hosted-ci && ! -L /var/lib/self-hosted-ci ]] || { echo 'GARM state root is absent or unsafe' >&2; exit 2; }
+[[ -d /var/lib/self-hosted-ci/garm && ! -L /var/lib/self-hosted-ci/garm ]] || { echo 'GARM runtime directory is absent or unsafe' >&2; exit 2; }
+install -d -o root -g garm-manager -m 0710 /var/lib/self-hosted-ci
+install -d -o garm-manager -g garm-manager -m 0700 /var/lib/self-hosted-ci/garm
+[[ "$(stat -c '%U:%G:%a' /var/lib/self-hosted-ci)" == root:garm-manager:710 ]] || { echo 'GARM state root metadata drifted' >&2; exit 2; }
+[[ "$(stat -c '%U:%G:%a' /var/lib/self-hosted-ci/garm)" == garm-manager:garm-manager:700 ]] || { echo 'GARM runtime directory metadata drifted' >&2; exit 2; }
+runuser -u garm-manager -- test -x /var/lib/self-hosted-ci || { echo 'GARM state root is not traversable by garm-manager' >&2; exit 2; }
+runuser -u garm-manager -- test -r /var/lib/self-hosted-ci/garm || { echo 'GARM runtime directory is unreadable by garm-manager' >&2; exit 2; }
+runuser -u garm-manager -- test -w /var/lib/self-hosted-ci/garm || { echo 'GARM runtime directory is not writable by garm-manager' >&2; exit 2; }
+runuser -u garm-manager -- test -x /var/lib/self-hosted-ci/garm || { echo 'GARM runtime directory is not traversable by garm-manager' >&2; exit 2; }
 install -o root -g root -m 0600 "$work/canary/authorization.json" /etc/self-hosted-ci/canary-authorization.json
 install -o root -g root -m 0600 "$work/canary/runtime-config.json" /etc/self-hosted-ci/canary-runtime.json
 /usr/local/lib/self-hosted-ci/verify-jit-canary-authorization.py \
