@@ -95,6 +95,20 @@ class FakeLiveJobVerifier:
         self.calls.append((payload["job_id"], context.run_id))
 
 
+class DelayedCleanupGarm(FakeGarm):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cleanup_measurements = 0
+
+    def measure_cleanup(self, allocation_id, name):
+        self.cleanup_measurements += 1
+        if self.cleanup_measurements == 1:
+            from github_automation.runner_jit import RunnerJitError
+
+            raise RunnerJitError("allocation Incus instance survived cleanup")
+        return super().measure_cleanup(allocation_id, name)
+
+
 class AllocationBrokerTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -458,6 +472,26 @@ class AllocationBrokerTests(unittest.TestCase):
             "cleaned", self.ledger.get(self.payload["allocation_id"]).state
         )
         self.assertNotIn(self.payload["scale_set_name"], self.driver.scales)
+
+    def test_finish_waits_for_instance_teardown_before_marking_cleanup(self):
+        driver = DelayedCleanupGarm()
+        broker = AllocationBroker(
+            self.ledger,
+            driver,
+            self.private.public_key(),
+            spki_fingerprint(self.private.public_key()),
+            self.live,
+        )
+        broker.reserve(self.reservation, now=NOW)
+        broker.finalize(self.envelope, now=NOW)
+        context = self.context(runner_name=driver.runner_name)
+        broker.job_started(self.payload["allocation_id"], context, now=NOW)
+        with mock.patch("github_automation.runner_jit_broker.time.sleep"):
+            broker.finish(self.payload["allocation_id"], outcome="success")
+        self.assertEqual(2, driver.cleanup_measurements)
+        self.assertEqual(
+            "cleaned", self.ledger.get(self.payload["allocation_id"]).state
+        )
 
     def test_cleanup_proof_is_exact_cross_label_safe_and_concurrent(self):
         self.broker.reserve(self.reservation, now=NOW)

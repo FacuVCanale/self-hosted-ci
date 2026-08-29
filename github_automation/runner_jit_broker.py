@@ -250,6 +250,7 @@ class AllocationBroker:
         )
         scale_set_name, scale_set_id = self.ledger.scale_set_binding(allocation_id)
         self._delete_exact(scale_set_id, scale_set_name)
+        self._wait_for_cleanup(allocation_id, scale_set_name)
         self.ledger.transition(allocation_id, "cleanup")
         return {
             "allocation_id": allocation_id,
@@ -353,6 +354,24 @@ class AllocationBroker:
         self.driver.drain_scale_set(scale_set_id, scale_set_name)
         self.driver.delete_scale_set(scale_set_id, scale_set_name)
         self.driver.assert_scale_set_absent(scale_set_name)
+
+    def _wait_for_cleanup(self, allocation_id: str, scale_set_name: str) -> None:
+        """Wait for the provider's eventually consistent instance teardown.
+
+        GARM can remove a scale set before Incus has finished deleting its
+        runner.  Keep the ledger recoverable until every allocation-scoped
+        cleanup surface is measured absent.
+        """
+
+        deadline = time.monotonic() + 180
+        while True:
+            try:
+                self.driver.measure_cleanup(allocation_id, scale_set_name)
+                return
+            except RunnerJitError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(2)
 
 
 def utc_now() -> datetime:
