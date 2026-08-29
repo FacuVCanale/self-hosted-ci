@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import unittest
+from unittest import mock
 import urllib.request
 
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -148,11 +149,11 @@ class GitHubLiveJobVerifierTests(unittest.TestCase):
         )
         self.assertTrue(token_call[2]["Authorization"].startswith("Bearer eyJ"))
         self.assertEqual(
-            "https://api.github.com/repos/FacuVCanale/self-hosted-ci-sandbox/actions/jobs/8002",
+            "https://api.github.com/repos/FacuVCanale/self-hosted-ci-sandbox/actions/runs/8001",
             opener.calls[1][1],
         )
         self.assertEqual(
-            "https://api.github.com/repos/FacuVCanale/self-hosted-ci-sandbox/actions/runs/8001",
+            "https://api.github.com/repos/FacuVCanale/self-hosted-ci-sandbox/actions/jobs/8002",
             opener.calls[2][1],
         )
 
@@ -185,6 +186,20 @@ class GitHubLiveJobVerifierTests(unittest.TestCase):
             mutate_job=lambda response: response.update(runner_group_name="Restricted")
         )
         self.assertTrue(self.verify(opener, value)["verified"])
+
+    def test_eventually_consistent_job_view_is_retried_boundedly(self) -> None:
+        calls = 0
+
+        def converge(response):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                response["status"] = "queued"
+
+        with mock.patch.object(VERIFIER.time, "sleep") as sleep:
+            self.assertTrue(self.verify(FakeOpener(mutate_job=converge))["verified"])
+        self.assertEqual(2, calls)
+        sleep.assert_called_once_with(0.5)
         run_drifts = {
             "run": lambda value: value.update(id=999),
             "attempt": lambda value: value.update(run_attempt=3),

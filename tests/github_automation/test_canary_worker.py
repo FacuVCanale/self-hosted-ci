@@ -4,6 +4,7 @@ import json
 import importlib.util
 import tempfile
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -339,6 +340,30 @@ class CanaryStateStoreTests(unittest.TestCase):
 
 
 class BrokerCanaryDriverTests(unittest.TestCase):
+    def test_runtime_empty_waits_for_github_registration_removal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private = ed25519.Ed25519PrivateKey.generate()
+            garm = CanaryFakeGarm()
+            broker = AllocationBroker(
+                SqliteAllocationLedger(Path(directory) / "ledger.sqlite3"),
+                garm,
+                private.public_key(),
+                spki_fingerprint(private.public_key()),
+                FakeLiveJobVerifier(),
+            )
+            dispatch = Dispatch(private, garm)
+            inventories = iter(
+                (
+                    {"remaining": 1, "inventory_digest": "1" * 64},
+                    {"remaining": 0, "inventory_digest": "0" * 64},
+                )
+            )
+            dispatch.transient_github_inventory = lambda: next(inventories)
+            driver = BrokerCanaryScenarioDriver(broker, dispatch, AUTH)
+            with mock.patch("github_automation.canary_worker.time.sleep") as sleep:
+                self.assertEqual(0, driver.prove_runtime_empty()["registrations"])
+            sleep.assert_called_once_with(2)
+
     def test_driver_uses_real_broker_lifecycle_and_proves_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             private = ed25519.Ed25519PrivateKey.generate()

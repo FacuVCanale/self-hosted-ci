@@ -297,14 +297,11 @@ def verify_live_job(
         raise VerificationError("installation token lifetime is invalid")
 
     repository = request["repository"]
-    job = api.json(
-        "GET", f"/repos/{repository}/actions/jobs/{request['workflow_job_id']}", token
-    )
     run = api.json(
         "GET", f"/repos/{repository}/actions/runs/{request['run_id']}", token
     )
-    if not isinstance(job, dict) or not isinstance(run, dict):
-        raise VerificationError("GitHub live job/run response is invalid")
+    if not isinstance(run, dict):
+        raise VerificationError("GitHub live workflow run response is invalid")
     expected_job = {
         "id": int(request["workflow_job_id"]),
         "run_id": int(request["run_id"]),
@@ -315,8 +312,19 @@ def verify_live_job(
         "runner_group_name": request["runner_group"] or "Default",
         "status": request["required_status"],
     }
-    if any(job.get(field) != expected for field, expected in expected_job.items()):
-        raise VerificationError("GitHub workflow job identity mismatch")
+    for attempt in range(5):
+        job = api.json(
+            "GET",
+            f"/repos/{repository}/actions/jobs/{request['workflow_job_id']}",
+            token,
+        )
+        if not isinstance(job, dict):
+            raise VerificationError("GitHub live workflow job response is invalid")
+        if all(job.get(field) == expected for field, expected in expected_job.items()):
+            break
+        if attempt == 4:
+            raise VerificationError("GitHub workflow job identity mismatch")
+        time.sleep(0.5)
     expected_run = {
         "id": int(request["run_id"]),
         "run_attempt": request["run_attempt"],
@@ -360,9 +368,10 @@ def main() -> int:
         )
         sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0
-    except (OSError, VerificationError):
+    except (OSError, VerificationError) as exc:
         # Do not echo exception data: HTTP and crypto errors may contain secrets.
-        print("GitHub live workflow-job verification blocked", file=sys.stderr)
+        reason = str(exc) if isinstance(exc, VerificationError) else "operating system error"
+        print(f"GitHub live workflow-job verification blocked: {reason}", file=sys.stderr)
         return 1
 
 

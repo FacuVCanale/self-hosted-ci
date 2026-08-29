@@ -947,9 +947,16 @@ class BrokerCanaryScenarioDriver:
     def prove_runtime_empty(self) -> Mapping[str, Any]:
         self.broker.driver.assert_no_persistent_scale_set()
         self.broker.driver.assert_runtime_empty()
-        github = self.dispatch.transient_github_inventory()
-        if github.get("remaining") != 0:
-            raise CanaryRuntimeError("GitHub transient runner inventory is not empty")
+        deadline = time.monotonic() + 60
+        while True:
+            github = self.dispatch.transient_github_inventory()
+            if github.get("remaining") == 0:
+                break
+            if time.monotonic() >= deadline:
+                raise CanaryRuntimeError(
+                    "GitHub transient runner inventory is not empty"
+                )
+            time.sleep(2)
         return {
             "scale_sets": 0,
             "instances": 0,
