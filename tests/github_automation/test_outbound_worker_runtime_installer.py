@@ -64,6 +64,7 @@ class OutboundWorkerRuntimeInstallerTests(unittest.TestCase):
                 "metadata": "read",
                 "pull_requests": "read",
                 "actions": "write",
+                "administration": "read",
             },
             "github_app_private_key_file": "/etc/self-hosted-ci/secrets/github-app.pem",
             "authority_helper_file": "/usr/local/libexec/self-hosted-ci/authority-v1-approval-helper",

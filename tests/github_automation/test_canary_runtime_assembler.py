@@ -76,6 +76,7 @@ class CanaryRuntimeAssemblerTests(unittest.TestCase):
                     "metadata": "read",
                     "pull_requests": "read",
                     "actions": "write",
+                    "administration": "read",
                 },
                 "private_key_file": "/etc/self-hosted-ci/secrets/dispatcher.pem",
             },
@@ -193,7 +194,12 @@ class CanaryRuntimeAssemblerTests(unittest.TestCase):
             unsigned["github_app_config_digest"],
         )
         self.assertEqual(
-            {"metadata": "read", "pull_requests": "read", "actions": "write"},
+            {
+                "metadata": "read",
+                "pull_requests": "read",
+                "actions": "write",
+                "administration": "read",
+            },
             dispatcher["permissions"],
         )
         self.assertEqual(

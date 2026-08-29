@@ -19,7 +19,12 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 API_ROOT = "https://api.github.com"
 API_VERSION = "2026-03-10"
-WORKER_PERMISSIONS = {"metadata": "read", "pull_requests": "read", "actions": "write"}
+WORKER_PERMISSIONS = {
+    "metadata": "read",
+    "pull_requests": "read",
+    "actions": "write",
+    "administration": "read",
+}
 MAX_TOKEN_TTL = timedelta(hours=1)
 MAX_SERVER_CLOCK_SKEW = timedelta(seconds=60)
 TOKEN_SAFETY_MARGIN = timedelta(seconds=30)
