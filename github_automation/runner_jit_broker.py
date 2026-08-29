@@ -363,7 +363,7 @@ class AllocationBroker:
         cleanup surface is measured absent.
         """
 
-        deadline = time.monotonic() + 180
+        deadline = time.monotonic() + GARM_CLEANUP_CONVERGENCE_SECONDS
         while True:
             try:
                 self.driver.measure_cleanup(allocation_id, scale_set_name)
@@ -376,6 +376,9 @@ class AllocationBroker:
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+GARM_CLEANUP_CONVERGENCE_SECONDS = 600
 
 
 class GarmCliAllocationDriver:
@@ -394,7 +397,11 @@ class GarmCliAllocationDriver:
         self.config = config
         self.hook_source = hook_source
         self._target: Mapping[str, Any] | None = None
-        self._timeout = 180
+        # GARM observes runner deregistration, GitHub inventory removal, and
+        # provider teardown on separate reconciliation loops.  A healthy JIT
+        # job can therefore need several minutes to disappear from the GARM
+        # scale-set runner inventory even after GitHub and Incus are empty.
+        self._timeout = GARM_CLEANUP_CONVERGENCE_SECONDS
 
     def _run(self, *args: str) -> Any:
         result = subprocess.run(

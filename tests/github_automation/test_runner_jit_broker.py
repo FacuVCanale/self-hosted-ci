@@ -16,6 +16,7 @@ from github_automation.runner_jit import SqliteAllocationLedger, sign_allocation
 from github_automation.runner_jit_broker import (
     AllocationBroker,
     ExternalLiveWorkflowJobVerifier,
+    GARM_CLEANUP_CONVERGENCE_SECONDS,
     GarmCliAllocationDriver,
     JobStartedContext,
 )
@@ -110,6 +111,9 @@ class DelayedCleanupGarm(FakeGarm):
 
 
 class AllocationBrokerTests(unittest.TestCase):
+    def test_garm_cleanup_window_covers_slow_reconciliation_loops(self):
+        self.assertGreaterEqual(GARM_CLEANUP_CONVERGENCE_SECONDS, 600)
+
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.private = ed25519.Ed25519PrivateKey.generate()
