@@ -49,6 +49,7 @@ from .worker_authority import (
 
 SCENARIOS = ("success", "failure", "cancel", "timeout", "force-cancel", "reboot")
 CANARY_JOB_NAME = "local-canary"
+CANARY_JOB_TIMEOUT_SECONDS = 180
 CANARY_UNITS = (
     "self-hosted-ci-canary-network-policy.service",
     "self-hosted-ci-canary-egress-proxy.service",
@@ -503,28 +504,64 @@ class LiveCanaryDispatchAdapter:
         while True:
             run = self.client.run(self._run_id, self.client.authenticate())
             if run.get("status") == "completed":
-                conclusion = run.get("conclusion")
-                if scenario == "success" and conclusion != "success":
-                    raise CanaryRuntimeError("success canary did not succeed")
-                if scenario == "failure" and conclusion != "failure":
-                    raise CanaryRuntimeError("failure canary did not fail")
-                if scenario in {"cancel", "force-cancel"} and conclusion != "cancelled":
-                    raise CanaryRuntimeError("cancel canary conclusion drifted")
-                if scenario == "timeout" and conclusion != "timed_out":
-                    raise CanaryRuntimeError("timeout canary did not time out")
                 jobs = self.client.jobs(
                     self._run_id, self.client.authenticate()
-                ).get("jobs", [])
+                ).get("jobs")
+                if not isinstance(jobs, list):
+                    raise CanaryRuntimeError("terminal canary jobs receipt is invalid")
                 exact = [
                     job
                     for job in jobs
-                    if job.get("id") == self._observed.get("job_id")
+                    if isinstance(job, Mapping)
+                    and job.get("id") == self._observed.get("job_id")
                 ]
-                if len(exact) != 1 or exact[0].get("status") != "completed":
-                    raise CanaryRuntimeError("terminal canary job receipt is absent")
-                self._observed["finished_at"] = self._live_stamp(
-                    exact[0].get("completed_at"), "job-finished"
+                if len(exact) > 1:
+                    raise CanaryRuntimeError("terminal canary job receipt is ambiguous")
+                if not exact or exact[0].get("status") in {"queued", "in_progress"}:
+                    if self.monotonic() >= deadline:
+                        raise CanaryRuntimeError(
+                            "terminal canary job receipt did not converge"
+                        )
+                    self.sleeper(1)
+                    continue
+                job = exact[0]
+                if job.get("status") != "completed":
+                    raise CanaryRuntimeError("terminal canary job receipt is invalid")
+                expected_conclusion = {
+                    "success": "success",
+                    "failure": "failure",
+                    "cancel": "cancelled",
+                    "force-cancel": "cancelled",
+                    "timeout": "cancelled",
+                }[scenario]
+                if (
+                    run.get("conclusion") != expected_conclusion
+                    or job.get("conclusion") != expected_conclusion
+                ):
+                    raise CanaryRuntimeError(
+                        f"{scenario} canary terminal conclusion drifted"
+                    )
+                started_at = self._live_stamp(job.get("started_at"), "job-started")
+                finished_at = self._live_stamp(
+                    job.get("completed_at"), "job-finished"
                 )
+                if self._observed.get("started_at") != started_at:
+                    raise CanaryRuntimeError("terminal canary job start timestamp drifted")
+                if scenario == "timeout":
+                    if (
+                        self._normal_cancel_receipt is not None
+                        or self._force_cancel_receipt is not None
+                    ):
+                        raise CanaryRuntimeError(
+                            "timeout canary has an explicit cancellation receipt"
+                        )
+                    started = datetime.fromisoformat(started_at[:-1] + "+00:00")
+                    finished = datetime.fromisoformat(finished_at[:-1] + "+00:00")
+                    if (finished - started).total_seconds() < CANARY_JOB_TIMEOUT_SECONDS:
+                        raise CanaryRuntimeError(
+                            "timeout canary completed before its job deadline"
+                        )
+                self._observed["finished_at"] = finished_at
                 return scenario
             if self.monotonic() >= deadline:
                 raise CanaryRuntimeError("canary terminal monitor timed out")
