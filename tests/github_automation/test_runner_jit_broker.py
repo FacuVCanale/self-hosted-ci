@@ -399,6 +399,33 @@ class AllocationBrokerTests(unittest.TestCase):
         ):
             verifier.verify(self.payload, self.context())
 
+    def test_external_live_job_verifier_retries_the_complete_authority_check(self):
+        executable = Path(self.tempdir.name) / "verify-job"
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o755)
+        verifier = ExternalLiveWorkflowJobVerifier(executable)
+        attempts = 0
+
+        def run(_argv, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            request = json.loads(kwargs["input"])
+            if attempts == 1:
+                return mock.Mock(returncode=1, stdout="", stderr="blocked")
+            request.pop("required_status")
+            request.update(status="in_progress", verified=True)
+            return mock.Mock(returncode=0, stdout=json.dumps(request), stderr="")
+
+        safe = mock.Mock(st_uid=0, st_nlink=1, st_mode=0o100755)
+        with (
+            mock.patch("github_automation.runner_jit_broker.os.lstat", return_value=safe),
+            mock.patch("github_automation.runner_jit_broker.subprocess.run", side_effect=run),
+            mock.patch("github_automation.runner_jit_broker.time.sleep") as sleep,
+        ):
+            verifier.verify(self.payload, self.context())
+        self.assertEqual(2, attempts)
+        sleep.assert_called_once_with(1)
+
     def test_job_started_cross_binding_fails_before_disable_or_start(self):
         self.broker.reserve(self.reservation, now=NOW)
         self.broker.finalize(self.envelope, now=NOW)
