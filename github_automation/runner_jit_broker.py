@@ -772,7 +772,7 @@ class ExternalLiveWorkflowJobVerifier:
             input=json.dumps(request, sort_keys=True, separators=(",", ":")),
             text=True,
             capture_output=True,
-            timeout=10,
+            timeout=15,
             check=True,
         )
         try:
