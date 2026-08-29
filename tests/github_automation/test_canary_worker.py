@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import importlib.util
 import tempfile
@@ -23,7 +24,7 @@ from github_automation.canary_worker import (
     LiveCanaryDispatchAdapter,
     assert_production_fence,
 )
-from github_automation.crypto import spki_fingerprint
+from github_automation.crypto import canonicalize_jcs, spki_fingerprint
 from github_automation.runner_jit import SqliteAllocationLedger, sign_allocation
 from github_automation.runner_jit_broker import AllocationBroker, JobStartedContext
 from tests.github_automation.test_runner_jit import payload, reservation
@@ -569,14 +570,39 @@ class LiveCanaryDispatchAdapterTests(unittest.TestCase):
             adapter.github_inventory("canary-label")
         self.assertEqual([1, 2], adapter.transport.pages)
 
-    def test_transient_inventory_rejects_orphaned_canary_runner(self):
+    def test_transient_inventory_reports_orphaned_canary_runner_for_convergence(self):
         adapter = LiveCanaryDispatchAdapter.__new__(LiveCanaryDispatchAdapter)
         adapter._github_runner_inventory = lambda: (
             [{"id": 1, "name": "wsl-jit-" + "a" * 32, "labels": []}],
             "b" * 64,
         )
-        with self.assertRaisesRegex(CanaryRuntimeError, "survived cleanup"):
-            adapter.transient_github_inventory()
+        self.assertEqual(
+            {"remaining": 1, "inventory_digest": "b" * 64},
+            adapter.transient_github_inventory(),
+        )
+
+    def test_runner_inventory_retries_rejected_page_with_fresh_authority(self):
+        class Transport:
+            def __init__(self):
+                self.calls = 0
+
+            def request(self, *_args, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return HTTPResponse(503, b"")
+                return HTTPResponse(200, b'{"total_count":0,"runners":[]}')
+
+        adapter = LiveCanaryDispatchAdapter.__new__(LiveCanaryDispatchAdapter)
+        adapter.authority = SimpleNamespace(repository="x/y")
+        authentications = []
+        adapter.client = SimpleNamespace(
+            authenticate=lambda: authentications.append(object()) or SimpleNamespace(value="token")
+        )
+        adapter.transport = Transport()
+        adapter.sleeper = mock.Mock()
+        self.assertEqual(([], hashlib.sha256(canonicalize_jcs({"total_count": 0, "runners": []})).hexdigest()), adapter._github_runner_inventory())
+        self.assertEqual(2, len(authentications))
+        adapter.sleeper.assert_called_once_with(1)
 
 
 class ProductionFenceTests(unittest.TestCase):
