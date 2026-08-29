@@ -266,6 +266,9 @@ config=read_root_json(pathlib.Path("/etc/self-hosted-ci/canary-runtime.json"))
 authorization=read_root_json(pathlib.Path("/etc/self-hosted-ci/canary-authorization.json"))
 runtime=CanaryRuntime(config, authorization)
 driver=load_live_canary_driver(config, authorization)
+subprocess.run(["systemctl","stop","self-hosted-ci-canary-broker.service"],check=False)
+for unit in CANARY_UNITS[:-1]:
+    subprocess.run(["systemctl","start",unit],check=True)
 recovered=list(driver.recover_all())
 empty=driver.prove_runtime_empty()
 expected={"scale_sets":0,"instances":0,"runners":0,"registrations":0}

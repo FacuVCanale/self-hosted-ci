@@ -1498,6 +1498,33 @@ class CanaryRuntime:
         if store is not None:
             store.transition("failed-quarantined", runtime_empty=False)
 
+    def recover_before_quarantine(
+        self, store: CanaryStateStore, driver: CanaryScenarioDriver
+    ) -> None:
+        """Recover with GARM reachable, then converge to quarantine."""
+
+        self.runner.run(
+            ("systemctl", "stop", "self-hosted-ci-canary-broker.service"),
+            timeout=60,
+        )
+        for unit in CANARY_UNITS[:-1]:
+            self._run("systemctl", "start", unit, timeout=180)
+        recovered = list(driver.recover_all())
+        empty = driver.prove_runtime_empty()
+        if empty != {
+            "scale_sets": 0,
+            "instances": 0,
+            "runners": 0,
+            "registrations": 0,
+        }:
+            raise CanaryRuntimeError("failed canary runtime inventory is not empty")
+        self.quarantine_after_failure(None)
+        store.transition(
+            "failed-quarantined-clean",
+            runtime_empty=True,
+            recovered_allocations=recovered,
+        )
+
     def execute(self, driver: CanaryScenarioDriver) -> Mapping[str, Any]:
         """Run the authorized matrix and always converge to quarantine."""
 
@@ -1530,24 +1557,13 @@ class CanaryRuntime:
                 shutil.rmtree(self.secret_root, ignore_errors=True)
             raise
         except Exception:
-            self.quarantine_after_failure(store)
             if store is not None:
                 try:
-                    recovered = list(driver.recover_all())
-                    empty = driver.prove_runtime_empty()
-                    if empty == {
-                        "scale_sets": 0,
-                        "instances": 0,
-                        "runners": 0,
-                        "registrations": 0,
-                    }:
-                        store.transition(
-                            "failed-quarantined-clean",
-                            runtime_empty=True,
-                            recovered_allocations=recovered,
-                        )
+                    self.recover_before_quarantine(store, driver)
                 except Exception:
                     pass
+            else:
+                self.quarantine_after_failure(None)
             raise
 
 
