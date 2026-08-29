@@ -9,7 +9,9 @@ no live local approval.
 Install `/etc/self-hosted-ci/outbound-worker.json` from the example with mode
 `0600`, owner `root:root`. The GitHub App must be installed only on the selected
 repository with exactly `metadata:read`, `pull_requests:read`, and
-`actions:write`.
+`actions:write`, plus `administration:read`. The administration permission is
+read-only and is used solely to list the selected repository's Actions runners
+so cleanup can prove that no transient JIT runner registration remains.
 
 For `mode: ci-jit-pilot`, the following files are mandatory and must be
 root-owned `0600` regular files:

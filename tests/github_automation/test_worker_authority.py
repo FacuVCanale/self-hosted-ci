@@ -96,6 +96,8 @@ class WorkerAuthorityTests(unittest.TestCase):
         return client, client.authenticate(), transport, signer
 
     def test_exact_selected_repository_token_and_headers(self) -> None:
+        self.assertEqual("read", WORKER_PERMISSIONS["administration"])
+        self.assertNotEqual("write", WORKER_PERMISSIONS["administration"])
         client, token, transport, signer = self.authenticate()
         self.assertNotIn(token.value, repr(token))
         self.assertEqual(3, len(transport.calls))
@@ -285,6 +287,23 @@ class WorkerAuthorityTests(unittest.TestCase):
         self.assertNotIn("print(", source)
         self.assertNotIn("logging", source)
         self.assertIn('API_ROOT = "https://api.github.com"', source)
+
+    def test_policy_allows_only_read_access_to_runner_inventory(self) -> None:
+        policy = json.loads(
+            (
+                Path(__file__).parents[2]
+                / "policies/worker-app-authority-v1.yaml"
+            ).read_text()
+        )
+        self.assertEqual(WORKER_PERMISSIONS, policy["permissions"])
+        self.assertIn(
+            "GET /repos/{owner}/{repo}/actions/runners",
+            policy["allowed_endpoints"],
+        )
+        self.assertNotIn(
+            "POST /repos/{owner}/{repo}/actions/runners",
+            policy["allowed_endpoints"],
+        )
 
 
 if __name__ == "__main__":

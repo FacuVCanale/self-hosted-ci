@@ -51,7 +51,12 @@ REQUIRED_FIELDS = {
     "poll_seconds",
     "request_timeout_seconds",
 }
-EXACT_PERMISSIONS = {"metadata": "read", "pull_requests": "read", "actions": "write"}
+EXACT_PERMISSIONS = {
+    "metadata": "read",
+    "pull_requests": "read",
+    "actions": "write",
+    "administration": "read",
+}
 
 
 class InstallError(ValueError):

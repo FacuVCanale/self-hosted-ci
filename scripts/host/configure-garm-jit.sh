@@ -99,7 +99,7 @@ import json, pathlib, sys
 paths=map(pathlib.Path,sys.argv[1:4]); repository=sys.argv[4]; repository_id=sys.argv[5]
 expected=(
  ("garm-runner-manager",{"metadata":"read","actions":"read","administration":"write"}),
- ("workflow-dispatch",{"metadata":"read","pull_requests":"read","actions":"write"}),
+ ("workflow-dispatch",{"metadata":"read","pull_requests":"read","actions":"write","administration":"read"}),
  ("live-job-read",{"metadata":"read","actions":"read"}),
 )
 values=[]; required={"schema_version","purpose","app_id","app_slug","installation_id","repository","repository_id","repository_selection","permissions","private_key_file"}
