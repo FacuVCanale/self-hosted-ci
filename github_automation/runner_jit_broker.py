@@ -747,6 +747,9 @@ systemctl daemon-reexec
 class ExternalLiveWorkflowJobVerifier:
     """Fail-closed adapter to the separately authenticated GitHub authority lane."""
 
+    MAX_ATTEMPTS = 10
+    RETRY_DELAY_SECONDS = 1
+
     def __init__(self, executable: Path) -> None:
         self.executable = executable
 
@@ -774,14 +777,24 @@ class ExternalLiveWorkflowJobVerifier:
             "labels": payload["labels"],
             "required_status": "in_progress",
         }
-        result = subprocess.run(
-            [str(self.executable)],
-            input=json.dumps(request, sort_keys=True, separators=(",", ":")),
-            text=True,
-            capture_output=True,
-            timeout=15,
-            check=True,
-        )
+        result = None
+        for attempt in range(self.MAX_ATTEMPTS):
+            result = subprocess.run(
+                [str(self.executable)],
+                input=json.dumps(request, sort_keys=True, separators=(",", ":")),
+                text=True,
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+            if result.returncode == 0:
+                break
+            if attempt + 1 == self.MAX_ATTEMPTS:
+                raise RunnerJitError(
+                    "GitHub live workflow-job verification did not converge"
+                )
+            time.sleep(self.RETRY_DELAY_SECONDS)
+        assert result is not None
         try:
             observed = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
