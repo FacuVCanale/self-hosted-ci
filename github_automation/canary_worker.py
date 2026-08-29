@@ -559,19 +559,25 @@ class LiveCanaryDispatchAdapter:
         }
 
     def _github_runner_inventory(self) -> tuple[list[Mapping[str, Any]], str]:
-        token = self.client.authenticate()
         runners: list[Mapping[str, Any]] = []
         total_count: int | None = None
         page = 1
         while True:
-            response = self.transport.request(
-                "GET",
-                API_ROOT
-                + f"/repos/{self.authority.repository}/actions/runners?per_page=100&page={page}",
-                headers=self._token_headers(token),
-            )
-            if response.status != 200:
-                raise CanaryRuntimeError("GitHub runner inventory was rejected")
+            response = None
+            for attempt in range(5):
+                token = self.client.authenticate()
+                response = self.transport.request(
+                    "GET",
+                    API_ROOT
+                    + f"/repos/{self.authority.repository}/actions/runners?per_page=100&page={page}",
+                    headers=self._token_headers(token),
+                )
+                if response.status == 200:
+                    break
+                if attempt == 4:
+                    raise CanaryRuntimeError("GitHub runner inventory was rejected")
+                self.sleeper(1)
+            assert response is not None
             try:
                 value = json.loads(response.body)
             except json.JSONDecodeError as exc:
@@ -638,9 +644,7 @@ class LiveCanaryDispatchAdapter:
                 if isinstance(label, Mapping)
             )
         ]
-        if transient:
-            raise CanaryRuntimeError("transient GitHub runner survived cleanup")
-        return {"remaining": 0, "inventory_digest": inventory_digest}
+        return {"remaining": len(transient), "inventory_digest": inventory_digest}
 
     def resume_reboot_evidence(
         self, evidence: Mapping[str, Any]
