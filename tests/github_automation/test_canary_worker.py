@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from github_automation.canary_worker import (
     BrokerCanaryScenarioDriver,
+    CANARY_JOB_TIMEOUT_SECONDS,
     CANARY_UNITS,
     SCENARIOS,
     CanaryRuntimeError,
@@ -484,6 +485,216 @@ class BrokerCanaryDriverTests(unittest.TestCase):
 
 
 class LiveCanaryDispatchAdapterTests(unittest.TestCase):
+    def _terminal_adapter(self, runs, jobs, *, scenario="timeout"):
+        class Client:
+            def __init__(self):
+                self.runs = iter(runs)
+                self.jobs_values = iter(jobs)
+
+            def authenticate(self):
+                return object()
+
+            def run(self, run_id, token):
+                return next(self.runs)
+
+            def jobs(self, run_id, token):
+                return next(self.jobs_values)
+
+        clock = mock.Mock(side_effect=[0, 1, 2, 3, 4, 5])
+        adapter = LiveCanaryDispatchAdapter.__new__(LiveCanaryDispatchAdapter)
+        adapter._run_id = 11
+        adapter._scenario = scenario
+        adapter._observed = {
+            "job_id": 22,
+            "started_at": "2026-08-29T23:41:44Z",
+        }
+        adapter._normal_cancel_receipt = None
+        adapter._force_cancel_receipt = None
+        adapter.authority = SimpleNamespace(repository="x/y")
+        adapter.client = Client()
+        adapter.timeout_seconds = 300
+        adapter.monotonic = clock
+        adapter.sleeper = mock.Mock()
+        return adapter
+
+    @staticmethod
+    def _terminal_job(*, conclusion="cancelled", completed_at="2026-08-29T23:44:49Z"):
+        return {
+            "id": 22,
+            "status": "completed",
+            "conclusion": conclusion,
+            "started_at": "2026-08-29T23:41:44Z",
+            "completed_at": completed_at,
+        }
+
+    def test_timeout_accepts_github_cancelled_after_job_deadline_without_receipts(self):
+        adapter = self._terminal_adapter(
+            [{"status": "completed", "conclusion": "cancelled"}],
+            [{"jobs": [self._terminal_job()]}],
+        )
+
+        self.assertEqual("timeout", adapter.await_terminal("timeout", mock.Mock()))
+        self.assertEqual("2026-08-29T23:44:49Z", adapter._observed["finished_at"])
+
+    def test_timeout_accepts_exact_job_deadline_equality(self):
+        adapter = self._terminal_adapter(
+            [{"status": "completed", "conclusion": "cancelled"}],
+            [
+                {
+                    "jobs": [
+                        self._terminal_job(
+                            completed_at="2026-08-29T23:44:44Z"
+                        )
+                    ]
+                }
+            ],
+        )
+
+        self.assertEqual("timeout", adapter.await_terminal("timeout", mock.Mock()))
+
+    def test_timeout_rejects_cancelled_before_job_deadline(self):
+        adapter = self._terminal_adapter(
+            [{"status": "completed", "conclusion": "cancelled"}],
+            [
+                {
+                    "jobs": [
+                        self._terminal_job(
+                            completed_at="2026-08-29T23:44:43Z"
+                        )
+                    ]
+                }
+            ],
+        )
+
+        with self.assertRaisesRegex(CanaryRuntimeError, "before its job deadline"):
+            adapter.await_terminal("timeout", mock.Mock())
+
+    def test_timeout_rejects_any_explicit_cancellation_receipt(self):
+        for field in ("_normal_cancel_receipt", "_force_cancel_receipt"):
+            with self.subTest(field=field):
+                adapter = self._terminal_adapter(
+                    [{"status": "completed", "conclusion": "cancelled"}],
+                    [{"jobs": [self._terminal_job()]}],
+                )
+                setattr(adapter, field, {"receipt_digest": "a" * 64})
+                with self.assertRaisesRegex(
+                    CanaryRuntimeError, "explicit cancellation receipt"
+                ):
+                    adapter.await_terminal("timeout", mock.Mock())
+
+    def test_terminal_observation_requires_matching_run_and_exact_job_conclusions(self):
+        for run_conclusion, job_conclusion in (
+            ("failure", "cancelled"),
+            ("cancelled", "failure"),
+        ):
+            with self.subTest(
+                run_conclusion=run_conclusion, job_conclusion=job_conclusion
+            ):
+                adapter = self._terminal_adapter(
+                    [{"status": "completed", "conclusion": run_conclusion}],
+                    [
+                        {
+                            "jobs": [
+                                self._terminal_job(conclusion=job_conclusion)
+                            ]
+                        }
+                    ],
+                )
+                with self.assertRaisesRegex(
+                    CanaryRuntimeError, "terminal conclusion drifted"
+                ):
+                    adapter.await_terminal("timeout", mock.Mock())
+
+    def test_terminal_observation_retries_eventually_consistent_job_receipt(self):
+        terminal_run = {"status": "completed", "conclusion": "cancelled"}
+        adapter = self._terminal_adapter(
+            [terminal_run, terminal_run, terminal_run],
+            [
+                {"jobs": []},
+                {
+                    "jobs": [
+                        {
+                            **self._terminal_job(),
+                            "status": "in_progress",
+                            "conclusion": None,
+                        }
+                    ]
+                },
+                {"jobs": [self._terminal_job()]},
+            ],
+        )
+
+        self.assertEqual("timeout", adapter.await_terminal("timeout", mock.Mock()))
+        self.assertEqual([mock.call(1), mock.call(1)], adapter.sleeper.call_args_list)
+
+    def test_terminal_observation_stops_when_job_receipt_does_not_converge(self):
+        terminal_run = {"status": "completed", "conclusion": "cancelled"}
+        adapter = self._terminal_adapter([terminal_run], [{"jobs": []}])
+        adapter.timeout_seconds = 0
+
+        with self.assertRaisesRegex(CanaryRuntimeError, "did not converge"):
+            adapter.await_terminal("timeout", mock.Mock())
+        adapter.sleeper.assert_not_called()
+
+    def test_terminal_observation_rejects_ambiguous_or_invalid_job_receipt(self):
+        terminal_run = {"status": "completed", "conclusion": "cancelled"}
+        for jobs, message in (
+            ([self._terminal_job(), self._terminal_job()], "ambiguous"),
+            ([{**self._terminal_job(), "status": "waiting"}], "invalid"),
+        ):
+            with self.subTest(message=message):
+                adapter = self._terminal_adapter(
+                    [terminal_run], [{"jobs": jobs}]
+                )
+                with self.assertRaisesRegex(CanaryRuntimeError, message):
+                    adapter.await_terminal("timeout", mock.Mock())
+
+    def test_terminal_conclusion_contract_covers_all_nonreboot_scenarios(self):
+        expected = {
+            "success": "success",
+            "failure": "failure",
+            "cancel": "cancelled",
+            "force-cancel": "cancelled",
+        }
+        for scenario, conclusion in expected.items():
+            with self.subTest(scenario=scenario):
+                adapter = self._terminal_adapter(
+                    [{"status": "completed", "conclusion": conclusion}],
+                    [
+                        {
+                            "jobs": [
+                                self._terminal_job(conclusion=conclusion)
+                            ]
+                        }
+                    ],
+                    scenario=scenario,
+                )
+                if scenario in {"cancel", "force-cancel"}:
+                    adapter._post = mock.Mock(
+                        return_value=HTTPResponse(202, b"")
+                    )
+                    adapter._receipt = mock.Mock(
+                        return_value={"receipt_digest": "a" * 64}
+                    )
+                self.assertEqual(
+                    scenario, adapter.await_terminal(scenario, mock.Mock())
+                )
+
+        self.assertEqual(180, CANARY_JOB_TIMEOUT_SECONDS)
+
+    def test_timeout_deadline_constant_matches_the_immutable_workflow(self):
+        workflow = (
+            Path(__file__).resolve().parents[2]
+            / "templates/workflows/ci-jit-canary-child.yml"
+        ).read_text(encoding="utf-8")
+        local_job = workflow.split("  local-canary:\n", 1)[1]
+
+        self.assertEqual(0, CANARY_JOB_TIMEOUT_SECONDS % 60)
+        self.assertIn(
+            f"    timeout-minutes: {CANARY_JOB_TIMEOUT_SECONDS // 60}\n",
+            local_job,
+        )
+
     def test_target_revalidation_accepts_omitted_merge_sha_but_not_drift(self):
         adapter = LiveCanaryDispatchAdapter.__new__(LiveCanaryDispatchAdapter)
         adapter.authorization = {
