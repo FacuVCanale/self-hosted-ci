@@ -99,6 +99,8 @@ class CanaryMatrixWrapperTests(unittest.TestCase):
         resume = self.source.index('Write-Worker "resume"')
         self.assertLess(checkpoint, resume)
         parent = self.source[checkpoint:resume]
+        self.assertIn("--list --running --quiet", self.source)
+        self.assertIn("did not reach the stopped state", self.source)
         self.assertNotIn("--terminate", parent)
 
     def test_reboot_termination_runs_inside_service_identity_worker(self):
