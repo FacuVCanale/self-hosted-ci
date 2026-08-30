@@ -747,7 +747,9 @@ systemctl daemon-reexec
 class ExternalLiveWorkflowJobVerifier:
     """Fail-closed adapter to the separately authenticated GitHub authority lane."""
 
-    MAX_ATTEMPTS = 10
+    # Three complete, independently authenticated observations fit inside the
+    # runner hook's 60-second fail-closed request deadline: 3*15s + 2*1s.
+    MAX_ATTEMPTS = 3
     RETRY_DELAY_SECONDS = 1
 
     def __init__(self, executable: Path) -> None:
@@ -779,15 +781,18 @@ class ExternalLiveWorkflowJobVerifier:
         }
         result = None
         for attempt in range(self.MAX_ATTEMPTS):
-            result = subprocess.run(
-                [str(self.executable)],
-                input=json.dumps(request, sort_keys=True, separators=(",", ":")),
-                text=True,
-                capture_output=True,
-                timeout=15,
-                check=False,
-            )
-            if result.returncode == 0:
+            try:
+                result = subprocess.run(
+                    [str(self.executable)],
+                    input=json.dumps(request, sort_keys=True, separators=(",", ":")),
+                    text=True,
+                    capture_output=True,
+                    timeout=15,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                result = None
+            if result is not None and result.returncode == 0:
                 break
             if attempt + 1 == self.MAX_ATTEMPTS:
                 raise RunnerJitError(
