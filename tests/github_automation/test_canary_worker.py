@@ -242,24 +242,80 @@ class CanaryStateStoreTests(unittest.TestCase):
     def test_nonce_cannot_resume_across_boot_or_authorization(self):
         with tempfile.TemporaryDirectory() as directory:
             store = CanaryStateStore(Path(directory), "a" * 32)
-            store.initialize("b" * 64, "boot-one")
+            first_boot = "v2:44a2a354-3124-42d7-b616-bfa90fde8215:12345"
+            second_boot = "v2:44a2a354-3124-42d7-b616-bfa90fde8215:67890"
+            store.initialize("b" * 64, first_boot)
             with self.assertRaisesRegex(CanaryRuntimeError, "cannot resume"):
-                store.initialize("c" * 64, "boot-one")
+                store.initialize("c" * 64, first_boot)
             with self.assertRaisesRegex(CanaryRuntimeError, "cannot resume"):
-                store.initialize("b" * 64, "boot-two")
+                store.initialize("b" * 64, second_boot)
 
     def test_only_in_progress_reboot_may_resume_on_a_new_boot(self):
         with tempfile.TemporaryDirectory() as directory:
             store = CanaryStateStore(Path(directory), "a" * 32)
-            store.initialize("b" * 64, "boot-one")
+            first_boot = "v2:44a2a354-3124-42d7-b616-bfa90fde8215:12345"
+            second_boot = "v2:44a2a354-3124-42d7-b616-bfa90fde8215:67890"
+            store.initialize("b" * 64, first_boot)
             store.transition(
                 "running",
                 current_scenario="reboot",
                 completed_scenarios=list(SCENARIOS[:-1]),
             )
-            resumed = store.initialize("b" * 64, "boot-two")
-            self.assertEqual("boot-two", resumed["boot_id"])
-            self.assertEqual("boot-one", resumed["rebooted_from_boot_id"])
+            resumed = store.initialize("b" * 64, second_boot)
+            self.assertEqual(second_boot, resumed["boot_id"])
+            self.assertEqual(first_boot, resumed["rebooted_from_boot_id"])
+
+    def test_legacy_boot_identity_cannot_prove_reboot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = CanaryStateStore(Path(directory), "a" * 32)
+            store.initialize("b" * 64, "44a2a354-3124-42d7-b616-bfa90fde8215")
+            store.transition(
+                "running",
+                current_scenario="reboot",
+                completed_scenarios=list(SCENARIOS[:-1]),
+            )
+            with self.assertRaisesRegex(CanaryRuntimeError, "cannot resume"):
+                store.initialize(
+                    "b" * 64,
+                    "v2:44a2a354-3124-42d7-b616-bfa90fde8215:67890",
+                )
+
+    def test_distro_boot_identity_changes_when_pid_one_restarts_on_shared_kernel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            boot_id = root / "boot_id"
+            proc1_stat = root / "stat"
+            boot_id.write_text("44a2a354-3124-42d7-b616-bfa90fde8215\n")
+            proc1_stat.write_text(
+                "1 (systemd) S 0 1 1 0 -1 4194560 1 2 0 0 1 2 0 0 20 0 1 0 12345 0\n"
+            )
+            runtime = CanaryRuntime(
+                {}, AUTH, boot_id_path=boot_id, proc1_stat_path=proc1_stat
+            )
+            first = runtime._distro_boot_identity()
+            proc1_stat.write_text(
+                "1 (systemd) S 0 1 1 0 -1 4194560 1 2 0 0 1 2 0 0 20 0 1 0 67890 0\n"
+            )
+            second = runtime._distro_boot_identity()
+            self.assertEqual(
+                "v2:44a2a354-3124-42d7-b616-bfa90fde8215:12345", first
+            )
+            self.assertEqual(
+                "v2:44a2a354-3124-42d7-b616-bfa90fde8215:67890", second
+            )
+
+    def test_distro_boot_identity_rejects_malformed_proc_stat(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            boot_id = root / "boot_id"
+            proc1_stat = root / "stat"
+            boot_id.write_text("44a2a354-3124-42d7-b616-bfa90fde8215\n")
+            proc1_stat.write_text("1 systemd S 0 1\n")
+            runtime = CanaryRuntime(
+                {}, AUTH, boot_id_path=boot_id, proc1_stat_path=proc1_stat
+            )
+            with self.assertRaisesRegex(CanaryRuntimeError, "identity is invalid"):
+                runtime._distro_boot_identity()
 
     def test_signed_allocation_budget_is_durable_across_nonces(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -306,7 +362,9 @@ class CanaryStateStoreTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             store = CanaryStateStore(Path(directory), "a" * 32)
-            store.initialize("b" * 64, "boot-one")
+            first_boot = "v2:44a2a354-3124-42d7-b616-bfa90fde8215:12345"
+            second_boot = "v2:44a2a354-3124-42d7-b616-bfa90fde8215:67890"
+            store.initialize("b" * 64, first_boot)
             store.transition("ready", completed_scenarios=list(SCENARIOS[:-1]))
             runtime = CanaryRuntime({}, AUTH)
             driver = Driver()
@@ -314,7 +372,7 @@ class CanaryStateStoreTests(unittest.TestCase):
                 runtime.run_matrix(store, driver)
             state = store.load()
             self.assertEqual("allocation-reboot", state["reboot_allocation_id"])
-            store.initialize("b" * 64, "boot-two")
+            store.initialize("b" * 64, second_boot)
             runtime.run_matrix(store, driver)
             self.assertEqual(
                 ("allocation-reboot", "wsl-jit-" + "c" * 32), driver.resumed

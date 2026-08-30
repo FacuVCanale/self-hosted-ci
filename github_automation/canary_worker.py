@@ -73,6 +73,12 @@ STATE_ROOT = Path("/var/lib/self-hosted-ci/canary")
 LOCK_PATH = Path("/run/self-hosted-ci-garm-jit.lock")
 _NONCE = re.compile(r"[0-9a-f]{32}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_UUID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+)
+_DISTRO_BOOT_IDENTITY_V2 = re.compile(
+    rf"v2:{_UUID.pattern}:[0-9]+"
+)
 PROOF_FIELDS = {
     "authorization_digest", "nonce", "scenario", "allocation_id", "scale_set_id",
     "scale_set_name", "run_id", "run_attempt", "job_id", "runner_name",
@@ -1136,11 +1142,15 @@ class CanaryStateStore:
             raise CanaryRuntimeError("authorization digest is invalid")
         current = self.load()
         if current is not None:
+            stored_boot_id = current.get("boot_id")
             reboot_resume = (
                 current.get("state") == "running"
                 and current.get("current_scenario") == "reboot"
                 and current.get("completed_scenarios") == list(SCENARIOS[:-1])
-                and current.get("boot_id") != boot_id
+                and isinstance(stored_boot_id, str)
+                and _DISTRO_BOOT_IDENTITY_V2.fullmatch(stored_boot_id) is not None
+                and _DISTRO_BOOT_IDENTITY_V2.fullmatch(boot_id) is not None
+                and stored_boot_id != boot_id
             )
             if current.get("authorization_digest") != authorization_digest or (
                 current.get("boot_id") != boot_id and not reboot_resume
@@ -1264,6 +1274,7 @@ class CanaryRuntime:
         runtime_ready_sentinel: Path = RUNTIME_READY_SENTINEL,
         lock_path: Path = LOCK_PATH,
         boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
+        proc1_stat_path: Path = Path("/proc/1/stat"),
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
         self.config = config
@@ -1276,8 +1287,20 @@ class CanaryRuntime:
         self.runtime_ready_sentinel = runtime_ready_sentinel
         self.lock_path = lock_path
         self.boot_id_path = boot_id_path
+        self.proc1_stat_path = proc1_stat_path
         self.now = now
         self._lock = None
+
+    def _distro_boot_identity(self) -> str:
+        """Identify this WSL distro start, not merely the shared WSL2 kernel."""
+
+        kernel_boot_id = self.boot_id_path.read_text(encoding="ascii").strip()
+        proc1_stat = self.proc1_stat_path.read_text(encoding="ascii").strip()
+        closing_paren = proc1_stat.rfind(")")
+        fields = proc1_stat[closing_paren + 1 :].split() if closing_paren > 0 else []
+        if not _UUID.fullmatch(kernel_boot_id) or len(fields) < 20 or not fields[19].isdigit():
+            raise CanaryRuntimeError("WSL distro boot identity is invalid")
+        return f"v2:{kernel_boot_id}:{fields[19]}"
 
     def _run(self, *argv: str, timeout: int = 60) -> str:
         result = self.runner.run(argv, timeout=timeout)
@@ -1433,7 +1456,7 @@ class CanaryRuntime:
             or self.authorization["max_jobs_per_allocation"] != 1
         ):
             raise CanaryRuntimeError("canary authorization allocation bounds drifted")
-        boot_id = self.boot_id_path.read_text(encoding="ascii").strip()
+        boot_id = self._distro_boot_identity()
         store = CanaryStateStore(self.state_root, authorization.nonce)
         current = store.load()
         reboot_resume = bool(
@@ -1441,6 +1464,8 @@ class CanaryRuntime:
             and current.get("state") == "running"
             and current.get("current_scenario") == "reboot"
             and current.get("completed_scenarios") == list(SCENARIOS[:-1])
+            and isinstance(current.get("boot_id"), str)
+            and _DISTRO_BOOT_IDENTITY_V2.fullmatch(current["boot_id"]) is not None
             and current.get("boot_id") != boot_id
         )
         instances = json.loads(
