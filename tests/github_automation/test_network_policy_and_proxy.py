@@ -117,6 +117,29 @@ class NetworkPolicyAndProxyTests(unittest.TestCase):
             )
             self.assertNotIn("ExecStart=/usr/bin/false", source)
 
+    def test_policy_units_wait_for_incus_to_publish_the_runner_bridge(self) -> None:
+        for name in (
+            "self-hosted-ci-network-policy.service",
+            "self-hosted-ci-canary-network-policy.service",
+        ):
+            source = (ROOT / "packaging/systemd" / name).read_text()
+            self.assertIn(
+                "Requires=self-hosted-ci-network-quarantine.service incus.service",
+                source,
+            )
+            self.assertIn(
+                "After=self-hosted-ci-network-quarantine.service incus.service",
+                source,
+            )
+
+        quarantine = (
+            ROOT / "packaging/systemd/self-hosted-ci-network-quarantine.service"
+        ).read_text()
+        self.assertIn(
+            "Before=incus.service self-hosted-ci-canary-network-policy.service",
+            quarantine,
+        )
+
     def test_proxy_units_allow_only_required_socket_families(self) -> None:
         expected = "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"
         for name in (

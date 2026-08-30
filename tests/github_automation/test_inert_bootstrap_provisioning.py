@@ -82,8 +82,14 @@ class InertBootstrapProvisioningTests(unittest.TestCase):
         self.assertIn("Before=incus.service self-hosted-ci-canary-network-policy.service", unit)
         self.assertIn("WantedBy=multi-user.target", unit)
         production = (ROOT / "packaging/systemd/self-hosted-ci-network-policy.service").read_text(encoding="utf-8")
-        self.assertIn("Requires=self-hosted-ci-network-quarantine.service", production)
-        self.assertIn("After=self-hosted-ci-network-quarantine.service", production)
+        self.assertIn(
+            "Requires=self-hosted-ci-network-quarantine.service incus.service",
+            production,
+        )
+        self.assertIn(
+            "After=self-hosted-ci-network-quarantine.service incus.service",
+            production,
+        )
         self.assertIn("ExecStartPre=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh quarantine", production)
         self.assertIn("ExecStart=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh apply", production)
         self.assertIn("ExecStartPost=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh verify", production)

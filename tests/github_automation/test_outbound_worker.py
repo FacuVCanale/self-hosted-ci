@@ -331,6 +331,154 @@ class OutboundWorkerTests(unittest.TestCase):
             )
             self.assertEqual("completed", source.status()[0]["state"])
 
+    def test_revoked_durable_approval_reconciles_without_crash_loop(self):
+        now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+
+        class Clock:
+            def __call__(self):
+                return now
+
+        class Resolver:
+            def resolve(self, repository, pr):
+                return ResolvedApprovalTarget(
+                    "123",
+                    repository,
+                    pr,
+                    "a" * 40,
+                    "main",
+                    f"{repository}/.github/workflows/ci-jit-pilot-child.yml@refs/heads/main",
+                    "b" * 40,
+                    "c" * 40,
+                )
+
+        class FlakyRecoveryBroker(Broker):
+            def __init__(self):
+                super().__init__()
+                self.recoveries = 0
+
+            def recover(self, allocation_id):
+                self.recoveries += 1
+                if self.recoveries == 1:
+                    raise RuntimeError("cleanup temporarily unavailable")
+                return super().recover(allocation_id)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = LocalApprovalStore(
+                root / "approvals.sqlite3",
+                GateStore(root / "gate.sqlite3", clock=Clock()),
+                Resolver(),
+                PilotWorkRequestBuilder("d" * 64),
+                clock=Clock(),
+            )
+            approved = source.approve("example-owner/example-repo", 42)
+            state = WorkerState(root / "worker.sqlite3")
+            broker = FlakyRecoveryBroker()
+            github = GitHub()
+            original_observe = github.observe_exact_job
+
+            def observe(run_id, label):
+                github.label = label
+                return original_observe(run_id, label)
+
+            github.observe_exact_job = observe
+            github.run = lambda _run_id: (_ for _ in ()).throw(
+                RuntimeError("transient GitHub failure")
+            )
+            worker = PilotWorker(state, source, broker, github, Signer())
+            with self.assertRaisesRegex(RuntimeError, "transient"):
+                worker.run_once()
+            allocation_id = json.loads(
+                state.db.execute(
+                    "SELECT request FROM requests WHERE id=?", (approved["request_id"],)
+                ).fetchone()[0]
+            )["reservation"]["allocation_id"]
+            source.revoke("example-owner/example-repo", 42)
+
+            with self.assertRaisesRegex(RuntimeError, "cleanup temporarily"):
+                worker.run_once()
+            self.assertEqual(
+                "retry",
+                state.db.execute(
+                    "SELECT state FROM requests WHERE id=?", (approved["request_id"],)
+                ).fetchone()[0],
+            )
+
+            result = worker.run_once()
+
+            self.assertEqual(
+                {"status": "failed", "reason": "LocalApprovalError"}, result
+            )
+            self.assertEqual(
+                [("recover", allocation_id)],
+                [call for call in broker.calls if call[0] == "recover"],
+            )
+            self.assertEqual(2, broker.recoveries)
+            self.assertEqual(1, github.dispatches)
+            self.assertEqual("revoked", source.status()[0]["state"])
+            self.assertEqual(
+                "failed",
+                state.db.execute(
+                    "SELECT state FROM requests WHERE id=?", (approved["request_id"],)
+                ).fetchone()[0],
+            )
+            self.assertEqual({"status": "idle"}, worker.run_once())
+
+    def test_expired_pilot_package_reconciles_without_crash_loop(self):
+        class Clock:
+            now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+
+            def __call__(self):
+                return self.now
+
+        class Resolver:
+            def resolve(self, repository, pr):
+                return ResolvedApprovalTarget(
+                    "123",
+                    repository,
+                    pr,
+                    "a" * 40,
+                    "main",
+                    f"{repository}/.github/workflows/ci-jit-pilot-child.yml@refs/heads/main",
+                    "b" * 40,
+                    "c" * 40,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = Clock()
+            source = LocalApprovalStore(
+                root / "approvals.sqlite3",
+                GateStore(root / "gate.sqlite3", clock=clock),
+                Resolver(),
+                PilotWorkRequestBuilder("d" * 64),
+                clock=clock,
+            )
+            approved = source.approve("example-owner/example-repo", 42)
+            request = source.poll()
+            source.claim(approved["request_id"], request, lease_seconds=7200)
+            state = WorkerState(root / "worker.sqlite3")
+            state.claim(approved["request_id"], request, lease_seconds=7200)
+            broker = Broker()
+            state.record(
+                approved["request_id"],
+                "reserved",
+                reserved=broker.reserve(request["reservation"]),
+            )
+            state.fail(approved["request_id"])
+            clock.now += timedelta(minutes=5)
+            worker = PilotWorker(state, source, broker, GitHub(), Signer())
+
+            result = worker.run_once()
+
+            self.assertEqual({"status": "failed", "reason": "JitPilotError"}, result)
+            self.assertEqual(
+                [("recover", request["reservation"]["allocation_id"])],
+                [call for call in broker.calls if call[0] == "recover"],
+            )
+            self.assertEqual("failed", source.status()[0]["state"])
+            self.assertEqual({"status": "idle"}, worker.run_once())
+
     def test_startup_recovers_running_worker_lease_and_claimed_approval(self):
         now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
 

@@ -753,6 +753,12 @@ La instalación sobre la distro que pertenece a la cuenta de servicio se hace
 con `scripts/host/install-wsl-jit-live-contract.ps1`. El script es plan-only por
 defecto y usa una tarea one-shot `Password`/`Limited`; no activa GARM, no
 configura GitHub, no crea `outbound-worker.runtime-ready` y no registra runners.
+El wrapper funciona con `automount.enabled=false`: crea un snapshot ZIP del
+paquete sin reparse points, transmite paquete, input y payload exclusivamente
+por stdin, revalida SHA-256 y tamaño dentro de WSL y extrae todo bajo un
+directorio root-only en `/run`. No requiere `/mnt/c`, `drvfs`, Windows PATH ni
+interop. En `CollectUnsigned`, el tar resultante vuelve por el mismo canal en
+base64, Windows vuelve a verificar hash/tamaño y recién entonces lo persiste.
 
 El flujo tiene dos operaciones separadas. Primero, el paquete contiene
 `artifacts/live-contract/unsigned-live-contract-source.tar`: un tar POSIX
