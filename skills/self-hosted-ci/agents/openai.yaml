@@ -1,0 +1,6 @@
+interface:
+  display_name: "Self-hosted CI"
+  short_description: "Operate selected local Windows CI"
+  default_prompt: "Use $self-hosted-ci to inspect or change this repository's CI routing safely."
+policy:
+  allow_implicit_invocation: true

@@ -68,6 +68,13 @@ make evidence
 See [`docs/github-automation-operations.md`](docs/github-automation-operations.md)
 for the generic operating model. Never commit generated operational evidence.
 
+Local Codex and Claude Code sessions can share the versioned
+[`self-hosted-ci` skill](skills/self-hosted-ci/SKILL.md) and the deterministic
+agent-facing CLI. Natural-language requests map to an exact one-off PR run,
+an exact-repository opt-in, a GitHub-hosted rollback, or read-only status; the
+CLI rejects organization-wide or wildcard enrollment and keeps its effective
+registry/audit outside this public repository.
+
 For the reproducible local sandbox bootstrap, prerequisites, rollback, and
 return to GitHub-hosted execution, see
 [`docs/runbook-bootstrap-local-ci.md`](docs/runbook-bootstrap-local-ci.md).

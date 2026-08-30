@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/FacuVCanale/self-hosted-ci/main/schemas/operator-registry-v1.schema.json",
+  "title": "Self-hosted CI private operator transaction journal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "operator_registry_version", "repositories"],
+  "properties": {
+    "$schema": {
+      "const": "https://raw.githubusercontent.com/FacuVCanale/self-hosted-ci/main/schemas/operator-registry-v1.schema.json"
+    },
+    "operator_registry_version": {"const": 1},
+    "repositories": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$"},
+      "additionalProperties": {"$ref": "#/$defs/repositoryState"}
+    }
+  },
+  "$defs": {
+    "repositoryState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ci_runner"],
+      "properties": {
+        "ci_runner": {"enum": ["github", "local-with-github-fallback"]},
+        "managed_workflow": {"const": ".github/workflows/ci-jit-pilot-child.yml"},
+        "repository_id": {"type": "integer", "minimum": 1},
+        "authority_installation_id": {"type": "integer", "minimum": 1},
+        "workflow_blob_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "workflow_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "public_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "updated_at": {"type": "string"},
+        "pending": {"$ref": "#/$defs/pendingTransaction"}
+      }
+    },
+    "pendingTransaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "started_at", "expected_workflow_sha256", "previous_ci_runner"],
+      "properties": {
+        "operation": {"enum": ["use-local", "use-github"]},
+        "started_at": {"type": "string"},
+        "expected_workflow_sha256": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          ]
+        },
+        "previous_ci_runner": {"enum": ["github", "local-with-github-fallback"]}
+      }
+    }
+  }
+}
