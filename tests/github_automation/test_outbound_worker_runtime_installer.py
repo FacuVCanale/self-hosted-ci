@@ -47,6 +47,10 @@ def private_pem(key) -> bytes:
 
 
 class OutboundWorkerRuntimeInstallerTests(unittest.TestCase):
+    def test_broker_cleanup_timeout_is_distinct_from_http_timeout(self):
+        source = (ROOT / "scripts/host/outbound-coordinator-worker.py").read_text()
+        self.assertIn('max(1200, c["request_timeout_seconds"])', source)
+
     def config(self) -> dict:
         return {
             "schema_version": 1,

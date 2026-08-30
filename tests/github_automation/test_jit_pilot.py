@@ -293,7 +293,9 @@ class JitPilotTests(unittest.TestCase):
                 'test "$(git rev-parse refs/ci-jit-pilot/merge^2)" = "$HEAD_SHA"'
             ),
         )
-        self.assertEqual(2, text.count("run: make test"))
+        self.assertEqual(
+            2, text.count("run: python3 scripts/check-public-distribution.py")
+        )
         for forbidden in (
             "child-claim",
             "child-mark-started",

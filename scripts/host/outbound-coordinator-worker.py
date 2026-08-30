@@ -242,7 +242,13 @@ def runtime(config_path):
         def jobs(self, run_id):
             return client.jobs(run_id, client.authenticate())
 
-    broker = LocalBrokerCli(Path(c["broker_executable"]), c["request_timeout_seconds"])
+    # GARM may need several minutes to drain an ephemeral GitHub runner after
+    # its job reaches terminal. HTTP request timeouts are intentionally short,
+    # but cleanup is a separate bounded transaction and must not be killed at
+    # 30 seconds while resources still exist.
+    broker = LocalBrokerCli(
+        Path(c["broker_executable"]), max(1200, c["request_timeout_seconds"])
+    )
     github = GitHub()
     state = WorkerState(Path(c["worker_state_file"]))
     signer = FileAllocationSigner(Path(c["allocation_signer_key_file"]))
