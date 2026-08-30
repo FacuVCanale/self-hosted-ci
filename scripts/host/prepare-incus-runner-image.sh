@@ -128,17 +128,25 @@ if value != []:
     raise SystemExit("ci-jit must contain zero instances while preparing the runner image")
 PY
 
-incus image info "${source_remote}:${source_ref}" --format json >"${workdir}/source.json" || \
+incus image list "${source_remote}:${source_ref}" --format json >"${workdir}/source.json" || \
   die 'explicit source image could not be resolved'
-python3 - "${expected_fingerprint}" "${EXPECTED_ARCHITECTURE}" "${workdir}/source.json" <<'PY'
-import json, pathlib, sys
-fingerprint, architecture, path = sys.argv[1:]
+python3 - "${source_ref}" "${expected_fingerprint}" "${EXPECTED_ARCHITECTURE}" "${workdir}/source.json" <<'PY'
+import json, pathlib, re, sys
+source_ref, fingerprint, architecture, path = sys.argv[1:]
 value = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
-if value.get("fingerprint") != fingerprint:
+if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+    raise SystemExit("source image inventory is invalid")
+matches = [item for item in value if item.get("fingerprint") == fingerprint]
+if len(matches) != 1:
     raise SystemExit("source ref fingerprint does not match the expected fingerprint")
-if value.get("type") != "container":
+image = matches[0]
+aliases = [item.get("name") for item in image.get("aliases", []) if isinstance(item, dict)]
+fingerprint_ref = bool(re.fullmatch(r"[0-9a-f]{12,64}", source_ref)) and fingerprint.startswith(source_ref)
+if source_ref not in aliases and not fingerprint_ref:
+    raise SystemExit("source inventory does not expose the exact source ref")
+if image.get("type") != "container":
     raise SystemExit("source image is not a container image")
-if value.get("architecture") != architecture:
+if image.get("architecture") != architecture:
     raise SystemExit("source image architecture is not x86_64")
 PY
 
@@ -160,8 +168,21 @@ PY
 )"
 
 if [[ "${alias_state}" == absent ]]; then
-  if ! incus image info "${TARGET_REMOTE}:${expected_fingerprint}" --project "${PROJECT}" --format json \
-      >"${workdir}/local-before.json" 2>/dev/null; then
+  incus image list "${TARGET_REMOTE}:${expected_fingerprint}" --project "${PROJECT}" --format json \
+    >"${workdir}/local-before.json" || die 'local image inventory could not be queried'
+  local_image_state="$(python3 - "${expected_fingerprint}" "${workdir}/local-before.json" <<'PY'
+import json, pathlib, sys
+fingerprint, path = sys.argv[1:]
+value = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+    raise SystemExit("local image inventory is invalid")
+matches = [item for item in value if item.get("fingerprint") == fingerprint]
+if len(matches) > 1:
+    raise SystemExit("local fingerprint inventory is ambiguous")
+print("present" if matches else "absent")
+PY
+)" || die 'local image inventory could not be validated'
+  if [[ "${local_image_state}" == absent ]]; then
     # Resolve the mutable source ref once, then transfer by the verified full
     # fingerprint so a remote alias change cannot alter this transaction.
     incus image copy "${source_remote}:${expected_fingerprint}" "${TARGET_REMOTE}:" \
@@ -173,23 +194,31 @@ if [[ "${alias_state}" == absent ]]; then
   created_alias=true
 fi
 
-incus image info "${TARGET_REMOTE}:${local_alias}" --project "${PROJECT}" --format json >"${workdir}/local-after.json"
+incus image list "${TARGET_REMOTE}:${local_alias}" --project "${PROJECT}" --format json >"${workdir}/local-after.json"
 incus image alias list "${TARGET_REMOTE}:" --project "${PROJECT}" --format json >"${workdir}/aliases-after.json"
 incus list --project "${PROJECT}" --format json >"${workdir}/instances-after.json"
 python3 - "${local_alias}" "${expected_fingerprint}" "${EXPECTED_ARCHITECTURE}" \
   "${workdir}/local-after.json" "${workdir}/aliases-after.json" "${workdir}/instances-after.json" <<'PY'
 import json, pathlib, sys
 alias, fingerprint, architecture, image_path, aliases_path, instances_path = sys.argv[1:]
-image = json.loads(pathlib.Path(image_path).read_text(encoding="utf-8"))
+images = json.loads(pathlib.Path(image_path).read_text(encoding="utf-8"))
 aliases = json.loads(pathlib.Path(aliases_path).read_text(encoding="utf-8"))
 instances = json.loads(pathlib.Path(instances_path).read_text(encoding="utf-8"))
+if not isinstance(images, list) or any(not isinstance(item, dict) for item in images):
+    raise SystemExit("local image postcondition inventory is invalid")
+image_matches = [
+    item for item in images
+    if item.get("fingerprint") == fingerprint
+    and alias in [entry.get("name") for entry in item.get("aliases", []) if isinstance(entry, dict)]
+]
+if len(image_matches) != 1:
+    raise SystemExit("local image postcondition failed")
+image = image_matches[0]
 if image.get("fingerprint") != fingerprint or image.get("type") != "container" or image.get("architecture") != architecture:
     raise SystemExit("local image postcondition failed")
 matches = [item for item in aliases if item.get("name") == alias]
 if len(matches) != 1 or matches[0].get("target") != fingerprint:
     raise SystemExit("exact local alias postcondition failed")
-if alias not in [item.get("name") for item in image.get("aliases", [])]:
-    raise SystemExit("image info does not expose the exact local alias")
 if instances != []:
     raise SystemExit("ci-jit instance inventory changed during runner-image preparation")
 PY

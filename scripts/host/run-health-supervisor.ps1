@@ -26,16 +26,46 @@ function Write-AtomicUtf8([string]$LiteralPath, [string]$Content) {
     }
 }
 
-function Get-ServiceState([string]$Name) {
-    $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
-    if ($null -eq $service) { return [ordered]@{ installed = $false; status = "absent" } }
-    return [ordered]@{ installed = $true; status = $service.Status.ToString().ToLowerInvariant() }
+function Test-LocalTcpEndpoint([int]$Port) {
+    $client = [Net.Sockets.TcpClient]::new()
+    $pending = $null
+    try {
+        $pending = $client.BeginConnect([Net.IPAddress]::Loopback, $Port, $null, $null)
+        if (-not $pending.AsyncWaitHandle.WaitOne(2000)) { return $false }
+        $client.EndConnect($pending)
+        return $true
+    }
+    catch { return $false }
+    finally {
+        if ($null -ne $pending) { $pending.AsyncWaitHandle.Dispose() }
+        $client.Dispose()
+    }
 }
 
-function Get-HostServices {
+function Get-ServiceState([string]$Name, [scriptblock]$RunningProbe = $null) {
+    try {
+        $service = Get-Service -Name $Name -ErrorAction Stop
+        return [ordered]@{ installed = $true; status = $service.Status.ToString().ToLowerInvariant() }
+    }
+    catch {
+        # The dedicated non-admin identity can be denied SCM query access. A
+        # bounded functional probe is stronger health evidence than treating
+        # that authorization boundary as service absence.
+        if ($null -ne $RunningProbe -and (& $RunningProbe)) {
+            return [ordered]@{ installed = $true; status = "running" }
+        }
+        return [ordered]@{ installed = $false; status = "absent" }
+    }
+}
+
+function Get-HostServices([bool]$WslProbeSucceeded = $false) {
+    $wsl = Get-ServiceState "WslService"
+    if ($WslProbeSucceeded -and $wsl.status -eq "absent") {
+        $wsl = [ordered]@{ installed = $true; status = "running" }
+    }
     return [ordered]@{
-        sshd = Get-ServiceState "sshd"
-        wsl = Get-ServiceState "WslService"
+        sshd = Get-ServiceState "sshd" { Test-LocalTcpEndpoint 22 }
+        wsl = $wsl
         lxss_manager = Get-ServiceState "LxssManager"
     }
 }
@@ -87,7 +117,7 @@ function Get-Snapshot {
         if ([int]$observed.schema_version -ne 1 -or [string]$observed.distro.name -ne $ExpectedDistroName) {
             throw "WSL collector returned an incompatible observation"
         }
-        $hostServices = Get-HostServices
+        $hostServices = Get-HostServices $true
         $blocking = [Collections.Generic.List[string]]::new()
         foreach ($reason in @($observed.eligibility.blocking_reasons)) { $blocking.Add([string]$reason) }
         if ($hostServices.sshd.status -ne "running") { $blocking.Add("host_service_not_running:sshd") }

@@ -68,7 +68,9 @@ class IncusRunnerImageTests(unittest.TestCase):
         for token in (
             "--acknowledge-remote-image-fetch",
             "--acknowledge-local-image-alias-mutation",
-            'incus image info "${source_remote}:${source_ref}"',
+            'incus image list "${source_remote}:${source_ref}" --format json',
+            'incus image list "${TARGET_REMOTE}:${expected_fingerprint}" --project "${PROJECT}" --format json',
+            'incus image list "${TARGET_REMOTE}:${local_alias}" --project "${PROJECT}" --format json',
             'incus image copy "${source_remote}:${expected_fingerprint}" "${TARGET_REMOTE}:"',
             '--target-project "${PROJECT}"',
             'incus image alias create "${TARGET_REMOTE}:${local_alias}" "${expected_fingerprint}"',
@@ -81,8 +83,11 @@ class IncusRunnerImageTests(unittest.TestCase):
             "ci-jit instance inventory changed during runner-image preparation",
             "local alias already points to a different fingerprint",
             "exact local alias postcondition failed",
-            'value.get("type") != "container"',
-            'value.get("architecture") != architecture',
+            "source inventory does not expose the exact source ref",
+            "local fingerprint inventory is ambiguous",
+            "local image postcondition inventory is invalid",
+            'image.get("type") != "container"',
+            'image.get("architecture") != architecture',
             '"garm_enabled":false',
             '"runner_registration_performed":false',
         ):
@@ -90,6 +95,7 @@ class IncusRunnerImageTests(unittest.TestCase):
         self.assertNotIn("--reuse", source)
         self.assertNotIn("--copy-aliases", source)
         self.assertNotIn("--auto-update", source)
+        self.assertNotIn("incus image info", source)
 
     def test_script_is_installed_and_covered_by_the_signed_live_contract(self) -> None:
         target = "/usr/local/lib/self-hosted-ci/prepare-incus-runner-image.sh"

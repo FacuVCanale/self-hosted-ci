@@ -39,7 +39,7 @@ UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 ENABLED_STATES = {
-    "incus.service": {"enabled"},
+    "incus.service": {"enabled", "indirect"},
     "self-hosted-ci-boundary-verify.service": {"enabled", "static"},
     "self-hosted-ci-allocation-broker.service": {"enabled"},
     "self-hosted-ci-egress-proxy.service": {"enabled", "static"},
@@ -235,6 +235,7 @@ def validate(
                 "unknown",
             } or state["enabled"] not in {
                 "enabled",
+                "indirect",
                 "disabled",
                 "static",
                 "masked",
