@@ -380,6 +380,8 @@ def utc_now() -> datetime:
 
 GARM_CLEANUP_CONVERGENCE_SECONDS = 600
 GARM_CLI_COMMAND_TIMEOUT_SECONDS = 30
+GARM_CLI_READ_ATTEMPTS = 3
+GARM_CLI_READ_RETRY_SECONDS = 0.25
 # Recovery can consume the full drain window plus bounded 30-second GARM and
 # Incus observations before and after it. Twenty command budgets cover target
 # discovery, disable, drain overshoot, delete, allocation proof, and final
@@ -412,21 +414,48 @@ class GarmCliAllocationDriver:
         self._timeout = GARM_CLEANUP_CONVERGENCE_SECONDS
 
     def _run(self, *args: str) -> Any:
-        result = subprocess.run(
-            [
-                "/usr/local/lib/self-hosted-ci/garm-cli-session.py",
-                "run",
-                "--",
-                "--format",
-                "json",
-                *args,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=GARM_CLI_COMMAND_TIMEOUT_SECONDS,
-        )
-        return json.loads(result.stdout) if result.stdout.strip() else None
+        read_only = args[:2] in {
+            ("scaleset", "list"),
+            ("scaleset", "show"),
+        } or args[:3] == ("scaleset", "runner", "list")
+        attempts = GARM_CLI_READ_ATTEMPTS if read_only else 1
+        deadline = time.monotonic() + GARM_CLI_COMMAND_TIMEOUT_SECONDS
+        for attempt in range(attempts):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RunnerJitError("GARM CLI command failed")
+            try:
+                result = subprocess.run(
+                    [
+                        "/usr/local/lib/self-hosted-ci/garm-cli-session.py",
+                        "run",
+                        "--",
+                        "--format",
+                        "json",
+                        *args,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=remaining,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                if attempt + 1 == attempts:
+                    raise RunnerJitError("GARM CLI command failed") from exc
+            else:
+                if result.returncode == 0:
+                    try:
+                        return (
+                            json.loads(result.stdout)
+                            if result.stdout.strip()
+                            else None
+                        )
+                    except json.JSONDecodeError as exc:
+                        raise RunnerJitError("GARM CLI returned invalid JSON") from exc
+                if attempt + 1 == attempts:
+                    raise RunnerJitError("GARM CLI command failed")
+            time.sleep(GARM_CLI_READ_RETRY_SECONDS)
+        raise AssertionError("unreachable GARM CLI retry state")
 
     def _resolve_target(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         target = self.config["targets"].get(payload["repository_id"])
