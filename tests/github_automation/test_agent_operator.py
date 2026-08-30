@@ -155,6 +155,41 @@ class AgentOperatorTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.store.paths.registry.stat().st_mode), 0o600)
         self.assertNotIn("private", self.store.paths.audit.read_text().lower())
 
+    def test_use_local_upgrades_a_previously_owned_workflow(self):
+        old_content = b"name: local\n# old pin\n"
+        old_digest = hashlib.sha256(old_content).hexdigest()
+        self.operator.workflow = {
+            "sha": "c" * 40,
+            "content": old_content,
+            "content_sha256": old_digest,
+        }
+        with self.store.locked():
+            registry = self.store.load()
+            registry["repositories"]["FacuVCanale/demo"] = {
+                "ci_runner": "local-with-github-fallback",
+                "managed_workflow": ".github/workflows/ci-jit-pilot-child.yml",
+                "workflow_blob_sha": "c" * 40,
+                "workflow_content_sha256": old_digest,
+            }
+            self.store.save(registry)
+
+        def mutate(_argv, **_kwargs):
+            content = self.operator._render_workflow()
+            self.operator.workflow = {
+                "sha": "d" * 40,
+                "content": content,
+                "content_sha256": hashlib.sha256(content).hexdigest(),
+            }
+            return "{}"
+
+        with mock.patch("github_automation.agent_operator.run_checked", side_effect=mutate):
+            result = self.operator.use_local("FacuVCanale/demo", apply=True)
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(
+            self.store.load()["repositories"]["FacuVCanale/demo"]["workflow_blob_sha"],
+            "d" * 40,
+        )
+
     def test_run_local_requires_effective_opt_in_and_never_changes_routing(self):
         blocked = self.operator.run_local("FacuVCanale/demo", 7, apply=True)
         self.assertEqual(blocked["status"], "blocked")

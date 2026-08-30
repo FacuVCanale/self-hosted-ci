@@ -529,12 +529,9 @@ class AgentOperator:
         with self.store.locked():
             registry = self.store.load()
             current = registry["repositories"].get(repository, {"ci_runner": "github"})
-        if workflow is not None and (
-            workflow.get("content_sha256") != expected_digest
-            or (
-                current.get("managed_workflow") is not None
-                and not self._workflow_owned(current, workflow)
-            )
+        if workflow is not None and not (
+            workflow.get("content_sha256") == expected_digest
+            or self._workflow_owned(current, workflow)
         ):
             blockers.append("managed_workflow_ownership_unverified")
         plan = {
