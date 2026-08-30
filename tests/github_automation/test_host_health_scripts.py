@@ -234,6 +234,14 @@ class HostHealthScriptTests(unittest.TestCase):
                     expected, MODULE.validate(payload, SID, "Ubuntu-24.04-CI", now)[1]
                 )
 
+    def test_validator_accepts_incus_indirect_enablement(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        payload = snapshot(now)
+        payload["services"]["incus.service"]["enabled"] = "indirect"
+        self.assertEqual(
+            (0, "healthy"), MODULE.validate(payload, SID, "Ubuntu-24.04-CI", now)
+        )
+
     def test_validator_fails_closed_on_each_garm_jit_boundary(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)
         cases = (
@@ -388,7 +396,7 @@ class HostHealthScriptTests(unittest.TestCase):
             },
             [{"name": "incus_ci_jit", "type": "external", "description": "pinned"}],
             [],
-            {"fingerprint": "a" * 64, "aliases": [{"name": "runner-pinned"}]},
+            [{"fingerprint": "a" * 64, "aliases": [{"name": "runner-pinned"}]}],
         ]
         completed = [
             subprocess.CompletedProcess([], 0, json.dumps(value), "")
@@ -419,6 +427,19 @@ class HostHealthScriptTests(unittest.TestCase):
                     == [str(collector.GARM_SESSION_HELPER), "run", "--"]
                     for call in run.call_args_list[:3]
                 )
+            )
+            self.assertEqual(
+                [
+                    "incus",
+                    "image",
+                    "list",
+                    "runner-pinned",
+                    "--project",
+                    "ci-jit",
+                    "--format",
+                    "json",
+                ],
+                run.call_args_list[3].args[0],
             )
         drifted_responses = [responses[0], responses[1], [{"id": 9}], responses[3]]
         with (
@@ -540,6 +561,9 @@ class HostHealthScriptTests(unittest.TestCase):
             "service identity mismatch",
             "schema_version = 2",
             "supervisor_probe_failed",
+            "Test-LocalTcpEndpoint 22",
+            "Get-HostServices $true",
+            "$WslProbeSucceeded -and $wsl.status -eq \"absent\"",
         ):
             self.assertIn(token, source)
         for forbidden in (

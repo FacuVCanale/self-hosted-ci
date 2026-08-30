@@ -23,6 +23,16 @@ SERVICES = (
     "self-hosted-ci-network-policy.service",
 )
 
+ENABLED_STATES = {
+    "incus.service": {"enabled", "indirect"},
+    "self-hosted-ci-boundary-verify.service": {"enabled", "static"},
+    "self-hosted-ci-allocation-broker.service": {"enabled"},
+    "self-hosted-ci-egress-proxy.service": {"enabled", "static"},
+    "self-hosted-ci-garm.service": {"enabled"},
+    "self-hosted-ci-health-heartbeat.timer": {"enabled"},
+    "self-hosted-ci-network-policy.service": {"enabled", "static"},
+}
+
 GARM_HEALTH_STATE = Path("/etc/self-hosted-ci/garm/health-state.json")
 GARM_CONFIG = Path("/etc/self-hosted-ci/garm/config.toml")
 GARM_BINARY = Path("/usr/local/bin/garm")
@@ -209,7 +219,7 @@ def garm_configuration_state() -> dict[str, bool | None]:
             [
                 "incus",
                 "image",
-                "info",
+                "list",
                 payload["image"]["alias"],
                 "--project",
                 "ci-jit",
@@ -223,7 +233,7 @@ def garm_configuration_state() -> dict[str, bool | None]:
         )
         if image_result.returncode != 0:
             raise ValueError("Incus image query failed")
-        live_image = json.loads(image_result.stdout)
+        live_images = json.loads(image_result.stdout)
     except (
         OSError,
         subprocess.TimeoutExpired,
@@ -232,6 +242,13 @@ def garm_configuration_state() -> dict[str, bool | None]:
         json.JSONDecodeError,
     ):
         return unknown
+    if (
+        not isinstance(live_images, list)
+        or len(live_images) != 1
+        or not isinstance(live_images[0], dict)
+    ):
+        return unknown
+    live_image = live_images[0]
     if (
         not isinstance(controller, dict)
         or controller.get("callback_url") != "http://10.254.0.1:8080/api/v1/callbacks"
@@ -396,17 +413,7 @@ def observe(distro: str, maximum_age: int) -> dict[str, object]:
     for name in SERVICES:
         if services[name]["active"] != "active":
             reasons.append(f"service_not_active:{name}")
-        if services[name]["enabled"] not in (
-            {"enabled"}
-            if name
-            in {
-                "incus.service",
-                "self-hosted-ci-garm.service",
-                "self-hosted-ci-allocation-broker.service",
-                "self-hosted-ci-health-heartbeat.timer",
-            }
-            else {"enabled", "static"}
-        ):
+        if services[name]["enabled"] not in ENABLED_STATES[name]:
             reasons.append(f"service_not_enabled:{name}")
     reasons = list(dict.fromkeys(reasons))
     return {

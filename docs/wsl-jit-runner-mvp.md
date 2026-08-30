@@ -172,11 +172,13 @@ the service account again to invalidate Task Scheduler's stored credential:
   -AcknowledgeOneTimePasswordRotation
 ```
 
-Only after that succeeds, install the persistent supervisor. It first applies
-the SFTP-only sshd fence and only then enables the reader. This ordering is
-mandatory: installing prerequisites after the persistent password task would
-rotate and invalidate that task's credential, so the prerequisite installer
-refuses when `SelfHostedCI-Health-Supervisor` exists. A missing collector,
+Only after the health prerequisites, all JIT bootstrap installers, activation,
+and bootstrap canaries succeed, install the persistent supervisor as the final
+service-account password rotation. It first applies the SFTP-only sshd fence
+and only then enables the reader. This ordering is mandatory: any later
+one-shot installer or collector that rotates the service-account password
+would invalidate the persistent task's stored credential. If one must be rerun,
+uninstall the supervisor first and reinstall it last. A missing collector,
 stale heartbeat, inactive timer, or probe error rolls back the Windows task and
 invalidates its credential:
 

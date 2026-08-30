@@ -58,7 +58,15 @@ Aplicar sólo después de revisar el plan:
 Esperar `status: installed`, dos heartbeats distintos, tarea one-shot ausente,
 credencial temporal invalidada y `runner_registration_changed: false`.
 
-Después instalar el supervisor persistente:
+No instalar todavía el supervisor persistente. Los instaladores JIT y los
+canaries de bootstrap usan tareas one-shot que rotan la contraseña de la cuenta
+de servicio para invalidar sus credenciales temporales. Cualquiera de esas
+rotaciones invalidaría también la credencial almacenada de un supervisor ya
+instalado.
+
+Completar primero todo el bootstrap JIT, la activación y los canaries. Instalar
+el supervisor persistente como **último paso que rota la contraseña de la
+cuenta de servicio**:
 
 ```powershell
 & .\install-health-supervisor.ps1 `
@@ -73,6 +81,13 @@ Después instalar el supervisor persistente:
 Validar desde la Mac con `scripts/host/check-self-hosted-ci-health.sh`. Debe
 devolver `0`. Un snapshot inválido, vencido o cruzado de identidad sólo vuelve
 al sistema no elegible; nunca otorga permiso implícito para ejecutar CI.
+
+Después de instalar el supervisor no ejecutar ningún instalador o recolector
+one-shot que rote la contraseña de `selfhosted-ci-svc`. Si fuera imprescindible
+repetir uno, desinstalar primero el supervisor y reinstalarlo al final. Tras un
+reboot, comprobar que `SelfHostedCI-Health-Supervisor` esté `Running`, que su
+último resultado sea `267009` (`SCHED_S_TASK_RUNNING`) y que dos snapshots
+consecutivos tengan timestamps crecientes sin mantener WSL abierta manualmente.
 
 ## Runtime JIT
 
@@ -308,8 +323,8 @@ guardalo como un SHA-256 lowercase de 64 caracteres (no dependas de volver a
 resolver el alias remoto más tarde):
 
 ```bash
-incus image info images:ubuntu/24.04/cloud --format json | \
-  python3 -c 'import json,sys; print(json.load(sys.stdin)["fingerprint"])'
+incus image list images:ubuntu/24.04/cloud --format json | \
+  python3 -c 'import json,sys; rows=json.load(sys.stdin); assert len(rows)==1; print(rows[0]["fingerprint"])'
 ```
 
 El plan no consulta el remote ni modifica el host:
