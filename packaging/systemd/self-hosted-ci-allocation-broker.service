@@ -22,6 +22,8 @@ RestrictSUIDSGID=true
 LockPersonality=true
 RestrictRealtime=true
 UMask=0077
+RuntimeDirectory=self-hosted-ci
+RuntimeDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target
