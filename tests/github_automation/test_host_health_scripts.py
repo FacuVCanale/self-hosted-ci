@@ -564,8 +564,26 @@ class HostHealthScriptTests(unittest.TestCase):
             "Test-LocalTcpEndpoint 22",
             "Get-HostServices $true",
             "$WslProbeSucceeded -and $wsl.status -eq \"absent\"",
+            "Get-CoherentHeartbeat",
+            "WSL heartbeat timestamp is ahead of the Windows clock",
+            'if ([string]$reason -ne "heartbeat_not_fresh")',
+            'if ($heartbeat.status -ne "fresh")',
         ):
             self.assertIn(token, source)
+        self.assertIn(
+            '"incus.service", "self-hosted-ci-allocation-broker.service"', source
+        )
+        self.assertLess(
+            source.index("$hostServices = Get-HostServices $true"),
+            source.index("$generatedAt = [DateTimeOffset]::UtcNow"),
+        )
+        self.assertLess(
+            source.index("$generatedAt = [DateTimeOffset]::UtcNow"),
+            source.index("$heartbeat = Get-CoherentHeartbeat"),
+        )
+        self.assertIn(
+            "return New-FailClosedSnapshot ([DateTimeOffset]::UtcNow)", source
+        )
         for forbidden in (
             "config.sh",
             "Register-ScheduledTask",
