@@ -262,6 +262,36 @@ class WorkerGitHubClient:
             raise WorkerAuthorityError("pull request identity mismatch")
         return value
 
+    def potential_merge_commit(
+        self, number: int, token: WorkerInstallationToken
+    ) -> str:
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+            raise WorkerAuthorityError("pull request number must be positive")
+        owner, name = self.authority.repository.split("/", 1)
+        value = self._token_json(
+            "POST",
+            "/graphql",
+            token,
+            200,
+            {
+                "query": (
+                    "query($owner:String!,$name:String!,$number:Int!){"
+                    "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+                    "potentialMergeCommit{oid}}}}"
+                ),
+                "variables": {"owner": owner, "name": name, "number": number},
+            },
+        )
+        try:
+            oid = value["data"]["repository"]["pullRequest"]["potentialMergeCommit"]["oid"]
+        except (KeyError, TypeError) as exc:
+            raise WorkerAuthorityError(
+                "GitHub potential merge commit response is unavailable"
+            ) from exc
+        if not isinstance(oid, str) or not _SHA.fullmatch(oid):
+            raise WorkerAuthorityError("GitHub potential merge commit is invalid")
+        return oid
+
     def workflow(self, token: WorkerInstallationToken) -> Mapping[str, Any]:
         workflow = quote(self.authority.workflow_id, safe="")
         value = self._token_json(

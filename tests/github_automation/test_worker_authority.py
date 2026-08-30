@@ -119,6 +119,30 @@ class WorkerAuthorityTests(unittest.TestCase):
             self.assertTrue(call[2]["Authorization"].startswith("Bearer "))
         self.assertEqual(1, len(signer.inputs))
 
+    def test_potential_merge_commit_uses_exact_graphql_identity(self) -> None:
+        client, token, transport, _ = self.authenticate(
+            *auth_responses(),
+            response(
+                200,
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "potentialMergeCommit": {"oid": "d" * 40}
+                            }
+                        }
+                    }
+                },
+            ),
+        )
+        self.assertEqual("d" * 40, client.potential_merge_commit(17, token))
+        method, url, _, body = transport.calls[-1]
+        self.assertEqual(("POST", API_ROOT + "/graphql"), (method, url))
+        self.assertEqual(
+            {"owner": "FacuVCanale", "name": "selected-repo", "number": 17},
+            body["variables"],
+        )
+
     def test_app_installation_and_token_drift_each_fail_closed(self) -> None:
         mutations = (
             {"app": lambda value: value.update(id=999)},
