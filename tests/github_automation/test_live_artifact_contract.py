@@ -38,8 +38,11 @@ class LiveArtifactContractTests(unittest.TestCase):
     def test_all_staged_artifact_kinds_are_accepted_by_the_verifier(self):
         stager = load_stager()
         verifier = load_verifier()
-        accepted = {"script", "python-module", "unit", "public-config", "pinned-binary"}
-        self.assertTrue({item[3] for item in stager.PUBLIC_ARTIFACTS}.issubset(accepted))
+        self.assertTrue(
+            {item[3] for item in stager.PUBLIC_ARTIFACTS}.issubset(
+                verifier.ALLOWED_ARTIFACT_KINDS
+            )
+        )
 
     def verify_fixture(self, verifier, bundle, measurement, prefix):
         return verifier.verify_contract(
