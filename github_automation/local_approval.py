@@ -75,6 +75,8 @@ class WorkerAuthorityResolver:
         self.client.workflow(token)
         base = pr.get("base", {}).get("sha")
         merge = pr.get("merge_commit_sha")
+        if not isinstance(merge, str) or not re.fullmatch(r"[0-9a-f]{40}", merge):
+            merge = self.client.potential_merge_commit(pr_number, token)
         if (
             not isinstance(base, str)
             or not re.fullmatch(r"[0-9a-f]{40}", base)
