@@ -179,10 +179,26 @@ class CanaryMatrixWrapperTests(unittest.TestCase):
         self.assertLess(cleanup, unregister)
 
     def test_task_wait_requires_observing_the_new_run(self):
-        self.assertIn("$before = Get-ScheduledTaskInfo", self.source)
+        self.assertIn('Invoke-SchedulerObservation "read task info before start"', self.source)
         self.assertIn("$runObserved = $false", self.source)
         self.assertIn("$info.LastRunTime -gt $before.LastRunTime", self.source)
         self.assertIn('$runObserved -and $task.State -ne "Running"', self.source)
+
+    def test_scheduler_observation_retries_are_bounded_and_never_restart_work(self):
+        observation = self.source.split("function Invoke-SchedulerObservation", 1)[1].split(
+            "function Stop-And-Wait-OneShot", 1
+        )[0]
+        self.assertIn("$attempt -le 5", observation)
+        self.assertIn("bounded read-only retries", observation)
+        self.assertIn("hresult=", observation)
+        self.assertNotIn("Start-ScheduledTask", observation)
+
+    def test_failure_diagnostics_preserve_safe_exception_location(self):
+        diagnostics = self.source.split("function Save-FailureDiagnostics", 1)[1].split(
+            'if ($env:OS -ne "Windows_NT"', 1
+        )[0]
+        for field in ("exception_type", "hresult", "script_name", "script_line", "position"):
+            self.assertIn(field, diagnostics)
 
 
 if __name__ == "__main__":

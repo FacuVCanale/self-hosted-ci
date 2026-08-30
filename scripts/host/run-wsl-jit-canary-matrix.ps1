@@ -235,17 +235,33 @@ exit `$workerExitCode
 
 function Wait-OneShot([int]$WaitSeconds = $TimeoutSeconds) {
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds($WaitSeconds)
-    $before = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
+    $before = Invoke-SchedulerObservation "read task info before start" { Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop }
     Start-ScheduledTask -TaskName $TaskName
     $runObserved = $false
     do {
         Start-Sleep -Seconds 2
-        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-        $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
+        $task = Invoke-SchedulerObservation "read task state while waiting" { Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop }
+        $info = Invoke-SchedulerObservation "read task info while waiting" { Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop }
         if ($info.LastRunTime -gt $before.LastRunTime) { $runObserved = $true }
         if ($runObserved -and $task.State -ne "Running") { return [int64]$info.LastTaskResult }
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
     throw "canary one-shot task timed out"
+}
+
+function Invoke-SchedulerObservation([string]$Operation, [scriptblock]$Action) {
+    $failures = [Collections.Generic.List[string]]::new()
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try { return & $Action }
+        catch {
+            $exception = $_.Exception
+            $hresult = "0x{0:X8}" -f ([uint32]$exception.HResult)
+            $failures.Add("attempt=$attempt type=$($exception.GetType().FullName) hresult=$hresult message=$($exception.Message)")
+            if ($attempt -eq 5) {
+                throw "$Operation failed after bounded read-only retries: $($failures -join ' | ')"
+            }
+            Start-Sleep -Milliseconds (200 * $attempt)
+        }
+    }
 }
 
 function Stop-And-Wait-OneShot {
@@ -343,14 +359,22 @@ function Write-SanitizedDiagnosticCopy([string]$Source, [string]$Destination) {
     [IO.File]::WriteAllText($Destination, $content, [Text.UTF8Encoding]::new($false))
 }
 
-function Save-FailureDiagnostics([string]$Failure, [Security.Principal.SecurityIdentifier]$ServiceSid, [string]$Phase) {
+function Save-FailureDiagnostics([string]$Failure, [Security.Principal.SecurityIdentifier]$ServiceSid, [string]$Phase, [Management.Automation.ErrorRecord]$ErrorRecord) {
     $bundle = Join-Path $DiagnosticsRoot ([DateTimeOffset]::UtcNow.ToString("yyyyMMddTHHmmssZ") + "-" + [Guid]::NewGuid())
     [void](New-Item -ItemType Directory -Path $bundle -Force)
     Set-Acl -LiteralPath $bundle -AclObject (New-ProtectedAcl $ServiceSid)
     foreach ($entry in @(@{p=$StdoutPath;n="worker.stdout.log"}, @{p=$StderrPath;n="worker.stderr.log"}, @{p=$ResultPath;n="result.json"})) {
         Write-SanitizedDiagnosticCopy $entry.p (Join-Path $bundle $entry.n)
     }
-    $safe = [ordered]@{observed_at=[DateTimeOffset]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");task_name=$TaskName;service_sid=$ServiceSid.Value;distro=$DistroName;bundle_sha256=$bundleSha256;bundle_bytes=$bundleLength;nonce=$ExpectedCanaryNonce;phase=$Phase;failure=$Failure;production_activation_changed=$false;outbound_worker_started=$false}
+    $exceptionType = $null; $hresult = $null; $scriptName = $null; $scriptLine = $null; $position = $null
+    if ($ErrorRecord) {
+        $exceptionType = $ErrorRecord.Exception.GetType().FullName
+        $hresult = "0x{0:X8}" -f ([uint32]$ErrorRecord.Exception.HResult)
+        $scriptName = $ErrorRecord.InvocationInfo.ScriptName
+        $scriptLine = $ErrorRecord.InvocationInfo.ScriptLineNumber
+        $position = $ErrorRecord.InvocationInfo.PositionMessage
+    }
+    $safe = [ordered]@{observed_at=[DateTimeOffset]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");task_name=$TaskName;service_sid=$ServiceSid.Value;distro=$DistroName;bundle_sha256=$bundleSha256;bundle_bytes=$bundleLength;nonce=$ExpectedCanaryNonce;phase=$Phase;failure=$Failure;exception_type=$exceptionType;hresult=$hresult;script_name=$scriptName;script_line=$scriptLine;position=$position;production_activation_changed=$false;outbound_worker_started=$false}
     [IO.File]::WriteAllText((Join-Path $bundle "failure.json"), ($safe | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
     return $bundle
 }
@@ -403,7 +427,7 @@ try {
 }
 catch {
     $operationFailure = $_.Exception.Message
-    $operationDiagnostics = Save-FailureDiagnostics $operationFailure $service.SID $phase
+    $operationDiagnostics = Save-FailureDiagnostics $operationFailure $service.SID $phase $_
 }
 finally {
     $cleanupFailures = [Collections.Generic.List[string]]::new()
@@ -445,7 +469,7 @@ finally {
     }
     $temporaryPassword = $null
     if ($cleanupFailures.Count -gt 0 -and -not $operationDiagnostics) {
-        try { $operationDiagnostics = Save-FailureDiagnostics ($cleanupFailures -join "; ") $service.SID $phase }
+        try { $operationDiagnostics = Save-FailureDiagnostics ($cleanupFailures -join "; ") $service.SID $phase $null }
         catch { $cleanupFailures.Add("diagnostic preservation: " + $_.Exception.Message) }
     }
     if (Test-Path -LiteralPath $Root) {
@@ -457,7 +481,7 @@ finally {
     }
     if ($cleanupFailures.Count -gt 0) {
         if (-not $operationDiagnostics) {
-            try { $operationDiagnostics = Save-FailureDiagnostics ($cleanupFailures -join "; ") $service.SID $phase }
+            try { $operationDiagnostics = Save-FailureDiagnostics ($cleanupFailures -join "; ") $service.SID $phase $null }
             catch { $cleanupFailures.Add("diagnostic preservation: " + $_.Exception.Message) }
         }
         throw "JIT canary cleanup postconditions failed; diagnostics: $operationDiagnostics; failures: $($cleanupFailures -join '; ')"
