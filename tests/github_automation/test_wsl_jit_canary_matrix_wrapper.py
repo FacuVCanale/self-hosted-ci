@@ -96,10 +96,28 @@ class CanaryMatrixWrapperTests(unittest.TestCase):
 
     def test_reboot_requires_checkpoint_then_resumes_same_nonce_and_bundle(self):
         checkpoint = self.source.index('status -ne "reboot-checkpoint"')
-        terminate = self.source.index("--terminate $DistroName", checkpoint)
         resume = self.source.index('Write-Worker "resume"')
-        self.assertLess(checkpoint, terminate)
-        self.assertLess(terminate, resume)
+        self.assertLess(checkpoint, resume)
+        parent = self.source[checkpoint:resume]
+        self.assertNotIn("--terminate", parent)
+
+    def test_reboot_termination_runs_inside_service_identity_worker(self):
+        worker_start = self.source.index("function Write-Worker")
+        worker_end = self.source.index("function Wait-OneShot", worker_start)
+        worker = self.source[worker_start:worker_end]
+        persisted = worker.index("WriteAllText('$ResultPath'")
+        guarded = worker.index("`$workerExitCode -eq 75 -and '$Phase' -eq 'initial'")
+        checkpoint = worker.index("`$result.status -ne 'reboot-checkpoint'", guarded)
+        nonce = worker.index("`$result.nonce -ne '$ExpectedCanaryNonce'", checkpoint)
+        terminate = worker.index("--terminate '$DistroName'", nonce)
+        preserved_exit = worker.index("exit `$workerExitCode", terminate)
+        self.assertLess(persisted, guarded)
+        self.assertLess(guarded, checkpoint)
+        self.assertLess(checkpoint, nonce)
+        self.assertLess(nonce, terminate)
+        self.assertLess(terminate, preserved_exit)
+        self.assertIn("`$workerExitCode = `$process.ExitCode", worker)
+        self.assertIn("service identity failed to terminate", worker)
         self.assertIn("args=(execute --config /etc/self-hosted-ci/canary-runtime.json", self.source)
         self.assertIn("$ExpectedCanaryNonce", self.source)
 

@@ -209,12 +209,18 @@ if (-not `$process.Start()) { throw 'failed to start WSL canary worker' }
 try { `$input.CopyTo(`$process.StandardInput.BaseStream); `$process.StandardInput.Close() } finally { `$input.Dispose() }
 `$stdout = `$process.StandardOutput.ReadToEnd(); `$stderr = `$process.StandardError.ReadToEnd()
 `$process.WaitForExit()
+`$workerExitCode = `$process.ExitCode
 [IO.File]::WriteAllText('$StdoutPath', `$stdout, [Text.UTF8Encoding]::new(`$false))
 [IO.File]::WriteAllText('$StderrPath', `$stderr, [Text.UTF8Encoding]::new(`$false))
 `$last = @(`$stdout -split "`r?`n" | Where-Object { `$_.Trim() })[-1]
-try { `$result = `$last | ConvertFrom-Json -ErrorAction Stop } catch { `$result = [ordered]@{status='failed';exit_code=`$process.ExitCode} }
+try { `$result = `$last | ConvertFrom-Json -ErrorAction Stop } catch { `$result = [ordered]@{status='failed';exit_code=`$workerExitCode} }
 [IO.File]::WriteAllText('$ResultPath', (`$result | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new(`$false))
-exit `$process.ExitCode
+if (`$workerExitCode -eq 75 -and '$Phase' -eq 'initial') {
+    if (`$result.status -ne 'reboot-checkpoint' -or `$result.nonce -ne '$ExpectedCanaryNonce') { throw 'reboot worker exit was not bound to the exact durable checkpoint' }
+    & '$env:SystemRoot\System32\wsl.exe' --terminate '$DistroName'
+    if (`$LASTEXITCODE -ne 0) { throw 'service identity failed to terminate the dedicated WSL distro at reboot checkpoint' }
+}
+exit `$workerExitCode
 "@
     [IO.File]::WriteAllText($WorkerPath, $worker, [Text.UTF8Encoding]::new($false))
 }
@@ -379,8 +385,6 @@ try {
         $checkpoint = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json -ErrorAction Stop
         if ($checkpoint.status -ne "reboot-checkpoint" -or $checkpoint.nonce -ne $ExpectedCanaryNonce) { throw "reboot exit was not bound to the durable canary checkpoint" }
         $phase = "resume"
-        & "$env:SystemRoot\System32\wsl.exe" --terminate $DistroName
-        if ($LASTEXITCODE -ne 0) { throw "failed to terminate the dedicated WSL distro at reboot checkpoint" }
         Write-Worker "resume"
         $result = Wait-OneShot
     }
