@@ -346,16 +346,20 @@ class AllocationBrokerTests(unittest.TestCase):
         )
 
     def test_broker_units_wait_for_authenticated_garm_readiness(self):
-        for name in (
-            "self-hosted-ci-allocation-broker.service",
-            "self-hosted-ci-canary-broker.service",
-        ):
-            source = (Path(__file__).parents[2] / "packaging/systemd" / name).read_text()
-            self.assertIn("garm-cli-session.py ensure", source)
-            self.assertIn("&& /usr/local/lib/self-hosted-ci/garm-allocation-broker.py recover", source)
-            self.assertIn('[ "$i" -lt 60 ]', source)
+        root = Path(__file__).parents[2] / "packaging/systemd"
+        production = (root / "self-hosted-ci-allocation-broker.service").read_text()
+        canary = (root / "self-hosted-ci-canary-broker.service").read_text()
+        self.assertIn("garm-cli-session.py ensure", production)
+        self.assertIn("socket.create_connection", canary)
+        for source in (production, canary):
             self.assertIn("Environment=INCUS_CONF=/run/self-hosted-ci/incus-client", source)
             self.assertIn("/run/self-hosted-ci", source)
+        self.assertIn(
+            "&& /usr/local/lib/self-hosted-ci/garm-allocation-broker.py recover",
+            production,
+        )
+        self.assertIn('[ "$i" -lt 60 ]', production)
+        self.assertNotIn("garm-allocation-broker.py recover", canary)
 
     def test_hook_uses_only_fixed_bridge_local_broker_before_steps(self):
         source = (

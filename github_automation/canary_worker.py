@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import ssl
 import stat
 import subprocess
@@ -1276,6 +1277,9 @@ class CanaryRuntime:
         boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
         proc1_stat_path: Path = Path("/proc/1/stat"),
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        monotonic: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+        connector: Callable[..., Any] = socket.create_connection,
     ):
         self.config = config
         self.authorization = authorization
@@ -1289,6 +1293,9 @@ class CanaryRuntime:
         self.boot_id_path = boot_id_path
         self.proc1_stat_path = proc1_stat_path
         self.now = now
+        self.monotonic = monotonic
+        self.sleeper = sleeper
+        self.connector = connector
         self._lock = None
 
     def _distro_boot_identity(self) -> str:
@@ -1316,6 +1323,27 @@ class CanaryRuntime:
             "unknown",
             "",
         }
+
+    def _wait_for_garm_listener(self, timeout: float = 90.0) -> None:
+        deadline = self.monotonic() + timeout
+        while True:
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                raise CanaryRuntimeError("GARM loopback listener readiness timed out")
+            try:
+                connection = self.connector(
+                    ("127.0.0.1", 9997), timeout=min(0.25, remaining)
+                )
+            except OSError:
+                remaining = deadline - self.monotonic()
+                if remaining <= 0:
+                    raise CanaryRuntimeError(
+                        "GARM loopback listener readiness timed out"
+                    )
+                self.sleeper(min(0.25, remaining))
+                continue
+            connection.close()
+            return
 
     def acquire(self) -> None:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
@@ -1541,10 +1569,16 @@ class CanaryRuntime:
         )
         self.secret_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         store.transition("services-starting")
-        self._run("systemctl", "start", "self-hosted-ci-canary.target", timeout=180)
+        if reboot_allocation_id is None:
+            self._run("systemctl", "start", "self-hosted-ci-canary.target", timeout=180)
+        else:
+            for unit in CANARY_UNITS[:-1]:
+                self._run("systemctl", "start", unit, timeout=180)
+            self._wait_for_garm_listener()
         broker_inventory = json.loads(
             self._run(
-                "/usr/local/lib/self-hosted-ci/garm-allocation-broker.py", "recover"
+                "/usr/local/lib/self-hosted-ci/garm-allocation-broker.py",
+                "recover",
             )
         )
         expected_recovered = [] if reboot_allocation_id is None else [reboot_allocation_id]
@@ -1553,6 +1587,8 @@ class CanaryRuntime:
             "runtime_empty": True,
         }:
             raise CanaryRuntimeError("prepared canary runtime inventory is not empty")
+        if reboot_allocation_id is not None:
+            self._run("systemctl", "start", CANARY_UNITS[-1], timeout=180)
         store.transition("ready")
 
     def run_matrix(self, store: CanaryStateStore, driver: CanaryScenarioDriver) -> None:
