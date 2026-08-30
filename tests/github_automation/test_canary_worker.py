@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from github_automation.canary_worker import (
     BrokerCanaryScenarioDriver,
+    BROKER_RECOVERY_TIMEOUT_SECONDS,
     CANARY_JOB_TIMEOUT_SECONDS,
     CANARY_UNITS,
     SCENARIOS,
@@ -27,7 +28,11 @@ from github_automation.canary_worker import (
 )
 from github_automation.crypto import canonicalize_jcs, spki_fingerprint
 from github_automation.runner_jit import SqliteAllocationLedger, sign_allocation
-from github_automation.runner_jit_broker import AllocationBroker, JobStartedContext
+from github_automation.runner_jit_broker import (
+    GARM_RECOVERY_END_TO_END_SECONDS,
+    AllocationBroker,
+    JobStartedContext,
+)
 from tests.github_automation.test_runner_jit import payload, reservation
 from tests.github_automation.test_runner_jit_broker import FakeGarm, FakeLiveJobVerifier
 from tests.github_automation.test_canary_boundary import (
@@ -321,6 +326,7 @@ class CanaryStateStoreTests(unittest.TestCase):
         class RecordingRuntime(CanaryRuntime):
             def __init__(self, root):
                 self.commands = []
+                self.command_timeouts = []
                 super().__init__(
                     {},
                     AUTH,
@@ -335,6 +341,7 @@ class CanaryStateStoreTests(unittest.TestCase):
 
             def _run(self, *argv, timeout=60):
                 self.commands.append(argv)
+                self.command_timeouts.append((argv, timeout))
                 if argv[-1] == "recover":
                     return json.dumps(
                         {"recovered": ["allocation-reboot"], "runtime_empty": True}
@@ -377,6 +384,24 @@ class CanaryStateStoreTests(unittest.TestCase):
                 runtime.commands.count(
                     ("/usr/local/lib/self-hosted-ci/garm-allocation-broker.py", "recover")
                 ),
+            )
+            self.assertIn(
+                (
+                    (
+                        "/usr/local/lib/self-hosted-ci/garm-allocation-broker.py",
+                        "recover",
+                    ),
+                    BROKER_RECOVERY_TIMEOUT_SECONDS,
+                ),
+                runtime.command_timeouts,
+            )
+            self.assertGreaterEqual(
+                BROKER_RECOVERY_TIMEOUT_SECONDS,
+                GARM_RECOVERY_END_TO_END_SECONDS + 60,
+            )
+            self.assertGreater(
+                BROKER_RECOVERY_TIMEOUT_SECONDS,
+                GARM_RECOVERY_END_TO_END_SECONDS,
             )
             self.assertNotIn(
                 ("systemctl", "start", "self-hosted-ci-canary.target"),

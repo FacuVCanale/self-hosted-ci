@@ -18,6 +18,8 @@ from github_automation.runner_jit_broker import (
     AllocationBroker,
     ExternalLiveWorkflowJobVerifier,
     GARM_CLEANUP_CONVERGENCE_SECONDS,
+    GARM_CLI_COMMAND_TIMEOUT_SECONDS,
+    GARM_RECOVERY_END_TO_END_SECONDS,
     GarmCliAllocationDriver,
     JobStartedContext,
 )
@@ -114,6 +116,11 @@ class DelayedCleanupGarm(FakeGarm):
 class AllocationBrokerTests(unittest.TestCase):
     def test_garm_cleanup_window_covers_slow_reconciliation_loops(self):
         self.assertGreaterEqual(GARM_CLEANUP_CONVERGENCE_SECONDS, 600)
+        self.assertEqual(
+            GARM_RECOVERY_END_TO_END_SECONDS,
+            GARM_CLEANUP_CONVERGENCE_SECONDS
+            + (20 * GARM_CLI_COMMAND_TIMEOUT_SECONDS),
+        )
 
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
