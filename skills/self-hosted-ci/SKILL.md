@@ -27,6 +27,7 @@ Resolve a missing repository from the current checkout. Resolve a missing PR onl
 3. If `use-local` reports `selected_repository_authority_missing`, stop the mutation and explain that the exact repository still needs GitHub App selection plus host authority configuration. Do not claim success, select all repositories, or broaden authority to an organization.
 4. Report the effective state from a final `self-hosted-ci status OWNER/REPO`, not merely the desired state or a successful file write.
 5. Treat `run-local` approval as exact to repository, PR, and the head SHA resolved by the host. A new commit requires a new run request.
+6. `pending_reconciled_during_this_status_call` is an event flag, not a health flag. `false` only means this particular read did not need to reconcile a pending transaction; it is not a warning when `pending_operation` is null.
 
 ## Boundaries
 
