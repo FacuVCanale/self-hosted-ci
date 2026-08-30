@@ -178,6 +178,35 @@ class CanaryMatrixWrapperTests(unittest.TestCase):
         unregister = self.source.rindex("Unregister-ScheduledTask -TaskName $TaskName")
         self.assertLess(cleanup, unregister)
 
+    def test_cleanup_uses_a_fresh_task_registration_after_resume(self):
+        final = self.source[self.source.index(
+            "$cleanupFailures = [Collections.Generic.List[string]]::new()"
+        ):]
+        stop = final.index("Stop-And-Wait-OneShot")
+        unregister = final.index(
+            "Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop",
+            stop,
+        )
+        write_cleanup = final.index("Write-CleanupWorker", unregister)
+        register = final.index("Register-OneShot", write_cleanup)
+        wait = final.index("Wait-OneShot 300", register)
+        self.assertLess(stop, unregister)
+        self.assertLess(unregister, write_cleanup)
+        self.assertLess(write_cleanup, register)
+        self.assertLess(register, wait)
+
+    def test_exact_terminal_receipt_can_resolve_scheduler_exit_race(self):
+        terminal_read = self.source.index(
+            "$terminal = Get-Content -LiteralPath $ResultPath -Raw"
+        )
+        result_failure = self.source.index(
+            'throw "canary matrix task failed (result=$result)"'
+        )
+        self.assertLess(terminal_read, result_failure)
+        guard = self.source[terminal_read:result_failure]
+        self.assertIn('$result -ne 0 -and -not ($terminal.status -eq "terminal"', guard)
+        self.assertIn("$terminal.runtime_empty -eq $true", guard)
+
     def test_task_wait_requires_observing_the_new_run(self):
         self.assertIn('Invoke-SchedulerObservation "read task info before start"', self.source)
         self.assertIn("$runObserved = $false", self.source)

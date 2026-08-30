@@ -431,8 +431,10 @@ try {
         Write-Worker "resume"
         $result = Wait-OneShot
     }
-    if ($result -ne 0) { throw "canary matrix task failed (result=$result)" }
     $terminal = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json -ErrorAction Stop
+    if ($result -ne 0 -and -not ($terminal.status -eq "terminal" -and $terminal.nonce -eq $ExpectedCanaryNonce -and $terminal.runtime_empty -eq $true -and $terminal.production_activation_changed -eq $false -and $terminal.outbound_worker_started -eq $false)) {
+        throw "canary matrix task failed (result=$result)"
+    }
     if ($terminal.status -ne "terminal" -or $terminal.nonce -ne $ExpectedCanaryNonce -or $terminal.runtime_empty -ne $true -or $terminal.production_activation_changed -ne $false -or $terminal.outbound_worker_started -ne $false) { throw "canary terminal receipt is not exact" }
     $successReceipt = [ordered]@{status="terminal";nonce=$ExpectedCanaryNonce;scenarios=@("success","failure","cancel","timeout","force-cancel","reboot");runtime_empty=$true;distro_restarted=($phase -eq "resume");one_shot_task_absent=$true;stored_task_credential_invalidated=$true;staging_absent=$true;production_activation_changed=$false;required_check_changed=$false;outbound_worker_started=$false}
 }
@@ -445,7 +447,11 @@ finally {
     if ($registered -and $passwordApplied) {
         try {
             Stop-And-Wait-OneShot
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+            $registered = $false
             Write-CleanupWorker
+            [void](Register-OneShot "$env:COMPUTERNAME\$ServiceAccount" $temporaryPassword)
+            $registered = $true
             $cleanupResult = Wait-OneShot 300
             if ($cleanupResult -ne 0) { throw "WSL canary cleanup task failed (result=$cleanupResult)" }
             $cleanupReceipt = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json -ErrorAction Stop
