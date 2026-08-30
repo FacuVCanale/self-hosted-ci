@@ -8,9 +8,9 @@ The pilot package binds one selected repository, open pull request, exact defaul
 
 Before checkout, the validation job uses `pull_requests:read` and re-reads the exact repository, PR base/head, and fixed active pilot workflow. Hosted execution uses `ubuntu-24.04`. Local execution uses only the allocation label and the normal fail-closed JIT job-started hook.
 
-Both paths fetch GitHub's canonical `refs/pull/<number>/merge`, require its SHA to equal `tested_merge_sha`, require exactly two parents in the order `base_sha`, `head_sha`, and check it out detached before executing `make test`. The worker obtains that same merge-ref SHA when building the package; it does not confuse it with a locally synthesized commit that has different metadata. Any ref movement or parent mismatch blocks the workload.
+Both paths fetch GitHub's canonical `refs/pull/<number>/merge`, require its SHA to equal `tested_merge_sha`, require exactly two parents in the order `base_sha`, `head_sha`, and check it out detached before executing `python3 scripts/check-public-distribution.py`. The worker obtains that same merge-ref SHA when building the package; it does not confuse it with a locally synthesized commit that has different metadata. Any ref movement or parent mismatch blocks the workload.
 
-`make test` is the initial command profile only for the `self-hosted-ci` sandbox. Before piloting Overworld or another selected repository, define and review that repository's bounded command profile, required toolchain and network allowlist; do not assume `make test` is portable.
+The dependency-free public-distribution check is the initial infrastructure smoke profile only for the `self-hosted-ci` sandbox. Before piloting the full suite, Overworld, or another selected repository, define and review that repository's bounded command profile, pre-baked toolchain and network allowlist; do not assume a project command is portable or allow package installation during an untrusted job.
 
 ## Terminal cleanup
 
