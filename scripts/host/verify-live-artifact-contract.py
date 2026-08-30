@@ -68,6 +68,7 @@ REQUIRED_LIVE_TARGETS = {
     "/usr/local/lib/self-hosted-ci/github_automation/bootstrap_boundary.py",
     "/usr/local/lib/self-hosted-ci/github_automation/canary_boundary.py",
     "/usr/local/lib/self-hosted-ci/github_automation/canary_worker.py",
+    "/usr/local/lib/self-hosted-ci/github_automation/timing.py",
     "/usr/local/lib/self-hosted-ci/github_automation/crypto.py",
     "/usr/local/lib/self-hosted-ci/github_automation/host_security.py",
     "/usr/local/lib/self-hosted-ci/github_automation/runner_boundary.py",

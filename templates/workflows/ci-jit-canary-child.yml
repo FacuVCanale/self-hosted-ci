@@ -44,6 +44,9 @@ jobs:
   local-canary:
     name: local-canary
     needs: validate-package
+    # A force-cancel canary must remain scheduled after normal cancellation so
+    # the fallback endpoint is exercised only after its normative grace period.
+    if: ${{ needs.validate-package.result == 'success' && ((needs.validate-package.outputs.scenario == 'force-cancel' && always()) || (needs.validate-package.outputs.scenario != 'force-cancel' && success())) }}
     runs-on: ${{ needs.validate-package.outputs.runner_label }}
     timeout-minutes: 3
     concurrency:
@@ -85,7 +88,7 @@ jobs:
             failure) exit 1 ;;
             cancel) exec sleep 240 ;;
             timeout) exec sleep 240 ;;
-            force-cancel) trap '' INT TERM; exec sleep 240 ;;
+            force-cancel) exec sleep 240 ;;
             reboot) printf '%s\n' reboot-checkpoint-created ;;
             *) exit 64 ;;
           esac

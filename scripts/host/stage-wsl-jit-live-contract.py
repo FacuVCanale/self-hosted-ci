@@ -276,6 +276,13 @@ PUBLIC_ARTIFACTS = (
         "garm",
     ),
     (
+        "github_automation/timing.py",
+        "/usr/local/lib/self-hosted-ci/github_automation/timing.py",
+        "0644",
+        "python-module",
+        "garm",
+    ),
+    (
         "github_automation/host_security.py",
         "/usr/local/lib/self-hosted-ci/github_automation/host_security.py",
         "0644",
