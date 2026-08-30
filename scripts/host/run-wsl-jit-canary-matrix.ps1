@@ -189,14 +189,43 @@ PY
 args=(execute --config /etc/self-hosted-ci/canary-runtime.json --authorization /etc/self-hosted-ci/canary-authorization.json)
 export PYTHONPATH=/usr/local/lib/self-hosted-ci
 set +e
-/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py "${args[@]}"
+/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py "${args[@]}" >"$work/execute-result.json"
 status=$?
 set -e
 if [[ "$status" == 75 && "$phase" == initial ]]; then
+  python3 - "$work/execute-result.json" "$nonce" <<'PY'
+import json, pathlib, sys
+value=json.loads(pathlib.Path(sys.argv[1]).read_text())
+if value.get("status") != "reboot-checkpoint" or value.get("nonce") != sys.argv[2]:
+    raise SystemExit("reboot checkpoint output is not exact")
+PY
   printf '{"status":"reboot-checkpoint","nonce":"%s"}\n' "$nonce"
   exit 75
 fi
 [[ "$status" == 0 ]] || exit "$status"
+python3 - "$work/execute-result.json" "$nonce" <<'PY'
+import json, pathlib, sys
+value=json.loads(pathlib.Path(sys.argv[1]).read_text())
+if value.get("status") != "terminal" or value.get("nonce") != sys.argv[2] or value.get("runtime_empty") is not True or value.get("production_activation_changed") is not False or value.get("outbound_worker_started") is not False:
+    raise SystemExit("canary execute receipt is not exact")
+PY
+python3 - <<'PY'
+import pathlib, sys
+sys.path.insert(0, "/usr/local/lib/self-hosted-ci")
+from github_automation.canary_worker import CanaryRuntime, CanaryStateStore, STATE_ROOT, load_live_canary_driver, read_root_json
+config=read_root_json(pathlib.Path("/etc/self-hosted-ci/canary-runtime.json"))
+authorization=read_root_json(pathlib.Path("/etc/self-hosted-ci/canary-authorization.json"))
+runtime=CanaryRuntime(config, authorization)
+driver=load_live_canary_driver(config, authorization)
+if driver.prove_runtime_empty() != {"scale_sets":0,"instances":0,"runners":0,"registrations":0}:
+    raise SystemExit("canary post-execute runtime inventory is not empty")
+runtime.quarantine_after_failure(None)
+for state_path in STATE_ROOT.glob("*/state.json"):
+    store=CanaryStateStore(STATE_ROOT, state_path.parent.name)
+    state=store.load()
+    if state is not None and not (state.get("state") in {"terminal","failed-quarantined-clean"} and state.get("runtime_empty") is True):
+        store.transition("failed-quarantined-clean", current_scenario=None, runtime_empty=True)
+PY
 /usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py production-fence
 printf '{"status":"terminal","nonce":"%s","runtime_empty":true,"production_activation_changed":false,"outbound_worker_started":false}\n' "$nonce"
 '@
@@ -315,10 +344,12 @@ expected={"scale_sets":0,"instances":0,"runners":0,"registrations":0}
 if empty != expected:
     raise SystemExit("canary cleanup runtime inventory is not empty")
 runtime.quarantine_after_failure(None)
-store=CanaryStateStore(STATE_ROOT, authorization["nonce"])
-state=store.load()
-if state is not None and not (state.get("state")=="terminal" and state.get("runtime_empty") is True):
-    store.transition("failed-quarantined-clean", current_scenario=None, runtime_empty=True, recovered_allocations=recovered)
+for state_path in STATE_ROOT.glob("*/state.json"):
+    nonce=state_path.parent.name
+    store=CanaryStateStore(STATE_ROOT, nonce)
+    state=store.load()
+    if state is not None and not (state.get("state") in {"terminal","failed-quarantined-clean"} and state.get("runtime_empty") is True):
+        store.transition("failed-quarantined-clean", current_scenario=None, runtime_empty=True)
 for unit in CANARY_UNITS:
     observed=subprocess.run(["systemctl","is-active",unit],capture_output=True,text=True,check=False)
     if observed.returncode == 0:
@@ -431,8 +462,8 @@ try {
         Write-Worker "resume"
         $result = Wait-OneShot
     }
-    if ($result -ne 0) { throw "canary matrix task failed (result=$result)" }
     $terminal = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json -ErrorAction Stop
+    if ($result -ne 0) { throw "canary matrix task failed (result=$result)" }
     if ($terminal.status -ne "terminal" -or $terminal.nonce -ne $ExpectedCanaryNonce -or $terminal.runtime_empty -ne $true -or $terminal.production_activation_changed -ne $false -or $terminal.outbound_worker_started -ne $false) { throw "canary terminal receipt is not exact" }
     $successReceipt = [ordered]@{status="terminal";nonce=$ExpectedCanaryNonce;scenarios=@("success","failure","cancel","timeout","force-cancel","reboot");runtime_empty=$true;distro_restarted=($phase -eq "resume");one_shot_task_absent=$true;stored_task_credential_invalidated=$true;staging_absent=$true;production_activation_changed=$false;required_check_changed=$false;outbound_worker_started=$false}
 }
@@ -445,7 +476,11 @@ finally {
     if ($registered -and $passwordApplied) {
         try {
             Stop-And-Wait-OneShot
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+            $registered = $false
             Write-CleanupWorker
+            [void](Register-OneShot "$env:COMPUTERNAME\$ServiceAccount" $temporaryPassword)
+            $registered = $true
             $cleanupResult = Wait-OneShot 300
             if ($cleanupResult -ne 0) { throw "WSL canary cleanup task failed (result=$cleanupResult)" }
             $cleanupReceipt = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json -ErrorAction Stop
@@ -456,6 +491,7 @@ finally {
     }
     if ($registered) {
         try {
+            Stop-And-Wait-OneShot
             Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
             if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "scheduled task remains registered" }
             $registered = $false
