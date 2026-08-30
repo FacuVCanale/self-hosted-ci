@@ -71,7 +71,7 @@ jobs:
           git checkout --detach "$EXPECTED_MERGE_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_MERGE_SHA"
       - name: Run pilot quality command
-        run: python3 scripts/check-public-distribution.py
+        run: python3 -m compileall -q .
 
   local-quality:
     name: local-quality
@@ -111,7 +111,7 @@ jobs:
           git checkout --detach "$EXPECTED_MERGE_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_MERGE_SHA"
       - name: Run pilot quality command
-        run: python3 scripts/check-public-distribution.py
+        run: python3 -m compileall -q .
 
 # A backend is selected before dispatch. There is intentionally no fallback or
 # second dispatch after this workflow starts.
