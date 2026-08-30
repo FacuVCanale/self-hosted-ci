@@ -178,6 +178,69 @@ class CanaryMatrixWrapperTests(unittest.TestCase):
         unregister = self.source.rindex("Unregister-ScheduledTask -TaskName $TaskName")
         self.assertLess(cleanup, unregister)
 
+    def test_cleanup_uses_a_fresh_task_registration_after_resume(self):
+        final = self.source[self.source.index(
+            "$cleanupFailures = [Collections.Generic.List[string]]::new()"
+        ):]
+        stop = final.index("Stop-And-Wait-OneShot")
+        unregister = final.index(
+            "Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop",
+            stop,
+        )
+        write_cleanup = final.index("Write-CleanupWorker", unregister)
+        register = final.index("Register-OneShot", write_cleanup)
+        wait = final.index("Wait-OneShot 300", register)
+        self.assertLess(stop, unregister)
+        self.assertLess(unregister, write_cleanup)
+        self.assertLess(write_cleanup, register)
+        self.assertLess(register, wait)
+
+    def test_terminal_receipt_is_emitted_only_after_execute_and_production_fence(self):
+        worker = self.source.split("function Write-Worker", 1)[1].split(
+            "function Wait-OneShot", 1
+        )[0]
+        captured = worker.index('>"$work/execute-result.json"')
+        validated = worker.index('canary execute receipt is not exact', captured)
+        fence = worker.index('run-wsl-jit-canary-matrix.py production-fence', validated)
+        terminal = worker.index('printf \'{"status":"terminal"', fence)
+        self.assertLess(captured, validated)
+        self.assertLess(validated, fence)
+        self.assertLess(fence, terminal)
+        self.assertIn('if ($result -ne 0) { throw "canary matrix task failed', self.source)
+
+    def test_cleanup_reconciles_all_historical_dirty_state_before_fence(self):
+        cleanup = self.source.split("function Write-CleanupWorker", 1)[1].split(
+            "function Write-SanitizedDiagnosticCopy", 1
+        )[0]
+        self.assertIn('for state_path in STATE_ROOT.glob("*/state.json"):', cleanup)
+        self.assertIn('CanaryStateStore(STATE_ROOT, nonce)', cleanup)
+        self.assertIn('state.get("state") in {"terminal","failed-quarantined-clean"}', cleanup)
+        self.assertIn('store.transition("failed-quarantined-clean"', cleanup)
+
+    def test_success_path_reconciles_history_after_empty_proof_and_before_fence(self):
+        worker = self.source.split("function Write-Worker", 1)[1].split(
+            "function Wait-OneShot", 1
+        )[0]
+        receipt = worker.index("canary execute receipt is not exact")
+        empty = worker.index("driver.prove_runtime_empty()", receipt)
+        reconcile = worker.index('STATE_ROOT.glob("*/state.json")', empty)
+        fence = worker.index("run-wsl-jit-canary-matrix.py production-fence", reconcile)
+        terminal = worker.index('printf \'{"status":"terminal"', fence)
+        self.assertLess(receipt, empty)
+        self.assertLess(empty, reconcile)
+        self.assertLess(reconcile, fence)
+        self.assertLess(fence, terminal)
+
+    def test_final_unregister_quiesces_even_after_cleanup_wait_failure(self):
+        final = self.source[self.source.index(
+            "$cleanupFailures = [Collections.Generic.List[string]]::new()"
+        ):]
+        final_unregister = final.rindex(
+            "Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop"
+        )
+        preceding_stop = final.rindex("Stop-And-Wait-OneShot", 0, final_unregister)
+        self.assertLess(preceding_stop, final_unregister)
+
     def test_task_wait_requires_observing_the_new_run(self):
         self.assertIn('Invoke-SchedulerObservation "read task info before start"', self.source)
         self.assertIn("$runObserved = $false", self.source)
