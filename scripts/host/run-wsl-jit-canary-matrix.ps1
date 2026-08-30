@@ -219,6 +219,14 @@ if (`$workerExitCode -eq 75 -and '$Phase' -eq 'initial') {
     if (`$result.status -ne 'reboot-checkpoint' -or `$result.nonce -ne '$ExpectedCanaryNonce') { throw 'reboot worker exit was not bound to the exact durable checkpoint' }
     & '$env:SystemRoot\System32\wsl.exe' --terminate '$DistroName'
     if (`$LASTEXITCODE -ne 0) { throw 'service identity failed to terminate the dedicated WSL distro at reboot checkpoint' }
+    `$shutdownDeadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
+    do {
+        `$runningDistros = @(& '$env:SystemRoot\System32\wsl.exe' --list --running --quiet | ForEach-Object { (`$_ -replace [char]0, '').Trim() })
+        if (`$LASTEXITCODE -ne 0) { throw 'service identity failed to verify dedicated WSL distro shutdown' }
+        if (`$runningDistros -notcontains '$DistroName') { break }
+        Start-Sleep -Seconds 1
+    } while ([DateTimeOffset]::UtcNow -lt `$shutdownDeadline)
+    if (`$runningDistros -contains '$DistroName') { throw 'dedicated WSL distro did not reach the stopped state' }
 }
 exit `$workerExitCode
 "@

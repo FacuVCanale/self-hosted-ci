@@ -1433,13 +1433,44 @@ class CanaryRuntime:
             or self.authorization["max_jobs_per_allocation"] != 1
         ):
             raise CanaryRuntimeError("canary authorization allocation bounds drifted")
+        boot_id = self.boot_id_path.read_text(encoding="ascii").strip()
+        store = CanaryStateStore(self.state_root, authorization.nonce)
+        current = store.load()
+        reboot_resume = bool(
+            current is not None
+            and current.get("state") == "running"
+            and current.get("current_scenario") == "reboot"
+            and current.get("completed_scenarios") == list(SCENARIOS[:-1])
+            and current.get("boot_id") != boot_id
+        )
         instances = json.loads(
             self._run("incus", "--project", "ci-jit", "list", "--format", "json")
         )
-        if instances != []:
+        if reboot_resume:
+            assert current is not None
+            reboot_label = current.get("reboot_runner_label")
+            reboot_allocation_id = current.get("reboot_allocation_id")
+            evidence = current.get("reboot_evidence")
+            reservation = evidence.get("reservation") if isinstance(evidence, Mapping) else None
+            runner_name = evidence.get("runner_name") if isinstance(evidence, Mapping) else None
+            if (
+                not isinstance(reboot_label, str)
+                or not isinstance(reboot_allocation_id, str)
+                or not isinstance(reservation, Mapping)
+                or reservation.get("allocation_id") != reboot_allocation_id
+                or reservation.get("scale_set_name") != reboot_label
+                or allocation_scale_set_name(reservation) != reboot_label
+                or not isinstance(runner_name, str)
+                or not runner_name.startswith(reboot_label + "-")
+                or len(instances) != 1
+                or not isinstance(instances[0], Mapping)
+                or instances[0].get("name") != runner_name
+            ):
+                raise CanaryRuntimeError(
+                    "reboot resume inventory crossed the durable allocation"
+                )
+        elif instances != []:
             raise CanaryRuntimeError("initial canary runtime inventory is not empty")
-        boot_id = self.boot_id_path.read_text(encoding="ascii").strip()
-        store = CanaryStateStore(self.state_root, authorization.nonce)
         store.initialize(digest, boot_id)
         return authorization, store
 
@@ -1471,6 +1502,12 @@ class CanaryRuntime:
         return authorization, store
 
     def prepare(self, store: CanaryStateStore, authorization_digest: str) -> None:
+        initial_state = store.load() or {}
+        reboot_allocation_id = (
+            initial_state.get("reboot_allocation_id")
+            if "rebooted_from_boot_id" in initial_state
+            else None
+        )
         self._run("systemctl", "start", "self-hosted-ci-network-quarantine.service")
         self.canary_sentinel.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
         _atomic_json(
@@ -1485,7 +1522,11 @@ class CanaryRuntime:
                 "/usr/local/lib/self-hosted-ci/garm-allocation-broker.py", "recover"
             )
         )
-        if broker_inventory != {"recovered": [], "runtime_empty": True}:
+        expected_recovered = [] if reboot_allocation_id is None else [reboot_allocation_id]
+        if broker_inventory != {
+            "recovered": expected_recovered,
+            "runtime_empty": True,
+        }:
             raise CanaryRuntimeError("prepared canary runtime inventory is not empty")
         store.transition("ready")
 
