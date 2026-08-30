@@ -114,6 +114,9 @@ trap cleanup EXIT
 
 readonly expected_distro='Ubuntu-24.04-CI'
 readonly incus_version='@@INCUS_VERSION@@'
+readonly cowsql_version='1.15.8-1'
+readonly cowsql_sha256='650da8a131d05d89d893e8e168f1be43913d9cdbd631a08dda2fc313a1d1939f'
+readonly cowsql_url='https://security.ubuntu.com/ubuntu/pool/universe/c/cowsql/libcowsql0_1.15.8-1_amd64.deb'
 readonly garm_version='0.2.1'
 readonly garm_sha256='11176acb8a725f914b9b947891b4837d374fb616195562cc0ad45a7be8b6c746'
 readonly garm_url='https://github.com/cloudbase/garm/releases/download/v0.2.1/garm-linux-amd64.tgz'
@@ -144,17 +147,25 @@ phase='apt-installation'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl dnsmasq-base e2fsprogs nftables squid util-linux "incus=${incus_version}"
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output "${tx}/libcowsql0.deb" "${cowsql_url}"
+printf '%s  %s\n' "${cowsql_sha256}" "${tx}/libcowsql0.deb" | sha256sum --check --status
+[[ "$(dpkg-deb -f "${tx}/libcowsql0.deb" Package)" == libcowsql0 ]]
+[[ "$(dpkg-deb -f "${tx}/libcowsql0.deb" Version)" == "${cowsql_version}" ]]
+[[ "$(dpkg-deb -f "${tx}/libcowsql0.deb" Architecture)" == amd64 ]]
+dpkg -i "${tx}/libcowsql0.deb"
 # Incus only needs the dnsmasq executable. The full dnsmasq package adds a
 # persistent system service and may have been installed by an older revision
 # of this bootstrap; remove that wrapper package while retaining dnsmasq-base.
 if dpkg-query -W -f='${Status}' dnsmasq 2>/dev/null | grep -Fxq 'install ok installed'; then
   apt-get remove -y dnsmasq
 fi
-apt-mark hold incus >/dev/null
+apt-mark hold incus libcowsql0 >/dev/null
 systemctl daemon-reload
 
 phase='package-postconditions'
 [[ "$(dpkg-query -W -f='${Version}' incus)" == "${incus_version}" ]] || die "Incus package version drifted"
+[[ "$(dpkg-query -W -f='${Version}' libcowsql0)" == "${cowsql_version}" ]] || die "cowsql package version drifted"
 for package in e2fsprogs util-linux dnsmasq-base nftables squid; do
   require_installed_package "${package}"
 done
@@ -168,6 +179,7 @@ make_service_inert nftables.service false
 grep -qw ext4 /proc/filesystems || { printf 'the WSL kernel does not expose ext4 support\n' >&2; exit 1; }
 grep -Eq '(^|[[:space:]])loop([[:space:]]|$)' /proc/devices || { printf 'the WSL kernel does not expose loop devices\n' >&2; exit 1; }
 [[ "$(apt-mark showhold incus)" == incus ]] || die "Incus apt hold is absent"
+apt-mark showhold | grep -Fxq libcowsql0 || die "cowsql apt hold is absent"
 
 phase='garm-binary-installation'
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
@@ -242,6 +254,6 @@ fi
 [[ ! -e /var/lib/garm/.runner && ! -e /var/lib/garm/.credentials ]] || die "persistent runner credentials are present"
 
 phase='complete'
-printf '{"status":"installed","distro":"%s","incus_version":"%s","incus_held":true,"dnsmasq_base_installed":true,"dnsmasq_service_absent":true,"nftables_installed":true,"squid_installed":true,"distribution_network_services_disabled":true,"ext4_tools_installed":true,"ext4_kernel_supported":true,"loop_devices_supported":true,"garm_version":"%s","garm_sha256":"%s","garm_cli_version":"%s","garm_cli_sha256":"%s","garm_provider_incus_version":"%s","garm_provider_incus_sha256":"%s","garm_manager_non_admin":true,"garm_manager_incus_admin":false,"garm_enabled":false,"runner_registration_performed":false}\n' \
-  "${expected_distro}" "${incus_version}" "${garm_version}" "${garm_sha256}" \
+printf '{"status":"installed","distro":"%s","incus_version":"%s","incus_held":true,"cowsql_version":"%s","cowsql_sha256":"%s","cowsql_held":true,"dnsmasq_base_installed":true,"dnsmasq_service_absent":true,"nftables_installed":true,"squid_installed":true,"distribution_network_services_disabled":true,"ext4_tools_installed":true,"ext4_kernel_supported":true,"loop_devices_supported":true,"garm_version":"%s","garm_sha256":"%s","garm_cli_version":"%s","garm_cli_sha256":"%s","garm_provider_incus_version":"%s","garm_provider_incus_sha256":"%s","garm_manager_non_admin":true,"garm_manager_incus_admin":false,"garm_enabled":false,"runner_registration_performed":false}\n' \
+  "${expected_distro}" "${incus_version}" "${cowsql_version}" "${cowsql_sha256}" "${garm_version}" "${garm_sha256}" \
   "${garm_cli_version}" "${garm_cli_sha256}" "${garm_provider_incus_version}" "${garm_provider_incus_sha256}"
