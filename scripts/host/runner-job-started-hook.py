@@ -91,7 +91,10 @@ def main() -> int:
                 "Content-Length": str(len(body)),
             },
         )
-        with urllib.request.urlopen(request, timeout=10) as response:
+        # The broker performs the live GitHub job-authority check before it
+        # answers. Its bounded verifier may need several eventually-consistent
+        # reads, so the hook deadline must cover that complete server budget.
+        with urllib.request.urlopen(request, timeout=60) as response:
             response_body = response.read(4097)
             if response.status != 204 or response_body:
                 raise ValueError("allocation broker returned an unexpected response")

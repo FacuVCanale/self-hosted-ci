@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 import base64
 import json
+import subprocess
 import tempfile
 import unittest
 
@@ -367,6 +368,8 @@ class AllocationBrokerTests(unittest.TestCase):
         ).read_text()
         self.assertIn('BROKER_URL = "http://10.254.0.1:8079/v1/job-started"', source)
         self.assertNotIn("BROKER_URL = os.environ", source)
+        self.assertIn("urlopen(request, timeout=60)", source)
+
         for field in (
             "GITHUB_REPOSITORY_ID",
             "GITHUB_REPOSITORY",
@@ -382,6 +385,14 @@ class AllocationBrokerTests(unittest.TestCase):
         self.assertNotIn('value["payload"].get("tested_merge_sha")', source)
         self.assertNotIn('required_env("CI_GATE_TRUSTED_TESTED_SHA")', source)
         self.assertIn("response.status != 204 or response_body", source)
+
+    def test_live_job_verifier_budget_fits_inside_runner_hook_deadline(self):
+        self.assertLess(
+            ExternalLiveWorkflowJobVerifier.MAX_ATTEMPTS * 15
+            + (ExternalLiveWorkflowJobVerifier.MAX_ATTEMPTS - 1)
+            * ExternalLiveWorkflowJobVerifier.RETRY_DELAY_SECONDS,
+            60,
+        )
 
     def test_broker_http_threads_are_strictly_bounded(self):
         source = (
@@ -429,6 +440,27 @@ class AllocationBrokerTests(unittest.TestCase):
             verifier.verify(self.payload, self.context())
         self.assertEqual(2, attempts)
         sleep.assert_called_once_with(1)
+
+    def test_external_live_job_verifier_normalizes_three_process_timeouts(self):
+        executable = Path(self.tempdir.name) / "verify-job"
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o755)
+        verifier = ExternalLiveWorkflowJobVerifier(executable)
+        safe = mock.Mock(st_uid=0, st_nlink=1, st_mode=0o100755)
+        with (
+            mock.patch("github_automation.runner_jit_broker.os.lstat", return_value=safe),
+            mock.patch(
+                "github_automation.runner_jit_broker.subprocess.run",
+                side_effect=subprocess.TimeoutExpired([str(executable)], 15),
+            ) as run,
+            mock.patch("github_automation.runner_jit_broker.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "GitHub live workflow-job verification did not converge"
+            ):
+                verifier.verify(self.payload, self.context())
+        self.assertEqual(3, run.call_count)
+        self.assertEqual(2, sleep.call_count)
 
     def test_job_started_cross_binding_fails_before_disable_or_start(self):
         self.broker.reserve(self.reservation, now=NOW)
