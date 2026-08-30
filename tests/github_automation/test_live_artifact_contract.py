@@ -35,6 +35,12 @@ def load_stager():
 class LiveArtifactContractTests(unittest.TestCase):
     TARGET = "/usr/local/lib/self-hosted-ci/runtime.sh"
 
+    def test_all_staged_artifact_kinds_are_accepted_by_the_verifier(self):
+        stager = load_stager()
+        verifier = load_verifier()
+        accepted = {"script", "python-module", "unit", "public-config", "pinned-binary"}
+        self.assertTrue({item[3] for item in stager.PUBLIC_ARTIFACTS}.issubset(accepted))
+
     def verify_fixture(self, verifier, bundle, measurement, prefix):
         return verifier.verify_contract(
             bundle,

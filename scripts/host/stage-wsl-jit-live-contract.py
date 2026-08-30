@@ -146,7 +146,7 @@ PUBLIC_ARTIFACTS = (
         "templates/garm/runner-install-offline.sh.tmpl",
         "/usr/local/share/self-hosted-ci/runner-install-offline.sh.tmpl",
         "0644",
-        "config",
+        "public-config",
         "garm",
     ),
     (
@@ -405,14 +405,14 @@ PUBLIC_ARTIFACTS = (
         "schemas/jit-canary-authorization-v1.schema.json",
         "/usr/local/share/self-hosted-ci/schemas/jit-canary-authorization-v1.schema.json",
         "0644",
-        "schema",
+        "public-config",
         "garm",
     ),
     (
         "schemas/runner-lifecycle-proof-v1.schema.json",
         "/usr/local/share/self-hosted-ci/schemas/runner-lifecycle-proof-v1.schema.json",
         "0644",
-        "schema",
+        "public-config",
         "garm",
     ),
     (
