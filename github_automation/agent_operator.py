@@ -505,7 +505,7 @@ class AgentOperator:
             "managed_workflow_present": workflow is not None,
             "managed_workflow_owned": owned,
             "pending_operation": state.get("pending", {}).get("operation"),
-            "reconciled": reconciled,
+            "pending_reconciled_during_this_status_call": reconciled,
             "authority_repository": authority["repository"],
             "health": health,
             "host_error": host_error,

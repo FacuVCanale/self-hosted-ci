@@ -269,7 +269,7 @@ class AgentOperatorTests(unittest.TestCase):
             }
             self.store.save(registry)
         result = self.operator.status("FacuVCanale/demo")
-        self.assertTrue(result["reconciled"])
+        self.assertTrue(result["pending_reconciled_during_this_status_call"])
         self.assertEqual(result["desired_ci_runner"], "local-with-github-fallback")
 
     def test_host_config_rejects_shell_metacharacters_and_non_strings(self):
