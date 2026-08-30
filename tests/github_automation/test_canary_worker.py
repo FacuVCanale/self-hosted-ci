@@ -317,6 +317,115 @@ class CanaryStateStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(CanaryRuntimeError, "identity is invalid"):
                 runtime._distro_boot_identity()
 
+    def test_reboot_prepare_recovers_before_starting_broker(self):
+        class RecordingRuntime(CanaryRuntime):
+            def __init__(self, root):
+                self.commands = []
+                super().__init__(
+                    {},
+                    AUTH,
+                    canary_sentinel=root / "CANARY_APPROVED",
+                    secret_root=root / "canary-secrets",
+                    connector=self._connect,
+                )
+
+            def _connect(self, address, timeout):
+                self.commands.append(("readiness", address, timeout))
+                return SimpleNamespace(close=lambda: None)
+
+            def _run(self, *argv, timeout=60):
+                self.commands.append(argv)
+                if argv[-1] == "recover":
+                    return json.dumps(
+                        {"recovered": ["allocation-reboot"], "runtime_empty": True}
+                    )
+                return ""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = CanaryStateStore(root / "state", "a" * 32)
+            store.initialize(
+                "b" * 64,
+                "v2:44a2a354-3124-42d7-b616-bfa90fde8215:67890",
+            )
+            store.transition(
+                "running",
+                current_scenario="reboot",
+                completed_scenarios=list(SCENARIOS[:-1]),
+                reboot_allocation_id="allocation-reboot",
+                rebooted_from_boot_id=(
+                    "v2:44a2a354-3124-42d7-b616-bfa90fde8215:12345"
+                ),
+            )
+            runtime = RecordingRuntime(root)
+            runtime.prepare(store, "b" * 64)
+            recover_index = runtime.commands.index(
+                ("/usr/local/lib/self-hosted-ci/garm-allocation-broker.py", "recover")
+            )
+            readiness_index = next(
+                index
+                for index, command in enumerate(runtime.commands)
+                if command[0] == "readiness"
+            )
+            broker_index = runtime.commands.index(
+                ("systemctl", "start", "self-hosted-ci-canary-broker.service")
+            )
+            self.assertLess(readiness_index, recover_index)
+            self.assertLess(recover_index, broker_index)
+            self.assertEqual(
+                1,
+                runtime.commands.count(
+                    ("/usr/local/lib/self-hosted-ci/garm-allocation-broker.py", "recover")
+                ),
+            )
+            self.assertNotIn(
+                ("systemctl", "start", "self-hosted-ci-canary.target"),
+                runtime.commands,
+            )
+            self.assertEqual("ready", store.load()["state"])
+
+    def test_garm_listener_readiness_is_read_only_and_bounded(self):
+        clock = [0.0]
+        attempts = []
+
+        def monotonic():
+            return clock[0]
+
+        def sleeper(duration):
+            clock[0] += duration
+
+        def connector(address, timeout):
+            attempts.append((address, timeout))
+            clock[0] += timeout
+            raise ConnectionRefusedError
+
+        runtime = CanaryRuntime(
+            {}, AUTH, monotonic=monotonic, sleeper=sleeper, connector=connector
+        )
+        with self.assertRaisesRegex(CanaryRuntimeError, "readiness timed out"):
+            runtime._wait_for_garm_listener(timeout=1.0)
+        self.assertTrue(attempts)
+        self.assertTrue(all(address == ("127.0.0.1", 9997) for address, _ in attempts))
+        self.assertTrue(all(0 < timeout <= 0.25 for _, timeout in attempts))
+        self.assertLessEqual(clock[0], 1.0)
+
+    def test_garm_listener_readiness_retries_connection_only(self):
+        attempts = []
+        sleeps = []
+
+        def connector(address, timeout):
+            attempts.append((address, timeout))
+            if len(attempts) < 3:
+                raise ConnectionRefusedError
+            return SimpleNamespace(close=lambda: None)
+
+        runtime = CanaryRuntime(
+            {}, AUTH, connector=connector, sleeper=sleeps.append
+        )
+        runtime._wait_for_garm_listener(timeout=1.0)
+        self.assertEqual(3, len(attempts))
+        self.assertEqual(2, len(sleeps))
+
     def test_signed_allocation_budget_is_durable_across_nonces(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

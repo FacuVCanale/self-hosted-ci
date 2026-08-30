@@ -10,7 +10,7 @@ Type=simple
 User=root
 Group=root
 ExecStartPre=/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py verify
-ExecStartPre=/bin/sh -c 'i=0; until /usr/local/lib/self-hosted-ci/garm-cli-session.py ensure >/dev/null 2>&1 && /usr/local/lib/self-hosted-ci/garm-allocation-broker.py recover >/dev/null 2>&1; do i=$((i+1)); [ "$i" -lt 60 ] || exit 1; sleep 1; done'
+ExecStartPre=/bin/sh -c 'i=0; until /usr/bin/python3 -c '\''import socket; connection=socket.create_connection(("127.0.0.1",9997),timeout=.25); connection.close()'\''; do i=$((i+1)); [ "$i" -lt 240 ] || exit 1; sleep .25; done'
 ExecStart=/usr/local/lib/self-hosted-ci/garm-allocation-broker.py serve
 Restart=on-failure
 RestartSec=2s
