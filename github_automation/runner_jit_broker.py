@@ -379,6 +379,14 @@ def utc_now() -> datetime:
 
 
 GARM_CLEANUP_CONVERGENCE_SECONDS = 600
+GARM_CLI_COMMAND_TIMEOUT_SECONDS = 30
+# Recovery can consume the full drain window plus bounded 30-second GARM and
+# Incus observations before and after it. Twenty command budgets cover target
+# discovery, disable, drain overshoot, delete, allocation proof, and final
+# global inventory for the single allocation allowed by canary concurrency.
+GARM_RECOVERY_END_TO_END_SECONDS = GARM_CLEANUP_CONVERGENCE_SECONDS + (
+    20 * GARM_CLI_COMMAND_TIMEOUT_SECONDS
+)
 
 
 class GarmCliAllocationDriver:
@@ -416,7 +424,7 @@ class GarmCliAllocationDriver:
             check=True,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=GARM_CLI_COMMAND_TIMEOUT_SECONDS,
         )
         return json.loads(result.stdout) if result.stdout.strip() else None
 

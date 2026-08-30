@@ -37,7 +37,12 @@ from .canary_boundary import authorization_digest, verify_canary_authorization
 from .crypto import canonicalize_jcs
 from .outbound_worker import FileAllocationSigner
 from .runner_jit import allocation_scale_set_name
-from .runner_jit_broker import AllocationBroker, JobStartedContext, utc_now
+from .runner_jit_broker import (
+    GARM_RECOVERY_END_TO_END_SECONDS,
+    AllocationBroker,
+    JobStartedContext,
+    utc_now,
+)
 from .timing import POLICY_V1
 from .worker_authority import (
     API_ROOT,
@@ -50,6 +55,9 @@ from .worker_authority import (
 
 
 SCENARIOS = ("success", "failure", "cancel", "timeout", "force-cancel", "reboot")
+# Leave a bounded serialization/shutdown margin outside the broker's own
+# complete recovery deadline.
+BROKER_RECOVERY_TIMEOUT_SECONDS = GARM_RECOVERY_END_TO_END_SECONDS + 60
 CANARY_JOB_NAME = "local-canary"
 CANARY_JOB_TIMEOUT_SECONDS = 180
 NORMAL_CANCEL_GRACE_SECONDS = int(POLICY_V1.normal_cancel_grace.total_seconds())
@@ -1579,6 +1587,7 @@ class CanaryRuntime:
             self._run(
                 "/usr/local/lib/self-hosted-ci/garm-allocation-broker.py",
                 "recover",
+                timeout=BROKER_RECOVERY_TIMEOUT_SECONDS,
             )
         )
         expected_recovered = [] if reboot_allocation_id is None else [reboot_allocation_id]
