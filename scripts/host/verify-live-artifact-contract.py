@@ -13,6 +13,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 CONTRACT_REF = "live/live-artifacts-v1.json"
+ALLOWED_ARTIFACT_KINDS = frozenset(
+    {"script", "python-module", "unit", "public-config", "pinned-binary"}
+)
+NON_EXECUTABLE_ARTIFACT_KINDS = frozenset(
+    {"python-module", "unit", "public-config"}
+)
 ALLOWED_TARGET_PREFIXES = (
     "/usr/local/lib/self-hosted-ci/",
     "/usr/local/libexec/self-hosted-ci/",
@@ -271,8 +277,7 @@ def verify_contract(
             or (target_prefix == Path("/") and item["uid"] != 0)
             or not isinstance(item["gid"], int)
             or item["gid"] < 0
-            or item["kind"]
-            not in {"script", "python-module", "unit", "public-config", "pinned-binary"}
+            or item["kind"] not in ALLOWED_ARTIFACT_KINDS
         ):
             raise ContractError(f"invalid live artifact metadata: {target}")
         mode_value = int(item["mode"], 8)
@@ -281,7 +286,7 @@ def verify_contract(
                 f"live artifact mode grants unsafe write or special permissions: {target}"
             )
         if (
-            item["kind"] in {"python-module", "unit", "public-config"}
+            item["kind"] in NON_EXECUTABLE_ARTIFACT_KINDS
             and mode_value & 0o111
         ):
             raise ContractError(f"non-executable live artifact is executable: {target}")
