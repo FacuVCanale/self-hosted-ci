@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 from github_automation.canary_boundary import CANARY_SCENARIOS, CanaryBoundaryError, authorization_digest, verify_canary_authorization
 from github_automation.crypto import canonicalize_jcs, parse_ijson
+from github_automation.timing import POLICY_V1
 
 
 PROOF_FIELDS = {
@@ -104,6 +105,8 @@ def _validate_proof(proof: Mapping[str, object], auth: Mapping[str, object], dig
         _receipt(force, "force_cancel")
         if _time(normal["observed_at"], "normal_cancel.observed_at") >= _time(force["observed_at"], "force_cancel.observed_at"):
             raise LifecycleProofError("force-cancel must follow normal cancel")
+        if (_time(force["observed_at"], "force_cancel.observed_at") - _time(normal["observed_at"], "normal_cancel.observed_at")) < POLICY_V1.normal_cancel_grace:
+            raise LifecycleProofError("force-cancel did not observe the normal cancel grace")
     elif force is not None:
         raise LifecycleProofError("force-cancel receipt is only valid for force-cancel")
     elif scenario == "cancel":

@@ -159,7 +159,7 @@ install -o root -g root -m 0755 "${repo_root}/scripts/host/verify-jit-canary-aut
 install -o root -g root -m 0755 "${repo_root}/scripts/host/build-wsl-jit-lifecycle-evidence.py" "/usr/local/lib/self-hosted-ci/build-wsl-jit-lifecycle-evidence.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/run-wsl-jit-canary-matrix.py" "/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py"
 install -d -o root -g root -m 0755 /usr/local/lib/self-hosted-ci/github_automation
-for python_module in __init__.py bootstrap_boundary.py canary_boundary.py canary_worker.py crypto.py host_security.py runner_boundary.py runner_jit.py runner_jit_broker.py github.py github_adapter.py check_delivery.py inventory.py policy.py registry.py coordinator.py outbound_worker.py worker_authority.py gatestore.py jit_pilot.py local_approval.py; do
+for python_module in __init__.py bootstrap_boundary.py canary_boundary.py canary_worker.py timing.py crypto.py host_security.py runner_boundary.py runner_jit.py runner_jit_broker.py github.py github_adapter.py check_delivery.py inventory.py policy.py registry.py coordinator.py outbound_worker.py worker_authority.py gatestore.py jit_pilot.py local_approval.py; do
   install -o root -g root -m 0644 "${repo_root}/github_automation/${python_module}" "/usr/local/lib/self-hosted-ci/github_automation/${python_module}"
 done
 for schema_file in jit-canary-authorization-v1.schema.json runner-lifecycle-proof-v1.schema.json; do

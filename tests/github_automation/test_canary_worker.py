@@ -161,9 +161,12 @@ class Dispatch:
         if self.scenario == "force-cancel":
             force = {
                 "operation_id": "force-cancel",
-                "observed_at": "2026-08-28T12:00:02Z",
+                "observed_at": "2026-08-28T12:01:31Z",
                 "receipt_digest": "b" * 64,
             }
+        finished_at = NOW + timedelta(seconds=2)
+        if self.scenario == "force-cancel":
+            finished_at = NOW + timedelta(seconds=92)
         return {
             "run_id": int(self.value["run_id"]),
             "run_attempt": self.value["run_attempt"],
@@ -172,7 +175,7 @@ class Dispatch:
             "started_at": (NOW + timedelta(seconds=1)).isoformat().replace(
                 "+00:00", "Z"
             ),
-            "finished_at": (NOW + timedelta(seconds=2)).isoformat().replace(
+            "finished_at": finished_at.isoformat().replace(
                 "+00:00", "Z"
             ),
             "runner_claimed": True,
@@ -506,6 +509,7 @@ class LiveCanaryDispatchAdapterTests(unittest.TestCase):
         adapter._scenario = scenario
         adapter._observed = {
             "job_id": 22,
+            "runner_name": "wsl-jit-runner",
             "started_at": "2026-08-29T23:41:44Z",
         }
         adapter._normal_cancel_receipt = None
@@ -636,6 +640,61 @@ class LiveCanaryDispatchAdapterTests(unittest.TestCase):
             adapter.await_terminal("timeout", mock.Mock())
         adapter.sleeper.assert_not_called()
 
+    def test_force_cancel_requires_full_normal_cancel_grace_and_never_forces_early(self):
+        adapter = self._terminal_adapter(
+            [{"status": "completed", "conclusion": "cancelled"}],
+            [{"jobs": [self._terminal_job()]}],
+            scenario="force-cancel",
+        )
+        adapter._post = mock.Mock(return_value=HTTPResponse(202, b""))
+        adapter._receipt = mock.Mock(
+            return_value={"operation_id": "cancel", "receipt_digest": "a" * 64}
+        )
+
+        with self.assertRaisesRegex(
+            CanaryRuntimeError, "did not survive normal cancellation"
+        ):
+            adapter.await_terminal("force-cancel", mock.Mock())
+
+        self.assertEqual(1, adapter._post.call_count)
+        self.assertTrue(adapter._post.call_args.args[0].endswith("/cancel"))
+
+    def test_force_cancel_waits_exact_normative_grace_before_force_endpoint(self):
+        active_job = {
+            **self._terminal_job(conclusion=None),
+            "status": "in_progress",
+            "runner_name": "wsl-jit-runner",
+            "completed_at": None,
+        }
+        adapter = self._terminal_adapter(
+            [
+                {"status": "in_progress", "conclusion": None},
+                {"status": "in_progress", "conclusion": None},
+                {"status": "completed", "conclusion": "cancelled"},
+            ],
+            [
+                {"jobs": [active_job]},
+                {"jobs": [active_job]},
+                {"jobs": [self._terminal_job()]},
+            ],
+            scenario="force-cancel",
+        )
+        adapter.monotonic = mock.Mock(side_effect=[0, 89, 90, 91])
+        adapter._post = mock.Mock(side_effect=[HTTPResponse(202, b""), HTTPResponse(202, b"")])
+        adapter._receipt = mock.Mock(
+            side_effect=[
+                {"operation_id": "cancel", "receipt_digest": "a" * 64},
+                {"operation_id": "force", "receipt_digest": "b" * 64},
+            ]
+        )
+
+        self.assertEqual("force-cancel", adapter.await_terminal("force-cancel", mock.Mock()))
+        self.assertEqual(
+            ["/cancel", "/force-cancel"],
+            [call.args[0].rsplit(str(adapter._run_id), 1)[1] for call in adapter._post.call_args_list],
+        )
+        adapter.sleeper.assert_called_once_with(1)
+
     def test_terminal_observation_rejects_ambiguous_or_invalid_job_receipt(self):
         terminal_run = {"status": "completed", "conclusion": "cancelled"}
         for jobs, message in (
@@ -658,17 +717,24 @@ class LiveCanaryDispatchAdapterTests(unittest.TestCase):
         }
         for scenario, conclusion in expected.items():
             with self.subTest(scenario=scenario):
+                runs = [{"status": "completed", "conclusion": conclusion}]
+                jobs = [{"jobs": [self._terminal_job(conclusion=conclusion)]}]
+                if scenario == "force-cancel":
+                    active_job = {
+                        **self._terminal_job(conclusion=None),
+                        "status": "in_progress",
+                        "runner_name": "wsl-jit-runner",
+                        "completed_at": None,
+                    }
+                    runs.insert(0, {"status": "in_progress", "conclusion": None})
+                    jobs.insert(0, {"jobs": [active_job]})
                 adapter = self._terminal_adapter(
-                    [{"status": "completed", "conclusion": conclusion}],
-                    [
-                        {
-                            "jobs": [
-                                self._terminal_job(conclusion=conclusion)
-                            ]
-                        }
-                    ],
+                    runs,
+                    jobs,
                     scenario=scenario,
                 )
+                if scenario == "force-cancel":
+                    adapter.monotonic = mock.Mock(side_effect=[0, 90, 91])
                 if scenario in {"cancel", "force-cancel"}:
                     adapter._post = mock.Mock(
                         return_value=HTTPResponse(202, b"")

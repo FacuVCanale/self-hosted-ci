@@ -37,6 +37,7 @@ from .crypto import canonicalize_jcs
 from .outbound_worker import FileAllocationSigner
 from .runner_jit import allocation_scale_set_name
 from .runner_jit_broker import AllocationBroker, JobStartedContext, utc_now
+from .timing import POLICY_V1
 from .worker_authority import (
     API_ROOT,
     API_VERSION,
@@ -50,6 +51,7 @@ from .worker_authority import (
 SCENARIOS = ("success", "failure", "cancel", "timeout", "force-cancel", "reboot")
 CANARY_JOB_NAME = "local-canary"
 CANARY_JOB_TIMEOUT_SECONDS = 180
+NORMAL_CANCEL_GRACE_SECONDS = int(POLICY_V1.normal_cancel_grace.total_seconds())
 CANARY_UNITS = (
     "self-hosted-ci-canary-network-policy.service",
     "self-hosted-ci-canary-egress-proxy.service",
@@ -493,7 +495,32 @@ class LiveCanaryDispatchAdapter:
                 f"github-run-{self._run_id}-cancel", response
             )
         if scenario == "force-cancel":
-            self.sleeper(5)
+            grace_deadline = self.monotonic() + NORMAL_CANCEL_GRACE_SECONDS
+            while True:
+                run = self.client.run(self._run_id, self.client.authenticate())
+                jobs = self.client.jobs(
+                    self._run_id, self.client.authenticate()
+                ).get("jobs")
+                exact = [
+                    job
+                    for job in jobs or []
+                    if isinstance(job, Mapping)
+                    and job.get("id") == self._observed.get("job_id")
+                ]
+                if (
+                    run.get("status") != "in_progress"
+                    or len(exact) != 1
+                    or exact[0].get("status") != "in_progress"
+                    or exact[0].get("runner_name") != self._observed.get("runner_name")
+                    or self._live_stamp(exact[0].get("started_at"), "job-started")
+                    != self._observed.get("started_at")
+                ):
+                    raise CanaryRuntimeError(
+                        "force-cancel canary did not survive normal cancellation"
+                    )
+                if self.monotonic() >= grace_deadline:
+                    break
+                self.sleeper(1)
             response = self._post(run_path + "/force-cancel", self.client.authenticate())
             if response.status != 202:
                 raise CanaryRuntimeError("forced canary cancellation was rejected")

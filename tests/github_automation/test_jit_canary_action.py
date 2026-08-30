@@ -118,7 +118,11 @@ class JitCanaryActionTests(unittest.TestCase):
         self.assertEqual(1, text.count("canary_package:"))
         for scenario in CANARY_SCENARIOS:
             self.assertIn(scenario + ")", text)
-        self.assertIn("force-cancel) trap '' INT TERM; exec sleep 240 ;;", text)
+        self.assertIn("needs.validate-package.outputs.scenario == 'force-cancel' && always()", text)
+        self.assertIn("needs.validate-package.outputs.scenario != 'force-cancel' && success()", text)
+        self.assertIn("needs.validate-package.result == 'success'", text)
+        self.assertIn("force-cancel) exec sleep 240 ;;", text)
+        self.assertNotIn("trap '' INT TERM", text)
         for forbidden in ("checks: write", "statuses: write", "name: ci-gate", "secrets.", "environment: production"):
             self.assertNotIn(forbidden, text)
 

@@ -52,7 +52,7 @@ def proof(auth, scenario, index):
         "jobs_started": 1,
         "conclusion": scenario,
         "normal_cancel_receipt": {"operation_id": "normal", "observed_at": "2026-08-28T12:00:02Z", "receipt_digest": "8" * 64} if scenario in {"cancel", "force-cancel"} else None,
-        "force_cancel_receipt": {"operation_id": "force", "observed_at": "2026-08-28T12:00:03Z", "receipt_digest": "9" * 64} if scenario == "force-cancel" else None,
+        "force_cancel_receipt": {"operation_id": "force", "observed_at": "2026-08-28T12:01:32Z", "receipt_digest": "9" * 64} if scenario == "force-cancel" else None,
         "cleanup_record": {"registration_removed": True, "workspace_removed": True, "token_removed": True, "container_removed": True, "allocation_removed": True, "cleanup_digest": "a" * 64},
         "garm_inventory_post": {"remaining": 0, "inventory_digest": "b" * 64},
         "incus_inventory_post": {"remaining": 0, "inventory_digest": "c" * 64},
@@ -79,6 +79,7 @@ class LifecycleProofBuilderTests(unittest.TestCase):
         crossed = [dict(item) for item in baseline]; crossed[0]["head_sha"] = "e" * 40; crossed[0]["proof_digest"] = digest_record({k:v for k,v in crossed[0].items() if k != "proof_digest"}); mutations.append(crossed)
         dirty = [dict(item) for item in baseline]; dirty[0] = {**dirty[0], "garm_inventory_post": {"remaining": 1, "inventory_digest": "b" * 64}}; dirty[0]["proof_digest"] = digest_record({k:v for k,v in dirty[0].items() if k != "proof_digest"}); mutations.append(dirty)
         missing_cancel = [dict(item) for item in baseline]; missing_cancel[4]["normal_cancel_receipt"] = None; missing_cancel[4]["proof_digest"] = digest_record({k:v for k,v in missing_cancel[4].items() if k != "proof_digest"}); mutations.append(missing_cancel)
+        short_grace = [dict(item) for item in baseline]; short_grace[4]["force_cancel_receipt"] = {**short_grace[4]["force_cancel_receipt"], "observed_at": "2026-08-28T12:01:31Z"}; short_grace[4]["normal_cancel_receipt"] = {**short_grace[4]["normal_cancel_receipt"], "observed_at": "2026-08-28T12:00:02Z"}; short_grace[4]["proof_digest"] = digest_record({k:v for k,v in short_grace[4].items() if k != "proof_digest"}); mutations.append(short_grace)
         for records in mutations:
             with self.subTest(records=records), self.assertRaises(BUILDER.LifecycleProofError):
                 BUILDER.build(auth, records)
