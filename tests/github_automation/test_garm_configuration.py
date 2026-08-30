@@ -42,11 +42,27 @@ class GarmConfigurationTests(unittest.TestCase):
             "install -d -o root -g garm-manager -m 0710 /var/lib/self-hosted-ci",
             configurator,
         )
+        self.assertIn(
+            'install -d -o root -g garm-manager -m 0710 "${STATE_ROOT}"',
+            provisioner,
+        )
+        self.assertIn(
+            'install -d -o garm-manager -g garm-manager -m 0700 "${STATE_ROOT}/garm"',
+            provisioner,
+        )
 
     def test_first_run_uses_the_versioned_garm_api_base_path(self):
         configurator = (ROOT / "scripts/host/configure-garm-jit.sh").read_text()
         self.assertIn("http://127.0.0.1:9997/api/v1/first-run", configurator)
         self.assertNotIn('http://127.0.0.1:9997/first-run"', configurator)
+
+    def test_transactions_wait_for_the_garm_loopback_api(self):
+        library = LIBRARY.read_text()
+        activate = (ROOT / "scripts/host/activate-garm-jit.sh").read_text()
+        deactivate = (ROOT / "scripts/host/deactivate-garm-jit.sh").read_text()
+        self.assertIn("wait_for_garm_cli()", library)
+        self.assertIn('wait_for_garm_cli||die "GARM loopback API did not become ready"', activate)
+        self.assertIn('wait_for_garm_cli||die "GARM recovery API did not become ready"', deactivate)
 
     def test_controller_urls_are_initialized_before_controller_info_is_read(self):
         configurator = (ROOT / "scripts/host/configure-garm-jit.sh").read_text()

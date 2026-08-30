@@ -10,7 +10,7 @@ if [[ "$mode" == plan ]]; then printf '%s\n' '{"mode":"plan","external_calls":"n
 require_exact_distro; acquire_transaction_lock; require_command_contracts; require_real_policy_units; require_base_health; require_health_configuration
 require_root_regular_file "$ACTIVATION_SENTINEL" 0600
 systemctl start "$POLICY_SERVICE" "$PROXY_SERVICE"; [[ -e "$NETWORK_SENTINEL" ]]||create_network_sentinel
-systemctl start "$GARM_SERVICE"; systemctl is-active --quiet "$GARM_SERVICE"||die "GARM recovery unavailable"
+systemctl start "$GARM_SERVICE"; systemctl is-active --quiet "$GARM_SERVICE"||die "GARM recovery unavailable"; wait_for_garm_cli||die "GARM recovery API did not become ready"
 systemctl stop "$OUTBOUND_WORKER_SERVICE" "$BROKER_SERVICE"; systemctl is-active --quiet "$OUTBOUND_WORKER_SERVICE"&&die "outbound worker remains active"; systemctl is-active --quiet "$BROKER_SERVICE"&&die "broker admission remains active"
 GARM_SESSION_FAILURE_QUARANTINE=true; export GARM_SESSION_FAILURE_QUARANTINE
 recover_allocations||die "allocation recovery failed; GARM and policy remain active"

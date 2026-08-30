@@ -18,7 +18,7 @@ rollback(){ local status="$1"; trap - ERR INT TERM EXIT; set +e; systemctl stop 
 trap 'rollback $?' ERR INT TERM EXIT
 create_activation_sentinel; sentinel_created=true
 systemctl enable --now "$POLICY_SERVICE" "$PROXY_SERVICE"; create_network_sentinel
-manager_started=true; systemctl enable --now "$GARM_SERVICE"; systemctl is-active --quiet "$GARM_SERVICE"||die "GARM failed"
+manager_started=true; systemctl enable --now "$GARM_SERVICE"; systemctl is-active --quiet "$GARM_SERVICE"||die "GARM failed"; wait_for_garm_cli||die "GARM loopback API did not become ready"
 zero_runtime_state||die "activation requires zero scale sets and instances"
 systemctl enable --now "$BROKER_SERVICE"; systemctl is-active --quiet "$BROKER_SERVICE"||die "broker failed"
 zero_runtime_state||die "broker startup left transient runtime"
