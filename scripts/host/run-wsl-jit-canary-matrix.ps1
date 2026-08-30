@@ -27,10 +27,20 @@ $StdoutPath = Join-Path $Root "worker.stdout.log"
 $StderrPath = Join-Path $Root "worker.stderr.log"
 $DiagnosticsRoot = "C:\ProgramData\self-hosted-ci\diagnostics\canary-matrix\v1"
 $PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+$MinimumFreeCommitBytes = 6GB
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Assert-FreeCommitReserve {
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    $freeCommitBytes = [int64]$os.FreeVirtualMemory * 1KB
+    if ($freeCommitBytes -lt $MinimumFreeCommitBytes) {
+        throw "insufficient free Windows commit for canary: observed=$freeCommitBytes required=$MinimumFreeCommitBytes"
+    }
+    return $freeCommitBytes
 }
 
 function New-CryptographicAccountPassword {
@@ -254,7 +264,7 @@ function Invoke-SchedulerObservation([string]$Operation, [scriptblock]$Action) {
         try { return & $Action }
         catch {
             $exception = $_.Exception
-            $hresult = "0x{0:X8}" -f ([uint32]$exception.HResult)
+            $hresult = "0x{0:X8}" -f $exception.HResult
             $failures.Add("attempt=$attempt type=$($exception.GetType().FullName) hresult=$hresult message=$($exception.Message)")
             if ($attempt -eq 5) {
                 throw "$Operation failed after bounded read-only retries: $($failures -join ' | ')"
@@ -369,7 +379,7 @@ function Save-FailureDiagnostics([string]$Failure, [Security.Principal.SecurityI
     $exceptionType = $null; $hresult = $null; $scriptName = $null; $scriptLine = $null; $position = $null
     if ($ErrorRecord) {
         $exceptionType = $ErrorRecord.Exception.GetType().FullName
-        $hresult = "0x{0:X8}" -f ([uint32]$ErrorRecord.Exception.HResult)
+        $hresult = "0x{0:X8}" -f $ErrorRecord.Exception.HResult
         $scriptName = $ErrorRecord.InvocationInfo.ScriptName
         $scriptLine = $ErrorRecord.InvocationInfo.ScriptLineNumber
         $position = $ErrorRecord.InvocationInfo.PositionMessage
@@ -394,8 +404,9 @@ if ($bundleLength -ne $ExpectedBundleBytes -or $bundleSha256 -cne $ExpectedBundl
 $service = Get-LocalUser -Name $ServiceAccount -ErrorAction Stop
 if (-not $service.Enabled -or $service.SID.Value -ne $ExpectedServiceAccountSid) { throw "service identity mismatch" }
 Assert-NonAdmin $service
+$freeCommitBytes = Assert-FreeCommitReserve
 
-[ordered]@{mode=$(if($Apply){"apply"}else{"plan"});apply_requested=[bool]$Apply;task_name=$TaskName;service_sid=$service.SID.Value;distro=$DistroName;bundle_sha256=$bundleSha256;bundle_bytes=$bundleLength;reviewer_fingerprint=$ExpectedReviewerFingerprint;nonce=$ExpectedCanaryNonce;max_allocations=6;max_concurrency=1;production_activation_authorized=$false;required_check_authorized=$false;outbound_worker_authorized=$false;distro_restart_only_after_durable_checkpoint=$true;transport="Windows-to-WSL-stdin-no-drvfs";no_host_changes=(-not [bool]$Apply)} | ConvertTo-Json -Compress
+[ordered]@{mode=$(if($Apply){"apply"}else{"plan"});apply_requested=[bool]$Apply;task_name=$TaskName;service_sid=$service.SID.Value;distro=$DistroName;bundle_sha256=$bundleSha256;bundle_bytes=$bundleLength;reviewer_fingerprint=$ExpectedReviewerFingerprint;nonce=$ExpectedCanaryNonce;free_commit_bytes=$freeCommitBytes;minimum_free_commit_bytes=$MinimumFreeCommitBytes;max_allocations=6;max_concurrency=1;production_activation_authorized=$false;required_check_authorized=$false;outbound_worker_authorized=$false;distro_restart_only_after_durable_checkpoint=$true;transport="Windows-to-WSL-stdin-no-drvfs";no_host_changes=(-not [bool]$Apply)} | ConvertTo-Json -Compress
 if (-not $Apply) { return }
 if (-not ($AcknowledgeCanaryGitHubContact -and $AcknowledgeTransientRunnerRegistration -and $AcknowledgeDistroRestart -and $AcknowledgeOneTimePasswordRotation)) { throw "Apply requires all four explicit canary acknowledgements" }
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "canary one-shot task already exists" }

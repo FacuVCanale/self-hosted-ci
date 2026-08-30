@@ -199,6 +199,22 @@ class CanaryMatrixWrapperTests(unittest.TestCase):
         )[0]
         for field in ("exception_type", "hresult", "script_name", "script_line", "position"):
             self.assertIn(field, diagnostics)
+        self.assertNotIn("[uint32]$ErrorRecord.Exception.HResult", diagnostics)
+
+    def test_negative_hresult_is_formatted_without_a_failing_uint32_cast(self):
+        self.assertEqual(self.source.count('"0x{0:X8}" -f $exception.HResult'), 1)
+        self.assertEqual(self.source.count('"0x{0:X8}" -f $ErrorRecord.Exception.HResult'), 1)
+        self.assertNotIn("[uint32]$exception.HResult", self.source)
+
+    def test_commit_reserve_is_checked_before_any_host_mutation(self):
+        reserve = self.source.index("$freeCommitBytes = Assert-FreeCommitReserve")
+        staging = self.source.index("New-Item -ItemType Directory -Path $Root", reserve)
+        password = self.source.index("Set-LocalUser -Name $ServiceAccount", reserve)
+        self.assertLess(reserve, staging)
+        self.assertLess(reserve, password)
+        self.assertIn("$MinimumFreeCommitBytes = 6GB", self.source)
+        self.assertIn("FreeVirtualMemory", self.source)
+        self.assertIn("minimum_free_commit_bytes=$MinimumFreeCommitBytes", self.source)
 
 
 if __name__ == "__main__":
