@@ -75,7 +75,9 @@ if id -nG "${RUNNER_USER}" | tr ' ' '\n' | grep -Eq '^(sudo|admin|wheel)$'; then
 fi
 
 install -d -o root -g "${RUNNER_USER}" -m 0750 "${INSTALL_DIR}"
-install -d -o root -g "${RUNNER_USER}" -m 0750 "${STATE_DIR}"
+if [[ ! -d "${STATE_DIR}" ]]; then
+  install -d -o root -g "${RUNNER_USER}" -m 0750 "${STATE_DIR}"
+fi
 install -d -o "${RUNNER_USER}" -g "${RUNNER_USER}" -m 0700 "${STATE_DIR}/work"
 install -d -o "${RUNNER_USER}" -g "${RUNNER_USER}" -m 0700 "${STATE_DIR}/tmp"
 runner_home="$(getent passwd "${RUNNER_USER}" | cut -d: -f6)"

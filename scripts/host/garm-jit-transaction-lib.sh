@@ -21,6 +21,7 @@ if b.get("garm_cli_home")!=h["garm_cli_home"] or b.get("provider_name")!="incus_
 PY
 }
 garm_cli(){ "$GARM_SESSION_HELPER" run -- --format json "$@"&&return; local s=$?; [[ "${GARM_SESSION_FAILURE_QUARANTINE:-false}" == true ]]&&"$NETWORK_POLICY_SCRIPT" quarantine >/dev/null 2>&1||true; return "$s"; }
+wait_for_garm_cli(){ local attempt; for attempt in {1..30}; do systemctl is-active --quiet "$GARM_SERVICE"||return 1; "$GARM_SESSION_HELPER" ensure >/dev/null 2>&1&&return 0; sleep 1; done; return 1; }
 configured_scale_sets_empty(){ local rows flag id inv; rows="$(python3 - "$BROKER_CONFIG" <<'PY'
 import json,sys
 for t in json.load(open(sys.argv[1]))["targets"].values(): print(t["entity_flag"]+"\t"+t["entity_id"])

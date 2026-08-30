@@ -130,9 +130,10 @@ fi
 install -d -o root -g garm-manager -m 0751 "${TARGET_ROOT}"
 install -d -o root -g garm-manager -m 0750 "${TARGET_ROOT}/garm"
 install -d -o root -g root -m 0750 "${TARGET_ROOT}/incus"
-install -d -o root -g root -m 0700 "${STATE_ROOT}"
+install -d -o root -g garm-manager -m 0710 "${STATE_ROOT}"
 install -d -o root -g root -m 0700 "${STATE_ROOT}/health"
-install -d -o root -g root -m 0700 "${STATE_ROOT}/garm" "${STATE_ROOT}/outbound-worker"
+install -d -o garm-manager -g garm-manager -m 0700 "${STATE_ROOT}/garm"
+install -d -o root -g root -m 0700 "${STATE_ROOT}/outbound-worker"
 if [[ "${contract_mode}" == "bootstrap-inert" ]]; then
   install -d -o root -g root -m 0700 "${TARGET_ROOT}/bootstrap" "${STATE_ROOT}/bootstrap"
   rm -f "${STATE_ROOT}/bootstrap/bootstrap-install-receipt-v1.json"
