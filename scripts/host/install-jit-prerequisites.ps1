@@ -28,6 +28,8 @@ $ExpectedGarmCliSha256 = "983fa54557f3f5ce3aa1eeb2387499f5f823d14512a0559ba88866
 $ExpectedGarmProviderIncusVersion = "0.1.5"
 $ExpectedGarmProviderIncusSha256 = "1489b5f9b3f01528e338c604c13dabe8321ed6f1bc6de77c7344119d7731c43f"
 $ExpectedIncusVersion = "6.0.0-1ubuntu0.3"
+$ExpectedCowsqlVersion = "1.15.8-1"
+$ExpectedCowsqlSha256 = "650da8a131d05d89d893e8e168f1be43913d9cdbd631a08dda2fc313a1d1939f"
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -120,6 +122,7 @@ function Save-FailureDiagnostics([string]$FailureMessage, [Security.Principal.Se
         service_sid = $ServiceSid.Value
         distro = $DistroName
         incus_version = $IncusVersion
+        cowsql_version = $ExpectedCowsqlVersion
         garm_version = $ExpectedGarmVersion
         failure = $FailureMessage
         runner_registration_performed = $false
@@ -145,6 +148,7 @@ $payloadSha256 = ([Security.Cryptography.SHA256]::Create().ComputeHash($payloadB
 [ordered]@{
     mode = $(if ($Apply) { "apply" } else { "plan" }); apply_requested = [bool]$Apply; task_name = $TaskName
     service_sid = $service.SID.Value; distro = $DistroName; incus_version = $IncusVersion
+    cowsql_version = $ExpectedCowsqlVersion; cowsql_sha256 = $ExpectedCowsqlSha256
     garm_version = $ExpectedGarmVersion; garm_sha256 = $ExpectedGarmSha256
     garm_cli_version = $ExpectedGarmCliVersion; garm_cli_sha256 = $ExpectedGarmCliSha256
     garm_provider_incus_version = $ExpectedGarmProviderIncusVersion; garm_provider_incus_sha256 = $ExpectedGarmProviderIncusSha256
@@ -259,6 +263,7 @@ if (`$result.status -ne 'installed' -or `$result.garm_enabled -ne `$false -or `$
         $result.garm_cli_version -ne $ExpectedGarmCliVersion -or $result.garm_cli_sha256 -ne $ExpectedGarmCliSha256 -or
         $result.garm_provider_incus_version -ne $ExpectedGarmProviderIncusVersion -or $result.garm_provider_incus_sha256 -ne $ExpectedGarmProviderIncusSha256 -or
         $result.garm_manager_incus_admin -ne $false -or $result.incus_version -ne $IncusVersion -or
+        $result.cowsql_version -ne $ExpectedCowsqlVersion -or $result.cowsql_sha256 -ne $ExpectedCowsqlSha256 -or $result.cowsql_held -ne $true -or
         $result.dnsmasq_base_installed -ne $true -or $result.dnsmasq_service_absent -ne $true -or
         $result.nftables_installed -ne $true -or $result.squid_installed -ne $true -or
         $result.distribution_network_services_disabled -ne $true -or
@@ -273,7 +278,7 @@ if (`$result.status -ne 'installed' -or `$result.garm_enabled -ne `$false -or `$
     $registered = $false
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task remains after unregister" }
     Remove-Item -LiteralPath $Root -Recurse -Force
-    [ordered]@{ status="installed"; incus_version=$IncusVersion; garm_version=$ExpectedGarmVersion; garm_cli_version=$ExpectedGarmCliVersion; garm_provider_incus_version=$ExpectedGarmProviderIncusVersion; dnsmasq_base_installed=$true; dnsmasq_service_absent=$true; nftables_installed=$true; squid_installed=$true; distribution_network_services_disabled=$true; garm_manager_incus_admin=$false; garm_enabled=$false; runner_registration_performed=$false; one_shot_task_absent=$true; stored_task_credential_invalidated=$true } | ConvertTo-Json -Compress
+    [ordered]@{ status="installed"; incus_version=$IncusVersion; cowsql_version=$ExpectedCowsqlVersion; cowsql_sha256=$ExpectedCowsqlSha256; cowsql_held=$true; garm_version=$ExpectedGarmVersion; garm_cli_version=$ExpectedGarmCliVersion; garm_provider_incus_version=$ExpectedGarmProviderIncusVersion; dnsmasq_base_installed=$true; dnsmasq_service_absent=$true; nftables_installed=$true; squid_installed=$true; distribution_network_services_disabled=$true; garm_manager_incus_admin=$false; garm_enabled=$false; runner_registration_performed=$false; one_shot_task_absent=$true; stored_task_credential_invalidated=$true } | ConvertTo-Json -Compress
 }
 catch {
     $original = $_.Exception.Message; $cleanup = [Collections.Generic.List[string]]::new()

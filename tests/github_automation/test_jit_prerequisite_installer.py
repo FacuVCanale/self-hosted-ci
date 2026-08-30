@@ -86,6 +86,12 @@ class JitPrerequisiteInstallerTests(unittest.TestCase):
             'tar -tzf "${tx}/garm-provider-incus.tgz"',
             "/usr/local/libexec/garm/garm-provider-incus",
             '"incus=${incus_version}"',
+            "cowsql_version='1.15.8-1'",
+            "650da8a131d05d89d893e8e168f1be43913d9cdbd631a08dda2fc313a1d1939f",
+            "libcowsql0_1.15.8-1_amd64.deb",
+            'dpkg -i "${tx}/libcowsql0.deb"',
+            "apt-mark hold incus libcowsql0",
+            '"cowsql_held":true',
             "dnsmasq-base",
             "for package in e2fsprogs util-linux dnsmasq-base nftables squid",
             "apt-get remove -y dnsmasq",
@@ -233,6 +239,8 @@ class JitPrerequisiteInstallerTests(unittest.TestCase):
     def test_versions_and_deadlines_are_policy_pinned(self) -> None:
         source = INSTALLER.read_text(encoding="utf-8")
         self.assertIn('$ExpectedIncusVersion = "6.0.0-1ubuntu0.3"', source)
+        self.assertIn('$ExpectedCowsqlVersion = "1.15.8-1"', source)
+        self.assertIn('$result.cowsql_held -ne $true', source)
         self.assertIn(
             '$ExpectedGarmCliSha256 = "983fa54557f3f5ce3aa1eeb2387499f5f823d14512a0559ba888667bc3b3e88e"',
             source,

@@ -30,6 +30,7 @@ PACKAGES = (
     "dnsmasq-base",
     "e2fsprogs",
     "incus",
+    "libcowsql0",
     "nftables",
     "squid",
     "util-linux",
@@ -44,6 +45,10 @@ BINARIES = {
 }
 EXPECTED_SOFTWARE = {
     "incus": {"version": "6.0.0-1ubuntu0.3"},
+    "libcowsql0": {
+        "version": "1.15.8-1",
+        "artifact_sha256": "650da8a131d05d89d893e8e168f1be43913d9cdbd631a08dda2fc313a1d1939f",
+    },
     "garm": {
         "version": "0.2.1",
         "artifact_sha256": "11176acb8a725f914b9b947891b4837d374fb616195562cc0ad45a7be8b6c746",
