@@ -294,7 +294,7 @@ class JitPilotTests(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            2, text.count("run: python3 scripts/check-public-distribution.py")
+            2, text.count("run: python3 -m compileall -q .")
         )
         for forbidden in (
             "child-claim",
