@@ -1,7 +1,7 @@
 [Unit]
 Description=self-hosted-ci fail-closed runner network policy
-Requires=self-hosted-ci-network-quarantine.service
-After=self-hosted-ci-network-quarantine.service
+Requires=self-hosted-ci-network-quarantine.service incus.service
+After=self-hosted-ci-network-quarantine.service incus.service
 Before=self-hosted-ci-egress-proxy.service self-hosted-ci-garm.service
 ConditionPathExists=/etc/self-hosted-ci/ACTIVATION_APPROVED
 ConditionPathExists=/sys/class/net/ci-jit-isolated

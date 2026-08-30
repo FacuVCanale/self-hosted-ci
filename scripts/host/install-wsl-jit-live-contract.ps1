@@ -25,6 +25,7 @@ $WorkerPath = Join-Path $Root "install-worker.ps1"
 $ResultPath = Join-Path $Root "install-result.json"
 $StdoutPath = Join-Path $Root "worker.stdout.log"
 $StderrPath = Join-Path $Root "worker.stderr.log"
+$PackageArchivePath = Join-Path $Root "package.zip"
 $UnsignedStagingPath = Join-Path $Root "unsigned-live-contract.tar"
 $UnsignedOutputRoot = "C:\ProgramData\self-hosted-ci\unsigned-live-contract"
 $DiagnosticsRoot = "C:\ProgramData\self-hosted-ci\diagnostics\live-contract-install\v1"
@@ -74,6 +75,13 @@ function Assert-NoReparsePath([string]$Path, [string]$Boundary) {
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "reparse points are forbidden in package inputs" }
         if ($cursor -eq $root) { break }
         $cursor = Split-Path -Parent $cursor
+    }
+}
+
+function Assert-NoReparseTree([string]$Path) {
+    Assert-NoReparsePath $Path $Path
+    foreach ($item in @(Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop)) {
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "reparse points are forbidden in package transport" }
     }
 }
 
@@ -174,6 +182,7 @@ Assert-NonAdmin $service
     input_sha256 = $inputSha256
     input_bytes = $inputLength
     diagnostic_contract_version = $DiagnosticVersion
+    transport = "stdin-no-drvfs"
     operations = $(if ($CollectUnsigned) { @("regenerate the unsigned live artifact contract", "export a deterministic content-addressed tar", "leave provisioning and activation untouched") } else { @("regenerate and compare the signed live artifact contract", "verify and provision under the dedicated WSL service identity", "leave GARM and GitHub integration inactive") })
     garm_activated = $false
     github_configured = $false
@@ -194,8 +203,13 @@ $registered = $false; $passwordApplied = $false; $temporaryPassword = $null
 try {
     [void](New-Item -ItemType Directory -Path $Root)
     Set-Acl -LiteralPath $Root -AclObject (New-ProtectedAcl $service.SID)
-    $inputLinuxPath = "/mnt/c/ProgramData/self-hosted-ci/package/" + $inputRelativePath.Replace('\','/')
-    $packageLinuxPath = "/mnt/c/ProgramData/self-hosted-ci/package"
+    Assert-NoReparseTree $PackageRoot
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::CreateFromDirectory($PackageRoot, $PackageArchivePath, [IO.Compression.CompressionLevel]::Optimal, $false)
+    $packageArchiveBytes = [IO.File]::ReadAllBytes($PackageArchivePath)
+    $packageArchiveSha256 = ([Security.Cryptography.SHA256]::Create().ComputeHash($packageArchiveBytes) | ForEach-Object { $_.ToString("x2") }) -join ""
+    $packageArchiveLength = $packageArchiveBytes.Length
+    [Array]::Clear($packageArchiveBytes, 0, $packageArchiveBytes.Length)
     if ($CollectUnsigned) {
         $payload = @'
 set -euo pipefail
@@ -322,36 +336,103 @@ printf '%s\n' '{"status":"installed","live_contract_verified":true,"garm_enabled
     $payloadSha256 = ([Security.Cryptography.SHA256]::Create().ComputeHash($payloadBytes) | ForEach-Object { $_.ToString("x2") }) -join ""
     [Array]::Clear($payloadBytes, 0, $payloadBytes.Length)
     $bootstrap = @'
-import base64, hashlib, os, subprocess, sys, tempfile
-expected = sys.argv[1]
-raw = base64.b64decode(sys.stdin.buffer.read().replace(b"\r", b"").replace(b"\n", b""), validate=True)
-if hashlib.sha256(raw).hexdigest() != expected:
-    raise SystemExit("payload sha256 mismatch")
-fd, path = tempfile.mkstemp(prefix="self-hosted-ci-live-contract.", suffix=".sh", dir="/run")
+import base64, hashlib, json, os, pathlib, shutil, stat, subprocess, sys, tempfile, zipfile
+envelope = json.loads(sys.stdin.buffer.read())
+expected_keys = {"package_archive_b64", "package_archive_bytes", "package_archive_sha256", "input_bytes", "input_relative_path", "input_sha256", "operation", "payload_b64", "payload_sha256", "reviewer_fingerprint"}
+if set(envelope) != expected_keys:
+    raise SystemExit("invalid stdin envelope")
+archive = base64.b64decode(envelope["package_archive_b64"], validate=True)
+payload = base64.b64decode(envelope["payload_b64"], validate=True)
+if len(archive) != envelope["package_archive_bytes"] or hashlib.sha256(archive).hexdigest() != envelope["package_archive_sha256"]:
+    raise SystemExit("stdin package archive hash or size mismatch")
+if hashlib.sha256(payload).hexdigest() != envelope["payload_sha256"]:
+    raise SystemExit("stdin payload hash mismatch")
+relative = pathlib.PurePosixPath(envelope["input_relative_path"])
+if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+    raise SystemExit("invalid stdin input path")
+work = pathlib.Path(tempfile.mkdtemp(prefix="self-hosted-ci-live-contract.", dir="/run"))
+os.chmod(work, 0o700)
+archive_path, payload_path, package_root = work / "package.zip", work / "apply.sh", work / "package"
 try:
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(raw); handle.flush(); os.fsync(handle.fileno())
-    os.chmod(path, 0o700)
-    subprocess.run(["/bin/bash", "-n", path], check=True)
-    subprocess.run(["/bin/bash", path, *sys.argv[2:]], check=True)
+    archive_path.write_bytes(archive)
+    payload_path.write_bytes(payload)
+    os.chmod(archive_path, 0o600); os.chmod(payload_path, 0o700); package_root.mkdir(mode=0o700)
+    with zipfile.ZipFile(archive_path) as package:
+        seen = set()
+        for member in package.infolist():
+            member_path = pathlib.PurePosixPath(member.filename.replace("\\", "/"))
+            mode = member.external_attr >> 16
+            if not member_path.parts or member_path.is_absolute() or ".." in member_path.parts or member_path in seen or stat.S_ISLNK(mode):
+                raise SystemExit("unsafe package archive member")
+            seen.add(member_path)
+            target = package_root.joinpath(*member_path.parts)
+            if member.is_dir():
+                target.mkdir(mode=0o700, parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with package.open(member) as source, os.fdopen(descriptor, "wb") as destination:
+                shutil.copyfileobj(source, destination)
+    input_path = package_root.joinpath(*relative.parts)
+    if not input_path.is_file() or input_path.is_symlink():
+        raise SystemExit("stdin input archive is unsafe or absent")
+    input_raw = input_path.read_bytes()
+    if len(input_raw) != envelope["input_bytes"] or hashlib.sha256(input_raw).hexdigest() != envelope["input_sha256"]:
+        raise SystemExit("stdin input archive hash or size mismatch")
+    subprocess.run(["/bin/bash", "-n", payload_path], check=True)
+    arguments = [str(package_root), str(input_path), envelope["input_sha256"]]
+    output_path = work / "unsigned-live-contract.tar"
+    if envelope["operation"] == "collect-unsigned":
+        arguments.append(str(output_path))
+    elif envelope["operation"] == "install-signed":
+        arguments.append(envelope["reviewer_fingerprint"])
+    else:
+        raise SystemExit("invalid stdin operation")
+    completed = subprocess.run(["/bin/bash", payload_path, *arguments], check=False, text=True, capture_output=True)
+    if completed.stderr:
+        sys.stderr.write(completed.stderr)
+    if completed.returncode:
+        if completed.stdout:
+            sys.stdout.write(completed.stdout)
+        raise SystemExit(completed.returncode)
+    lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise SystemExit("live contract payload produced no result")
+    result = json.loads(lines[-1])
+    for line in lines[:-1]:
+        print(line)
+    if envelope["operation"] == "collect-unsigned":
+        output = output_path.read_bytes()
+        if result.get("unsigned_bundle_sha256") != hashlib.sha256(output).hexdigest() or result.get("unsigned_bundle_bytes") != len(output):
+            raise SystemExit("unsigned output hash or size mismatch before return transport")
+        result["unsigned_bundle_b64"] = base64.b64encode(output).decode("ascii")
+    result["transport"] = "stdin-no-drvfs"
+    print(json.dumps(result, separators=(",", ":"), sort_keys=True))
 finally:
-    try: os.unlink(path)
-    except FileNotFoundError: pass
+    shutil.rmtree(work, ignore_errors=True)
 '@
     $bootstrapB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bootstrap))
-    $payloadArguments = $(if ($CollectUnsigned) { "$packageLinuxPath $inputLinuxPath $inputSha256 /mnt/c/ProgramData/self-hosted-ci/live-contract-install/unsigned-live-contract.tar" } else { "$packageLinuxPath $inputLinuxPath $inputSha256 $ExpectedReviewerFingerprint" })
     $worker = @"
 `$ErrorActionPreference = 'Stop'
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '$ExpectedServiceAccountSid') { throw 'worker service SID mismatch' }
+`$inputBytes = [IO.File]::ReadAllBytes('$inputPath')
+`$actualInputSha = ([Security.Cryptography.SHA256]::Create().ComputeHash(`$inputBytes) | ForEach-Object { `$_.ToString('x2') }) -join ''
+if (`$actualInputSha -cne '$inputSha256' -or `$inputBytes.Length -ne $inputLength) { throw 'input changed before stdin transfer' }
+[Array]::Clear(`$inputBytes, 0, `$inputBytes.Length)
+`$packageBytes = [IO.File]::ReadAllBytes('$PackageArchivePath')
+`$actualPackageSha = ([Security.Cryptography.SHA256]::Create().ComputeHash(`$packageBytes) | ForEach-Object { `$_.ToString('x2') }) -join ''
+if (`$actualPackageSha -cne '$packageArchiveSha256' -or `$packageBytes.Length -ne $packageArchiveLength) { throw 'package archive changed before stdin transfer' }
+`$envelope = [ordered]@{ package_archive_b64=[Convert]::ToBase64String(`$packageBytes); package_archive_bytes=$packageArchiveLength; package_archive_sha256=`$actualPackageSha; input_bytes=$inputLength; input_relative_path='$($inputRelativePath.Replace('\','/'))'; input_sha256='$inputSha256'; operation='$operation'; payload_b64='$payloadB64'; payload_sha256='$payloadSha256'; reviewer_fingerprint='$ExpectedReviewerFingerprint' } | ConvertTo-Json -Compress
+[Array]::Clear(`$packageBytes, 0, `$packageBytes.Length)
 `$psi = [Diagnostics.ProcessStartInfo]::new()
 `$psi.FileName = "`$env:SystemRoot\System32\wsl.exe"
-`$psi.Arguments = '-d $DistroName -u root -- systemd-run --quiet --wait --pipe --collect --setenv=WSL_DISTRO_NAME=$DistroName --property=RuntimeMaxSec=600 --property=TimeoutStopSec=15 --property=KillMode=control-group --unit=self-hosted-ci-live-contract-install /usr/bin/python3 -c "import base64;exec(base64.b64decode(''$bootstrapB64''))" $payloadSha256 $payloadArguments'
+`$psi.Arguments = '-d $DistroName -u root -- systemd-run --quiet --wait --pipe --collect --setenv=WSL_DISTRO_NAME=$DistroName --property=RuntimeMaxSec=600 --property=TimeoutStopSec=15 --property=KillMode=control-group --unit=self-hosted-ci-live-contract-install /usr/bin/python3 -c "import base64;exec(base64.b64decode(''$bootstrapB64''))"'
 `$psi.UseShellExecute = `$false; `$psi.CreateNoWindow = `$true
 `$psi.RedirectStandardInput = `$true; `$psi.RedirectStandardOutput = `$true; `$psi.RedirectStandardError = `$true
 `$process = [Diagnostics.Process]::new(); `$process.StartInfo = `$psi
 if (-not `$process.Start()) { throw 'could not start exact WSL live contract installer' }
 `$stdoutTask = `$process.StandardOutput.ReadToEndAsync(); `$stderrTask = `$process.StandardError.ReadToEndAsync()
-`$process.StandardInput.Write('$payloadB64'); `$process.StandardInput.Close()
+`$process.StandardInput.Write(`$envelope); `$process.StandardInput.Close(); `$envelope = `$null
 if (-not `$process.WaitForExit($TimeoutSeconds * 1000)) { try { `$process.Kill() } catch {}; throw 'WSL live contract installer timed out' }
 `$stdout = `$stdoutTask.GetAwaiter().GetResult(); `$stderr = `$stderrTask.GetAwaiter().GetResult()
 [IO.File]::WriteAllText('$StdoutPath', `$stdout, [Text.UTF8Encoding]::new(`$false))
@@ -360,8 +441,13 @@ if (`$process.ExitCode -ne 0) { throw "WSL live contract installer failed: `$(`$
 `$last = @(`$stdout -split '[\r\n]+' | Where-Object { `$_.Trim() }) | Select-Object -Last 1
 `$result = `$last | ConvertFrom-Json
 if ('$operation' -eq 'collect-unsigned') {
-    if (`$result.status -ne 'collected' -or `$result.unsigned_bundle_sha256 -notmatch '^[0-9a-f]{64}$' -or `$result.unsigned_bundle_bytes -le 0) { throw 'unsigned collection postcondition failed' }
-} elseif (`$result.status -ne 'installed' -or `$result.live_contract_verified -ne `$true -or `$result.garm_enabled -ne `$false -or `$result.github_configured -ne `$false -or `$result.runtime_ready_created -ne `$false -or `$result.runner_registration_performed -ne `$false) { throw 'live contract postcondition failed' }
+    if (`$result.status -ne 'collected' -or `$result.transport -ne 'stdin-no-drvfs' -or `$result.unsigned_bundle_sha256 -notmatch '^[0-9a-f]{64}$' -or `$result.unsigned_bundle_bytes -le 0 -or -not `$result.unsigned_bundle_b64) { throw 'unsigned collection postcondition failed' }
+    `$unsignedBytes = [Convert]::FromBase64String([string]`$result.unsigned_bundle_b64)
+    `$unsignedSha = ([Security.Cryptography.SHA256]::Create().ComputeHash(`$unsignedBytes) | ForEach-Object { `$_.ToString('x2') }) -join ''
+    if (`$unsignedSha -cne `$result.unsigned_bundle_sha256 -or `$unsignedBytes.Length -ne `$result.unsigned_bundle_bytes) { throw 'unsigned return transport hash or size mismatch' }
+    [IO.File]::WriteAllBytes('$UnsignedStagingPath', `$unsignedBytes); [Array]::Clear(`$unsignedBytes, 0, `$unsignedBytes.Length)
+    `$result.PSObject.Properties.Remove('unsigned_bundle_b64')
+} elseif (`$result.status -ne 'installed' -or `$result.transport -ne 'stdin-no-drvfs' -or `$result.live_contract_verified -ne `$true -or `$result.garm_enabled -ne `$false -or `$result.github_configured -ne `$false -or `$result.runtime_ready_created -ne `$false -or `$result.runner_registration_performed -ne `$false) { throw 'live contract postcondition failed' }
 [IO.File]::WriteAllText('$ResultPath', (`$result | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new(`$false))
 "@
     [IO.File]::WriteAllText($WorkerPath, $worker, [Text.UTF8Encoding]::new($false))
@@ -411,9 +497,9 @@ if ('$operation' -eq 'collect-unsigned') {
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task remains after unregister" }
     Remove-Item -LiteralPath $Root -Recurse -Force
     if ($CollectUnsigned) {
-        [ordered]@{ status="collected"; unsigned_bundle_path=$unsignedDestination; unsigned_bundle_sha256=$actualUnsignedSha; unsigned_bundle_bytes=[int64]$result.unsigned_bundle_bytes; provisioned=$false; garm_enabled=$false; github_configured=$false; runtime_ready_created=$false; runner_registration_performed=$false; one_shot_task_absent=$true; stored_task_credential_invalidated=$true; staging_absent=$true } | ConvertTo-Json -Compress
+        [ordered]@{ status="collected"; transport="stdin-no-drvfs"; unsigned_bundle_path=$unsignedDestination; unsigned_bundle_sha256=$actualUnsignedSha; unsigned_bundle_bytes=[int64]$result.unsigned_bundle_bytes; provisioned=$false; garm_enabled=$false; github_configured=$false; runtime_ready_created=$false; runner_registration_performed=$false; one_shot_task_absent=$true; stored_task_credential_invalidated=$true; staging_absent=$true } | ConvertTo-Json -Compress
     } else {
-        [ordered]@{ status="installed"; live_contract_verified=$true; bundle_sha256=$inputSha256; garm_enabled=$false; github_configured=$false; runtime_ready_created=$false; runner_registration_performed=$false; one_shot_task_absent=$true; stored_task_credential_invalidated=$true; staging_absent=$true } | ConvertTo-Json -Compress
+        [ordered]@{ status="installed"; transport="stdin-no-drvfs"; live_contract_verified=$true; bundle_sha256=$inputSha256; garm_enabled=$false; github_configured=$false; runtime_ready_created=$false; runner_registration_performed=$false; one_shot_task_absent=$true; stored_task_credential_invalidated=$true; staging_absent=$true } | ConvertTo-Json -Compress
     }
 }
 catch {

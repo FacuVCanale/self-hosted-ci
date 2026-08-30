@@ -1,7 +1,7 @@
 [Unit]
 Description=Temporary authorized network policy for the JIT canary lane
-Requires=self-hosted-ci-network-quarantine.service
-After=self-hosted-ci-network-quarantine.service
+Requires=self-hosted-ci-network-quarantine.service incus.service
+After=self-hosted-ci-network-quarantine.service incus.service
 Before=self-hosted-ci-canary-egress-proxy.service self-hosted-ci-canary-garm.service
 ConditionPathExists=/run/self-hosted-ci/CANARY_APPROVED
 Conflicts=self-hosted-ci-network-policy.service

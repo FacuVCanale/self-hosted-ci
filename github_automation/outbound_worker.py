@@ -26,8 +26,13 @@ from .coordinator import (
 )
 from .crypto import spki_fingerprint
 from .github import ObservedWorkflowJob
-from .jit_pilot import JitPilotPackageV1, PilotTerminalMonitor
-from .runner_jit import sign_allocation, validate_allocation_payload
+from .jit_pilot import JitPilotError, JitPilotPackageV1, PilotTerminalMonitor
+from .local_approval import LocalApprovalError
+from .runner_jit import (
+    sign_allocation,
+    validate_allocation_payload,
+    validate_allocation_reservation,
+)
 
 
 class WorkerError(RuntimeError):
@@ -454,6 +459,65 @@ class PilotWorker:
         if receipt != {"allocation_id": allocation_id, "state": "absent"}:
             raise WorkerError("pilot allocation recovery proof is not exact")
 
+    @staticmethod
+    def _recovery_allocation_id(request: Mapping[str, Any]) -> str:
+        """Authenticate the static allocation binding without accepting its expiry."""
+
+        package_value = request.get("pilot_package")
+        reservation = request.get("reservation")
+        if not isinstance(package_value, Mapping) or not isinstance(
+            reservation, Mapping
+        ):
+            raise WorkerError("pilot recovery binding is absent")
+        try:
+            package_issued = datetime.fromisoformat(
+                str(package_value.get("issued_at", "")).removesuffix("Z") + "+00:00"
+            )
+            reservation_issued = datetime.fromisoformat(
+                str(reservation.get("issued_at", "")).removesuffix("Z") + "+00:00"
+            )
+            package = JitPilotPackageV1.from_mapping(
+                package_value, now=package_issued
+            )
+            validate_allocation_reservation(reservation, now=reservation_issued)
+        except (TypeError, ValueError) as exc:
+            raise WorkerError("pilot recovery binding is invalid") from exc
+        if (
+            package.backend != "local"
+            or package.allocation_id != reservation.get("allocation_id")
+            or package.runner_label != reservation.get("scale_set_name")
+        ):
+            raise WorkerError("pilot recovery binding crossed allocation identity")
+        return package.allocation_id
+
+    def _terminal_reconcile(
+        self,
+        key: str,
+        request: Mapping[str, Any],
+        progress: Mapping[str, Any],
+        reason: str,
+    ) -> Mapping[str, Any]:
+        allocation_id = self._recovery_allocation_id(request)
+        self.state.record(key, "cleanup-required", failure_reason=reason)
+        if progress:
+            try:
+                self._recover_exact(allocation_id)
+            except Exception:
+                self.state.fail(key)
+                raise
+        try:
+            self.source.fail(key, reason)
+        except LocalApprovalError:
+            # Revoked/expired approvals are already terminal at the authority
+            # source. Exact local cleanup remains mandatory, but replaying a
+            # terminal source transition must not keep the worker recoverable.
+            pass
+        except Exception:
+            self.state.fail(key)
+            raise
+        self.state.abort(key, reason)
+        return {"status": "failed", "reason": reason}
+
     def run_once(self) -> Mapping[str, Any]:
         request = self.state.recoverable() or self.source.poll()
         if request is None:
@@ -477,28 +541,33 @@ class PilotWorker:
         if claim == "busy":
             return {"status": "busy", "request_id": key}
         progress = self.state.progress(key)
-        if progress:
-            request = self.source.resume(key, request, lease_seconds=7200)
-        else:
-            self.source.claim(key, request, lease_seconds=7200)
+        if progress.get("phase") == "cleanup-required":
+            return self._terminal_reconcile(
+                key,
+                request,
+                progress,
+                progress.get("failure_reason") or "pre-dispatch-failure",
+            )
+        try:
+            if progress:
+                request = self.source.resume(key, request, lease_seconds=7200)
+            else:
+                self.source.claim(key, request, lease_seconds=7200)
+        except LocalApprovalError as exc:
+            return self._terminal_reconcile(
+                key, request, progress, type(exc).__name__
+            )
         self.state_request = request
         reservation = request["reservation"]
-        package = JitPilotPackageV1.from_mapping(
-            request["pilot_package"], now=self.source.clock()
-        )
         try:
-            if progress.get("phase") == "cleanup-required":
-                self._recover_exact(package.allocation_id)
-                self.source.fail(
-                    key, progress.get("failure_reason") or "pre-dispatch-failure"
-                )
-                self.state.abort(
-                    key, progress.get("failure_reason") or "pre-dispatch-failure"
-                )
-                return {
-                    "status": "failed",
-                    "reason": progress.get("failure_reason") or "pre-dispatch-failure",
-                }
+            package = JitPilotPackageV1.from_mapping(
+                request["pilot_package"], now=self.source.clock()
+            )
+        except JitPilotError as exc:
+            return self._terminal_reconcile(
+                key, request, progress, type(exc).__name__
+            )
+        try:
             reserved = progress.get("reserved") or self.broker.reserve(reservation)
             if "reserved" not in progress:
                 self._record(key, "reserved", reserved=reserved)
