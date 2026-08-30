@@ -73,11 +73,54 @@ function Get-HostServices([bool]$WslProbeSucceeded = $false) {
 function Get-UnobservableWslServices {
     $result = [ordered]@{}
     foreach ($name in @(
-        "incus.service", "self-hosted-ci-boundary-verify.service",
+        "incus.service", "self-hosted-ci-allocation-broker.service",
+        "self-hosted-ci-boundary-verify.service",
         "self-hosted-ci-egress-proxy.service", "self-hosted-ci-garm.service",
         "self-hosted-ci-health-heartbeat.timer", "self-hosted-ci-network-policy.service"
     )) { $result[$name] = [ordered]@{ active = "unknown"; enabled = "unknown" } }
     return $result
+}
+
+function Get-CoherentHeartbeat([object]$Heartbeat, [DateTimeOffset]$GeneratedAt) {
+    $status = [string]$Heartbeat.status
+    $maximumAge = [int]$Heartbeat.max_age_seconds
+    if ($maximumAge -ne $SnapshotLifetimeSeconds) {
+        throw "WSL collector returned an incompatible heartbeat lifetime"
+    }
+    if ($status -in @("fresh", "stale")) {
+        if ($null -eq $Heartbeat.observed_at -or $null -eq $Heartbeat.age_seconds) {
+            throw "WSL collector returned an incomplete heartbeat observation"
+        }
+        $observedAt = [DateTimeOffset]::Parse(
+            [string]$Heartbeat.observed_at,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AssumeUniversal
+        ).ToUniversalTime()
+        if ($observedAt -gt $GeneratedAt.AddSeconds(2)) {
+            throw "WSL heartbeat timestamp is ahead of the Windows clock"
+        }
+        $ageSeconds = [int][Math]::Floor(
+            [Math]::Max(0.0, $GeneratedAt.Subtract($observedAt).TotalSeconds)
+        )
+        return [ordered]@{
+            status = if ($ageSeconds -le $maximumAge) { "fresh" } else { "stale" }
+            observed_at = $observedAt.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ")
+            age_seconds = $ageSeconds
+            max_age_seconds = $maximumAge
+        }
+    }
+    if ($status -notin @("absent", "invalid", "not_observable")) {
+        throw "WSL collector returned an incompatible heartbeat status"
+    }
+    if ($null -ne $Heartbeat.observed_at -or $null -ne $Heartbeat.age_seconds) {
+        throw "WSL collector returned an inconsistent heartbeat observation"
+    }
+    return [ordered]@{
+        status = $status
+        observed_at = $null
+        age_seconds = $null
+        max_age_seconds = $maximumAge
+    }
 }
 
 function New-FailClosedSnapshot([DateTimeOffset]$Now, [string]$CurrentSid, [string]$ErrorMessage) {
@@ -118,28 +161,33 @@ function Get-Snapshot {
             throw "WSL collector returned an incompatible observation"
         }
         $hostServices = Get-HostServices $true
+        $generatedAt = [DateTimeOffset]::UtcNow
+        $heartbeat = Get-CoherentHeartbeat $observed.heartbeat $generatedAt
         $blocking = [Collections.Generic.List[string]]::new()
-        foreach ($reason in @($observed.eligibility.blocking_reasons)) { $blocking.Add([string]$reason) }
+        foreach ($reason in @($observed.eligibility.blocking_reasons)) {
+            if ([string]$reason -ne "heartbeat_not_fresh") { $blocking.Add([string]$reason) }
+        }
+        if ($heartbeat.status -ne "fresh") { $blocking.Add("heartbeat_not_fresh") }
         if ($hostServices.sshd.status -ne "running") { $blocking.Add("host_service_not_running:sshd") }
         if ($hostServices.wsl.status -ne "running" -and $hostServices.lxss_manager.status -ne "running") { $blocking.Add("host_service_not_running:wsl") }
         return [ordered]@{
             schema_version = 2
             install_nonce = $InstallNonce
-            generated_at = $now.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ")
-            expires_at = $now.AddSeconds($SnapshotLifetimeSeconds).UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            generated_at = $generatedAt.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            expires_at = $generatedAt.AddSeconds($SnapshotLifetimeSeconds).UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ")
             producer = [ordered]@{ windows_sid = $currentSid; account = $ExpectedServiceAccount; distro = $ExpectedDistroName }
             host = [ordered]@{ service_identity_verified = $true; services = $hostServices }
             distro = $observed.distro
             runner = $observed.runner
             services = $observed.services
-            heartbeat = $observed.heartbeat
+            heartbeat = $heartbeat
             boundary = $observed.boundary
-            eligibility = [ordered]@{ eligible_for_local_ci = ([bool]$observed.eligibility.eligible_for_local_ci -and $blocking.Count -eq 0); blocking_reasons = @($blocking | Sort-Object -Unique) }
+            eligibility = [ordered]@{ eligible_for_local_ci = ($blocking.Count -eq 0); blocking_reasons = @($blocking | Sort-Object -Unique) }
             probe_error = $null
         }
     }
     catch {
-        return New-FailClosedSnapshot $now $currentSid $_.Exception.Message
+        return New-FailClosedSnapshot ([DateTimeOffset]::UtcNow) $currentSid $_.Exception.Message
     }
 }
 
