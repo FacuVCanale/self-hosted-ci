@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import hmac
@@ -222,7 +223,8 @@ def _write_config(path: Path, token: str) -> None:
         raise
 
 
-def ensure_session() -> Path:
+@contextmanager
+def locked_session():
     if os.geteuid() != 0:
         raise SessionError("GARM CLI session helper must run as root")
     _secure_directory(RUNTIME_HOME)
@@ -237,16 +239,26 @@ def ensure_session() -> Path:
     lock_fd = os.open(
         lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600
     )
-    os.fchmod(lock_fd, 0o600)
-    fcntl.flock(lock_fd, fcntl.LOCK_EX)
-    config = config_dir / "config.toml"
-    secret = _root_secret(JWT_SECRET_FILE)
-    # A correctly signed, unexpired token can still be stale after GARM rolls
-    # back or recreates its database because token generations are persisted.
-    # Login on every invocation so the CLI never reuses a generation-stale JWT.
-    token = _login(_root_secret(USERNAME_FILE), _root_secret(PASSWORD_FILE), secret)
-    _write_config(config, token)
-    return config
+    try:
+        os.fchmod(lock_fd, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        config = config_dir / "config.toml"
+        secret = _root_secret(JWT_SECRET_FILE)
+        # A correctly signed, unexpired token can still be stale after GARM rolls
+        # back or recreates its database because token generations are persisted.
+        # Login on every invocation so the CLI never reuses a generation-stale JWT.
+        token = _login(
+            _root_secret(USERNAME_FILE), _root_secret(PASSWORD_FILE), secret
+        )
+        _write_config(config, token)
+        yield config
+    finally:
+        os.close(lock_fd)
+
+
+def ensure_session() -> Path:
+    with locked_session() as config:
+        return config
 
 
 def main() -> int:
@@ -255,10 +267,10 @@ def main() -> int:
     parser.add_argument("args", nargs=argparse.REMAINDER)
     arguments = parser.parse_args()
     try:
-        config = ensure_session()
         if arguments.command == "ensure":
             if arguments.args:
                 raise SessionError("ensure does not accept command arguments")
+            config = ensure_session()
             print(
                 json.dumps(
                     {"status": "ready", "config": str(config)}, separators=(",", ":")
@@ -272,11 +284,15 @@ def main() -> int:
             raise SessionError("run requires a garm-cli command")
         if not GARM_CLI.is_file() or GARM_CLI.is_symlink():
             raise SessionError("pinned garm-cli binary is unavailable")
-        completed = subprocess.run(
-            [str(GARM_CLI), *command],
-            check=False,
-            env={"HOME": str(RUNTIME_HOME), "PATH": "/usr/local/bin:/usr/bin:/bin"},
-        )
+        with locked_session():
+            completed = subprocess.run(
+                [str(GARM_CLI), *command],
+                check=False,
+                env={
+                    "HOME": str(RUNTIME_HOME),
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                },
+            )
         return completed.returncode
     except SessionError as exc:
         print(f"garm-cli session blocked: {exc}", file=sys.stderr)

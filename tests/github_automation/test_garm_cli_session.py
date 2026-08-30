@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -168,15 +169,73 @@ class GarmCliSessionTests(unittest.TestCase):
 
     def test_session_always_logs_in_instead_of_reusing_a_stale_generation(self) -> None:
         source = HELPER.read_text(encoding="utf-8")
-        ensure_session = source[source.index("def ensure_session()") : source.index("def main()")]
-        self.assertNotIn("_token_from_config(config, secret)", ensure_session)
-        self.assertIn("token = _login(", ensure_session)
+        locked_session = source[
+            source.index("def locked_session()") : source.index("def ensure_session()")
+        ]
+        self.assertNotIn("_token_from_config(config, secret)", locked_session)
+        self.assertIn("token = _login(", locked_session)
 
     def test_username_contract_is_alphanumeric(self) -> None:
         helper = load_helper()
         secret = b"j" * 32
         with self.assertRaises(helper.SessionError):
             helper._login(b"admin-name", b"password", secret)
+
+    def test_run_holds_session_lock_until_garm_cli_exits(self) -> None:
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            helper.RUNTIME_HOME = root / "run"
+            helper.GARM_CLI = root / "garm-cli"
+            helper.GARM_CLI.write_text("executable", encoding="utf-8")
+            first_cli_started = threading.Event()
+            release_first_cli = threading.Event()
+            second_login_started = threading.Event()
+            login_calls = 0
+
+            def secure_directory(path: Path) -> None:
+                path.mkdir(mode=0o700, parents=True, exist_ok=True)
+                os.chmod(path, 0o700)
+
+            def login(*_args) -> str:
+                nonlocal login_calls
+                login_calls += 1
+                if login_calls == 2:
+                    second_login_started.set()
+                return f"token-{login_calls}"
+
+            def run(*_args, **_kwargs):
+                if not first_cli_started.is_set():
+                    first_cli_started.set()
+                    self.assertTrue(release_first_cli.wait(2))
+                return mock.Mock(returncode=0)
+
+            def invoke() -> None:
+                with helper.locked_session():
+                    helper.subprocess.run([str(helper.GARM_CLI)], check=False)
+
+            with (
+                mock.patch.object(helper.os, "geteuid", return_value=0),
+                mock.patch.object(helper.os, "fchown"),
+                mock.patch.object(
+                    helper, "_secure_directory", side_effect=secure_directory
+                ),
+                mock.patch.object(helper, "_root_secret", return_value=b"secret"),
+                mock.patch.object(helper, "_login", side_effect=login),
+                mock.patch.object(helper.subprocess, "run", side_effect=run),
+            ):
+                first = threading.Thread(target=invoke)
+                second = threading.Thread(target=invoke)
+                first.start()
+                self.assertTrue(first_cli_started.wait(1))
+                second.start()
+                self.assertFalse(second_login_started.wait(0.1))
+                release_first_cli.set()
+                first.join(2)
+                second.join(2)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(2, login_calls)
 
 
 def stat_mode(path: Path) -> int:

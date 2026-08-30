@@ -13,7 +13,11 @@ import unittest
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from github_automation.crypto import spki_fingerprint
-from github_automation.runner_jit import SqliteAllocationLedger, sign_allocation
+from github_automation.runner_jit import (
+    RunnerJitError,
+    SqliteAllocationLedger,
+    sign_allocation,
+)
 from github_automation.runner_jit_broker import (
     AllocationBroker,
     ExternalLiveWorkflowJobVerifier,
@@ -333,6 +337,48 @@ class AllocationBrokerTests(unittest.TestCase):
             ],
             run.call_args.args[0],
         )
+
+    def test_garm_cli_read_retries_then_returns_json(self):
+        hook = Path(self.tempdir.name) / "hook.py"
+        hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        driver = GarmCliAllocationDriver(
+            {
+                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "provider_name": "incus_ci_jit",
+                "image_alias": "runner-pinned",
+                "image_fingerprint": "b" * 64,
+                "targets": {},
+            },
+            hook,
+        )
+        failed = mock.Mock(returncode=1, stdout="", stderr="blocked")
+        completed = mock.Mock(returncode=0, stdout='{"id": 87}')
+        with (
+            mock.patch("subprocess.run", side_effect=[failed, completed]) as run,
+            mock.patch("time.sleep") as sleep,
+        ):
+            self.assertEqual({"id": 87}, driver._run("scaleset", "show", "87"))
+        self.assertEqual(2, run.call_count)
+        sleep.assert_called_once()
+
+    def test_garm_cli_write_failure_is_translated_without_retry(self):
+        hook = Path(self.tempdir.name) / "hook.py"
+        hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        driver = GarmCliAllocationDriver(
+            {
+                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "provider_name": "incus_ci_jit",
+                "image_alias": "runner-pinned",
+                "image_fingerprint": "b" * 64,
+                "targets": {},
+            },
+            hook,
+        )
+        failed = mock.Mock(returncode=1, stdout="", stderr="blocked")
+        with mock.patch("subprocess.run", return_value=failed) as run:
+            with self.assertRaises(RunnerJitError):
+                driver._run("scaleset", "update", "87", "--enabled=false")
+        self.assertEqual(1, run.call_count)
 
     def test_garm_omitempty_false_and_zero_fields_preserve_disabled_jit_contract(self):
         hook = Path(self.tempdir.name) / "hook.py"
