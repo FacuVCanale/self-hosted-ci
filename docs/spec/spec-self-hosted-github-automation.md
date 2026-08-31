@@ -15,7 +15,7 @@
 
 ## Goal
 
-Provide an opt-in, reversible self-hosted GitHub CI platform and automatic PR reviewer for personal and organization repositories explicitly selected by the operator.
+Provide an opt-in, reversible self-hosted GitHub CI platform for personal and organization repositories explicitly selected by the operator. AI review is a separate product and is outside this repository's scope.
 
 ## User-facing contract
 
@@ -32,7 +32,7 @@ Provide an opt-in, reversible self-hosted GitHub CI platform and automatic PR re
 - Linux: a **dedicated CI WSL2 distribution**, not the personal Ubuntu distro.
 - Initial isolation: disposable Linux containers, one job per JIT runner/container, concurrency one.
 - Runner manager is not preselected: mandatory bake-off compares Fireactions, GARM+Incus and `myoung34/docker-github-actions-runner`; Fireactions is eligible only after functional KVM proof. If none passes, local CI remains disabled pending a stronger VM/dedicated Linux host.
-- Reviewer: PR-Agent plus host-controlled thermo-nuclear `SKILL.md`.
+- AI review: out of scope; maintained and installed separately.
 - Config source: an operator-private configuration store; upstreams are pinned dependencies, not forks by default.
 
 ## Desired state
@@ -383,11 +383,11 @@ appendWindowsPath=false
 Reviewer defaults to **dual/no-public-ingress mode**:
 
 - Reviewer execution is explicitly **BLOCKED** until the operator selects provider, exact model and budget. Planning/provisioning may prepare inert config, but no model secret, webhook activation, PR processing or comments are enabled before the decision record is approved.
-- Required versioned record `decisions/reviewer-provider-v1.yaml` contains provider, exact model/version, per-PR and monthly cost ceilings, token/input/output ceilings, 120-second-or-lower timeout, retry/backoff policy, max files/diff bytes/lines, oversized-PR behavior, secret owner/storage/rotation, provider retention/residency terms, and thermo-nuclear `SKILL.md` provenance (source URL, source commit and SHA-256). Missing fields fail closed.
+- Reviewer provider decisions and review-policy provenance belong to the separate AI-review product and are not configured here.
 - Initial hard safety maxima pending that decision: 100 files, 1 MiB unified diff, 50,000 changed lines, 120 s/attempt and 3 total attempts. Cost/token ceilings have no inferred default and must be selected by the operator.
 
 - Default availability path: trusted GitHub-hosted `pull_request_target` reviewer, no PR checkout, pinned reviewer/skill, API-only diff.
-- Optional self-hosted path, only after explicit public-ingress approval: public receiver validates webhook and durably enqueues before returning HTTP success; WSL PR-Agent consumes later.
+- Optional reviewer paths are outside the self-hosted CI product boundary.
 - HTTP webhook ACK and queue ACK are distinct:
   - receiver returns HTTP 2xx only after durable enqueue, targeted under 10 seconds;
   - consumer ACKs/deletes the queue item only after GitHub comment/update succeeds **and** durable process/comment state is committed.

@@ -39,11 +39,6 @@ def main() -> int:
             f"{PLACEHOLDER_REPOSITORY}/", f"{args.repository}/"
         ).replace(f"@{PLACEHOLDER_SHA}", f"@{args.sha}")
         (output / source.name).write_text(rendered, encoding="utf-8")
-    reviewer = ROOT / "examples/workflows/thermonuclear-review.yml"
-    rendered = reviewer.read_text(encoding="utf-8").replace(
-        f"{PLACEHOLDER_REPOSITORY}/", f"{args.repository}/"
-    ).replace(f"@{PLACEHOLDER_SHA}", f"@{args.sha}")
-    (output / reviewer.name).write_text(rendered, encoding="utf-8")
     return 0
 
 

@@ -18,7 +18,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from github_automation.registry import Registry  # noqa: E402
-from github_automation.reviewer import ReviewerDecision  # noqa: E402
 
 FORMAT_CHECKER = FormatChecker()
 EXPECTED_IDS = tuple(f"S{number:02d}" for number in range(1, 109))
@@ -42,7 +41,6 @@ INCOMPATIBLE_LOCAL_MERGE_CLAIMS = (
 
 INSTANCE_SCHEMAS = {
     "registry/repositories.json": "schemas/repository-registry-v1.schema.json",
-    "decisions/reviewer-provider-v1.yaml": "schemas/reviewer-provider-decision-v1.schema.json",
     "policies/execution-trust-key-manifest-v1.json": "schemas/execution-trust-key-manifest-bootstrap-v1.schema.json",
 }
 
@@ -175,21 +173,6 @@ def validate(root: Path = ROOT, *, evidence_root: Path | None = None) -> dict[st
         Registry.load(root / "registry/repositories.json")
     except Exception as exc:
         errors.append(f"registry-invalid:{exc}")
-
-    try:
-        decision = _json(root / "decisions/reviewer-provider-v1.yaml")
-        if decision.get("status") == "APPROVED":
-            ReviewerDecision.validate(decision)
-        else:
-            nullable = set(schemas["schemas/reviewer-provider-decision-v1.schema.json"]["required"]) - {
-                "reviewer_provider_decision_version", "status", "activation_allowed", "size_limits"
-            }
-            if decision.get("status") != "BLOCKED" or decision.get("activation_allowed") is not False:
-                errors.append("reviewer-bootstrap-not-blocked")
-            if any(decision.get(field) is not None for field in nullable):
-                errors.append("reviewer-blocked-fields-must-be-null")
-    except Exception as exc:
-        errors.append(f"reviewer-decision-invalid:{exc}")
 
     try:
         spec_manifest = _json(root / SPEC_MANIFEST)

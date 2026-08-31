@@ -13,7 +13,7 @@ class SchemaConfigTests(unittest.TestCase):
     def test_all_json_and_json_compatible_policy_files_parse(self) -> None:
         files = list((ROOT / "schemas").glob("*.json"))
         files += list((ROOT / "policies").glob("*.yaml"))
-        files += [ROOT / "decisions/reviewer-provider-v1.yaml", ROOT / "registry/repositories.json"]
+        files += [ROOT / "registry/repositories.json"]
         for path in files:
             with self.subTest(path=path):
                 json.loads(path.read_text(encoding="utf-8"))

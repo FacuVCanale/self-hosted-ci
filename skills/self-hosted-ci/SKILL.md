@@ -34,7 +34,7 @@ Resolve a missing repository from the current checkout. Resolve a missing PR onl
 - GitHub-hosted is the default for absent, unhealthy, ambiguous, or unauthorized repositories.
 - Never accept wildcards, an owner without a repository, or “all repositories”.
 - Never expose, copy, print, or place GitHub App keys, signing keys, tokens, installation credentials, or private host evidence in a repository or chat.
-- The CI lane and thermo-nuclear reviewer are separate. These commands do not enable or configure AI review.
+- This product owns CI routing only. These commands do not enable, configure, or run AI review.
 - Do not use Cloudflare or Workers. This control plane is GitHub plus the dedicated Windows/WSL host only.
 - In this release, `use-local` configures the verified non-gating JIT pilot. It does not replace a repository's required CI checks. Preserve that distinction in every report.
 
