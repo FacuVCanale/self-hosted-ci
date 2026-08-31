@@ -20,10 +20,9 @@ private-key material, host topology, or operational evidence. Operators must
 keep those values in an external secret/configuration store and consume released
 code by an immutable commit SHA.
 
-The CI execution lane and the optional AI reviewer are separate products. CI may
-execute untrusted repository code in an isolated ephemeral runner. The reviewer
-consumes bounded pull-request data and must not share the CI App identity,
-runner, or credentials.
+The CI execution lane and AI review are separate products. This repository owns
+CI routing and execution only; it contains no AI reviewer, model integration,
+or review policy.
 
 The repository includes an operational, explicitly approved, outbound-only JIT
 pilot for one selected repository. That pilot is observational and non-gating:

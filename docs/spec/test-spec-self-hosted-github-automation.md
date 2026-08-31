@@ -379,7 +379,7 @@ No-ingress mode:
 
 Both modes: selected repo only; one marked comment per review kind; update for new head; processing key includes policy version+generation; out-of-order work is fenced; periodic missed-event reconciliation; informational AI only.
 
-Before either mode, verify reviewer remains inert/BLOCKED without an approved `decisions/reviewer-provider-v1.yaml`. Validate every required field, selected cost/token ceilings, secret owner/storage/rotation, provider retention, and skill source URL+commit+SHA-256. Simulate outage, quota, 120-second timeout, both retry intervals, queue age/DLQ, oversize diff and invalid structured output; none may infer approval or duplicate comments.
+AI-review validation belongs to the separate review product and is not part of this repository's activation contract.
 
 ## Observability/SLA
 

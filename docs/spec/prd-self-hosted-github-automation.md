@@ -12,7 +12,7 @@ deterministic local `ort` merge are authoritative for this slice.
 
 ## Outcome
 
-Create private repo `self-hosted-ci` and a reversible platform that keeps GitHub-hosted CI as default, opts one exact personal/org `owner/repo` into local WSL2 CI, falls back automatically, adds one unambiguous required PR gate `ci-gate`, reviews selected PRs with PR-Agent plus thermo-nuclear, and pilots on a selected repository without taking ownership of that consumer's deploy or push-main workflows.
+Create `self-hosted-ci` as a reversible platform that keeps GitHub-hosted CI as default, opts one exact personal/org `owner/repo` into local WSL2 CI, falls back automatically, adds one unambiguous required PR gate `ci-gate`, and pilots on a selected repository without taking ownership of that consumer's deploy, push-main, or AI-review workflows.
 
 ## Non-negotiable invariants
 
@@ -459,16 +459,15 @@ If dedicated Windows account/ACL, distro identity, `automount`, `mountFsTab`, or
 - Allowlist is versioned per workload; proxy logs decision/destination/correlation without credentials or secret-bearing URLs.
 - Firewall/proxy must load before runner registration, survive Windows/WSL reboot and pass post-reboot tests. Missing/unverifiable policy blocks local dispatch.
 
-## PR-Agent durability and idempotency
+## External AI-review boundary
 
 Status: **BLOCKED pending an operator decision on provider, exact model and budget.** Provisioning may prepare inert templates, but no model secret, webhook activation, processing or PR comment is enabled before an approved versioned decision record exists.
 
-Required `decisions/reviewer-provider-v1.yaml` fields: provider; exact model/version; per-PR and monthly cost ceilings; input/output/token ceilings; timeout ≤120 s; retry/backoff; max files/diff bytes/changed lines and oversize behavior; secret owner/storage/rotation; provider retention/residency; thermo-nuclear skill source URL, source commit, SHA-256 and policy version. Hard platform maxima are 100 files, 1 MiB unified diff, 50,000 changed lines, 120 s/attempt and three total attempts. Cost/token ceilings have no inferred default and must be selected by the operator.
+Provider decisions, model budgets, review policy, and review-policy provenance belong to the separate AI-review product. This repository neither stores nor activates them.
 
 After that decision, two modes exist:
 
-1. **Durable self-hosted**, only after explicit public-ingress approval: GitHub App webhook → narrow public receiver → signature/timestamp/replay validation → durable Queue/DO → WSL PR-Agent worker → comment. Receiver returns HTTP 2xx only after durable enqueue, targeted under 10 seconds; it does not wait for laptop/model/comment. Consumer queue ACK/delete occurs only after GitHub comment/update succeeds and durable process/comment state commits. Laptop outage retains queued work; bounded retry/dead-letter applies.
-2. **No-public-ingress default:** trusted GitHub-hosted `pull_request_target` reviewer, no PR checkout, pinned PR-Agent/review wrapper and API-only diff. This is the availability fallback, not described as self-hosted.
+AI-review delivery modes are designed, deployed, and operated outside this repository.
 
 Keys:
 
@@ -620,6 +619,6 @@ Before winner, invalid proof selects GitHub/fences only at dispatch, claim, pre-
 
 ## Future execution staffing
 
-`architect` owns protocol/GateStore/trust; `dependency-expert` runner/PR-Agent/gh-aw pins; `researcher` official GitHub contracts; `executor` repo/workflows/provisioning/reviewer; `debugger` WSL/rootless runtime; `test-engineer` races/watchdog/E2E; `code-reviewer` privileged workflow/permissions/injection; `verifier` independent acceptance/rollback/source/release; `git-master` reversible PRs; `writer` runbooks.
+`architect` owns protocol/GateStore/trust; `dependency-expert` runner and gh-aw pins; `researcher` official GitHub contracts; `executor` repo/workflows/provisioning; `debugger` WSL/rootless runtime; `test-engineer` races/watchdog/E2E; `code-reviewer` privileged workflow/permissions/injection; `verifier` independent acceptance/rollback/source/release; `git-master` reversible PRs; `writer` runbooks.
 
 After valid execution authorization, use `$ultragoal` ledger plus `$team`; sequence protocol sandbox → WSL → authority → coordinator/watchdog → pilot → reviewer → ruleset. `$ralph` only as sequential fallback.

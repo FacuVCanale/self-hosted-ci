@@ -39,7 +39,6 @@ from github_automation.observability import (
 )
 from github_automation.policy import evaluate_execution_trust
 from github_automation.registry import Registry
-from github_automation.reviewer import DecisionBlocked, ReviewerDecision
 from github_automation.watchdog import ActionKind, ObservedState, reconcile
 
 
@@ -350,7 +349,7 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(1, len(self.store.pending_outbox()))
 
-    def test_s01_s25_s48_s58_default_hosted_and_reviewer_remain_inert(self) -> None:
+    def test_s01_s25_s48_s58_default_hosted_remains_inert(self) -> None:
         absent = self._registry().resolve("outside/unregistered")
         decision = evaluate_execution_trust(
             absent,
@@ -361,11 +360,6 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
             dependabot=True,
         )
         self.assertEqual(("github", False), (decision.backend, decision.local_eligible))
-        with self.assertRaises(DecisionBlocked):
-            ReviewerDecision.validate(
-                {"status": "BLOCKED", "activation_allowed": False},
-                required_approver="example-owner",
-            )
 
     def test_s05_s06_s21_watchdog_persists_hosted_winner_and_outbox(self) -> None:
         gate, _ = self._gate_and_admission()

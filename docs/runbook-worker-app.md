@@ -1,6 +1,6 @@
 # Outbound worker GitHub App
 
-The outbound worker uses a dedicated GitHub App installed only on repositories explicitly selected by the operator. It is not the thermonuclear reviewer App and it is not a general organization credential.
+The outbound worker uses a dedicated GitHub App installed only on repositories explicitly selected by the operator. It is not a general organization credential and grants no AI-review authority.
 
 ## Exact authority
 
