@@ -168,8 +168,23 @@ def validate_canary_authorization(
         if not _uuid(entity.get("entity_id"), "entity_id") or not isinstance(entity.get("entity_name"), str) or not entity["entity_name"]:
             blockers.append("canary-authorization:garm_identity")
         group = entity.get("runner_group")
+        expected_entity_name = (
+            repository
+            if kind == "personal-repository"
+            else repository.split("/", 1)[0] if isinstance(repository, str) else None
+        )
+        if entity.get("entity_name") != expected_entity_name:
+            blockers.append("canary-authorization:garm_identity")
         if (kind == "personal-repository" and group is not None) or (
-            kind == "organization-runner-group" and (not isinstance(group, str) or not group)
+            kind == "organization-runner-group"
+            and (
+                not isinstance(group, str)
+                or group != group.strip()
+                or not 1 <= len(group) <= 100
+                or "*" in group
+                or "\r" in group
+                or "\n" in group
+            )
         ):
             blockers.append("canary-authorization:runner_group")
     if not isinstance(value.get("image_alias"), str) or not value["image_alias"]:

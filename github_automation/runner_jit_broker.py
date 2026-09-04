@@ -471,9 +471,15 @@ class GarmCliAllocationDriver:
         expected_flag = (
             "--repo" if payload["authority_kind"] == "personal-repository" else "--org"
         )
+        expected_entity_name = (
+            payload["repository"]
+            if payload["authority_kind"] == "personal-repository"
+            else payload["repository"].split("/", 1)[0]
+        )
         if (
             target["authority_kind"] != payload["authority_kind"]
             or target["entity_flag"] != expected_flag
+            or target["entity_name"] != expected_entity_name
             or target["runner_group"] != payload["runner_group"]
         ):
             raise RunnerJitError("GARM target authority crossed the signed allocation")

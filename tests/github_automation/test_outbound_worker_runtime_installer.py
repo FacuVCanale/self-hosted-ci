@@ -55,6 +55,8 @@ class OutboundWorkerRuntimeInstallerTests(unittest.TestCase):
         return {
             "schema_version": 1,
             "mode": "ci-jit-pilot",
+            "authority_kind": "personal-repository",
+            "runner_group": None,
             "app_id": 123,
             "app_slug": "self-hosted-ci-worker",
             "installation_id": 456,

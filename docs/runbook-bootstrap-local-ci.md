@@ -387,20 +387,22 @@ runner-manager; dispatcher queda reservado para `workflow_dispatch`; el
 verificador nunca recibe permisos de escritura. Reutilizar una identidad o una
 clave bloquea el apply.
 
-El contrato del dispatcher también fija `default_branch=main`,
+El contrato del dispatcher fija la rama por defecto exacta declarada con
+`--default-branch`,
 `workflow_id=ci-jit-canary-child.yml` y
 `workflow_path=.github/workflows/ci-jit-canary-child.yml`. Es el mismo JSON
 root-only que consume la canary para despachar y volver a leer el PR antes de
 crear cada allocation; no existe una segunda configuración con permisos más
 amplios.
 
-Después reconcilia la credencial GitHub App exacta
-`self-hosted-ci-sandbox-app`, crea o
-actualiza el repo sandbox sin instalar webhooks y recién entonces deriva su UUID
-desde GARM. `--entity-id` es opcional y sirve sólo como postcondición si ya se
-conoce. Los tres archivos usan los contratos
-`runner-manager-app.json.example`, `dispatcher-app.json.example` y
-`live-job-verifier-app.json.example`; cada JSON y PEM debe ser root-only `0600`.
+Después reconcilia una credencial GitHub App aislada por repository ID, crea o
+actualiza la entidad personal u organizacional exacta sin instalar webhooks y
+recién entonces deriva su UUID desde GARM. `--entity-id` es opcional y sirve
+sólo como postcondición si ya se conoce. El runner manager personal parte de
+`runner-manager-app.json.example`; el organizacional, de
+`runner-manager-org-app.json.example`. Dispatcher y verificador usan
+`dispatcher-app.json.example` y `live-job-verifier-app.json.example`. Cada JSON
+y PEM debe ser root-only `0600`.
 
 Primero revisar el plan:
 
@@ -410,10 +412,12 @@ sudo /usr/local/lib/self-hosted-ci/configure-garm-jit.sh --plan
 
 Después materializar la configuración manteniendo inventario cero. Este comando
 no recibe ni crea un scale set: sólo configura manager, provider, imagen,
-entidad target y contrato del broker. El bootstrap actual acepta únicamente
-`personal-repository`: usar `owner/repo` y omitir `--runner-group`. La autoridad
-de organización requiere una implementación posterior y no debe improvisarse
-con flags que este script rechaza:
+entidad target y contrato del broker. Para `personal-repository`, `--repository`
+y `--entity-name` deben ser el mismo `owner/repo` y se omite `--runner-group`.
+Para `organization-runner-group`, `--repository` sigue siendo el repo exacto,
+`--entity-name` es su organización owner y `--runner-group` es el grupo exacto
+restringido en GitHub a ese repositorio. En ambos casos la rama debe coincidir
+con el dispatcher y las tres Apps permanecen ligadas al repo seleccionado:
 
 ```bash
 sudo /usr/local/lib/self-hosted-ci/configure-garm-jit.sh --apply \
@@ -427,8 +431,10 @@ sudo /usr/local/lib/self-hosted-ci/configure-garm-jit.sh --apply \
   --live-job-verifier-app-config-file /etc/self-hosted-ci/live-job-verifier-app.json \
   --garm-cli-home /run/self-hosted-ci/garm-cli \
   --authority-kind personal-repository \
+  --repository <owner/repo> \
   --entity-name <owner/repo> \
   --repository-id <github-numeric-repository-id> \
+  --default-branch <default-branch> \
   --image-alias <local-pinned-alias> \
   --image-fingerprint <64-hex-sha256> \
   --allocation-authority-public-key /etc/self-hosted-ci/allocation-authority-public-key.pem \
@@ -437,6 +443,36 @@ sudo /usr/local/lib/self-hosted-ci/configure-garm-jit.sh --apply \
   --acknowledge-garm-database-mutation \
   --acknowledge-external-github-configuration
 ```
+
+Para una organización, el tramo de autoridad del mismo comando cambia a:
+
+```bash
+  --authority-kind organization-runner-group \
+  --repository <organization/repository> \
+  --entity-name <organization> \
+  --runner-group <exact-selected-runner-group> \
+  --repository-id <github-numeric-repository-id> \
+  --default-branch <default-branch>
+```
+
+El runner group debe existir en la organización y usar `Selected repositories`
+con únicamente los repos autorizados. Antes de `use-local`, el preflight vivo
+por JWT debe verificar la App e instalación exactas, el ID y nombre exactos del
+runner group, visibilidad `selected` y que el conjunto de repository IDs sea
+exactamente el autorizado. `configure-garm-jit.sh` conserva el nombre exacto
+declarado, pero por sí solo no prueba la selección efectiva en GitHub.
+
+El bootstrap no amplía esa selección, no
+crea runners persistentes y no crea ningún scale set durante esta fase.
+Para este modo, la App `garm-runner-manager` usa permisos de organización
+`Self-hosted runners: Read and write` más `Metadata: Read-only`; el contrato
+personal conserva `Administration: Read and write`, `Actions: Read-only` y
+`Metadata: Read-only`. No agregar permisos de webhooks: este flujo no instala
+webhooks. El permiso `Self-hosted runners` es organizacional: instalar la App
+con `Only select repositories` limita su instalación a los repos elegidos, pero
+no transforma ese permiso de organización en un permiso repository-scoped.
+Por eso el preflight exacto del runner group es un guard obligatorio, no una
+optimización.
 
 Esta etapa verifica la imagen local por fingerprint, configura callback y
 metadata directos en `10.254.0.1:8080`, e inyecta en el bootstrap del runner

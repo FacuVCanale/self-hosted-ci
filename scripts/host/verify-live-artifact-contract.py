@@ -101,6 +101,7 @@ REQUIRED_LIVE_TARGETS = {
     "/usr/local/share/self-hosted-ci/outbound-worker.json.example",
     "/usr/local/share/self-hosted-ci/worker-app-authority.json.example",
     "/usr/local/share/self-hosted-ci/runner-manager-app.json.example",
+    "/usr/local/share/self-hosted-ci/runner-manager-org-app.json.example",
     "/usr/local/share/self-hosted-ci/dispatcher-app.json.example",
     "/usr/local/share/self-hosted-ci/live-job-verifier-app.json.example",
     "/etc/self-hosted-ci/garm/garm-provider-incus.toml",

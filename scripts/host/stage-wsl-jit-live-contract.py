@@ -451,7 +451,7 @@ PUBLIC_ARTIFACTS = (
             "public-config",
             "garm",
         )
-        for name in ("runner-manager-app", "dispatcher-app", "live-job-verifier-app")
+        for name in ("runner-manager-app", "runner-manager-org-app", "dispatcher-app", "live-job-verifier-app")
     ),
     (
         "templates/garm/garm-provider-incus.toml",

@@ -247,6 +247,56 @@ class AllocationBrokerTests(unittest.TestCase):
         self.assertIn("chmod 0644 /etc/profile.d/self-hosted-ci-runner-proxy.sh", bootstrap)
         self.assertIn("systemctl daemon-reexec", bootstrap)
 
+    def test_organization_target_uses_org_entity_and_exact_runner_group(self):
+        hook = Path(self.tempdir.name) / "hook.py"
+        hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        org_payload = dict(
+            self.payload,
+            repository="alethia-earth/Overworld",
+            authority_kind="organization-runner-group",
+            runner_group="overworld-ci-jit",
+        )
+        driver = GarmCliAllocationDriver(
+            {
+                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "provider_name": "incus_ci_jit",
+                "image_alias": "runner-pinned",
+                "image_fingerprint": "b" * 64,
+                "targets": {
+                    org_payload["repository_id"]: {
+                        "authority_kind": "organization-runner-group",
+                        "entity_flag": "--org",
+                        "entity_id": "12345678-1234-4123-8123-123456789abc",
+                        "entity_name": "alethia-earth",
+                        "runner_group": "overworld-ci-jit",
+                    }
+                },
+            },
+            hook,
+        )
+        calls = []
+        driver._run = lambda *args: calls.append(args) or ([] if args[1] == "list" else {"id": 41})
+        self.assertEqual("41", driver.ensure_disabled_scale_set(org_payload))
+        self.assertEqual(
+            ("scaleset", "list", "--org", "12345678-1234-4123-8123-123456789abc"),
+            calls[0],
+        )
+        self.assertIn("--runner-group", calls[1])
+        self.assertEqual("overworld-ci-jit", calls[1][calls[1].index("--runner-group") + 1])
+
+        crossed = dict(driver.config)
+        crossed["targets"] = {
+            org_payload["repository_id"]: dict(
+                driver.config["targets"][org_payload["repository_id"]],
+                entity_name="another-org",
+            )
+        }
+        crossed_driver = GarmCliAllocationDriver(crossed, hook)
+        crossed_driver._run = mock.Mock()
+        with self.assertRaisesRegex(RunnerJitError, "crossed"):
+            crossed_driver.ensure_disabled_scale_set(org_payload)
+        crossed_driver._run.assert_not_called()
+
     def test_scale_set_binds_complete_offline_runner_template(self):
         hook = Path(self.tempdir.name) / "hook.py"
         hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")

@@ -157,8 +157,11 @@ class GarmConfigurationTests(unittest.TestCase):
         self.assertIn("GitHub App identities and private keys must be pairwise distinct", source)
         self.assertIn("GitHub App public-key fingerprints must be pairwise distinct", source)
         self.assertIn('require_root_secret "${dispatcher_private_key}"', source)
+        self.assertIn('GITHUB_CREDENTIAL_NAME="self-hosted-ci-runner-manager-${repository_id}"', source)
+        self.assertNotIn('GITHUB_CREDENTIAL_NAME="self-hosted-ci-sandbox-app"', source)
         self.assertIn("SubjectPublicKeyInfo", source)
         self.assertIn('{"metadata":"read","actions":"read","administration":"write"}', source)
+        self.assertIn('{"metadata":"read","organization_self_hosted_runners":"write"}', source)
         self.assertIn(
             '{"metadata":"read","pull_requests":"read","actions":"write","administration":"read"}',
             source,
@@ -254,6 +257,40 @@ class GarmConfigurationTests(unittest.TestCase):
         self.assertIn('"garm_cli_home":cli_home', source)
         self.assertIn('"garm_enabled":false', source)
         self.assertIn("configure-garm-jit.sh", PROVISION.read_text(encoding="utf-8"))
+
+    def test_bootstrap_supports_exact_organization_runner_group_authority(self) -> None:
+        source = INSTALLER.read_text(encoding="utf-8")
+        for token in (
+            "--authority-kind personal-repository|organization-runner-group",
+            "--repository OWNER/REPO",
+            "--default-branch BRANCH",
+            "organization authority requires the repository owner as its exact organization entity",
+            "organization authority requires an exact selected runner group",
+            'entity_flag=--org',
+            'garm_cli org list --name "${entity_name}" --endpoint github.com',
+            'garm_cli org update "${derived_entity_id}"',
+            'garm_cli org add --name "${entity_name}"',
+            'garm_cli org show "${derived_entity_id}" --endpoint github.com',
+            'created_entity_kind=org',
+            'garm_cli "${created_entity_kind}" delete "${created_entity_id}" --keep-webhook',
+        ):
+            self.assertIn(token, source)
+        self.assertIn('garm_cli scaleset list "${entity_flag}" "${entity_id}"', source)
+        organization_template = json.loads(
+            (ROOT / "templates/garm/runner-manager-org-app.json.example").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            {"metadata": "read", "organization_self_hosted_runners": "write"},
+            organization_template["permissions"],
+        )
+        self.assertEqual("selected", organization_template["repository_selection"])
+        self.assertNotIn("bootstrap configuration currently requires personal-repository", source)
+
+    def test_app_binding_is_separate_from_garm_entity_and_branch_is_explicit(self) -> None:
+        source = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn('"${repository}" "${repository_id}" "${default_branch}" "${authority_kind}"', source)
+        self.assertIn('v.get("default_branch")!=default_branch', source)
+        self.assertNotIn('v.get("default_branch")!="main"', source)
 
     def test_script_parses(self) -> None:
         result = subprocess.run(
