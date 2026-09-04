@@ -1,7 +1,6 @@
 ---
 name: self-hosted-ci
 description: Operate Facu's selected-repository Windows self-hosted CI. Use when Facu asks to run CI on the Windows PC, use local CI for a PR, route a repository to local CI from now on, return it to GitHub-hosted CI, or asks about CI routing, health, or status.
-argument-hint: "[status | run-local | use-local | use-github] [OWNER/REPO] [--pr N]"
 allowed-tools: Bash(self-hosted-ci *) Bash(git remote get-url origin) Bash(gh repo view *)
 metadata:
   short-description: Operate selected local Windows CI
@@ -28,10 +27,17 @@ Resolve a missing repository from the current checkout. Resolve a missing PR onl
 4. Report the effective state from a final `self-hosted-ci status OWNER/REPO`, not merely the desired state or a successful file write.
 5. Treat `run-local` approval as exact to repository, PR, and the head SHA resolved by the host. A new commit requires a new run request.
 6. `pending_reconciled_during_this_status_call` is an event flag, not a health flag. `false` only means this particular read did not need to reconcile a pending transaction; it is not a warning when `pending_operation` is null.
+7. If the installed `self-hosted-ci` CLI or its skill source is missing, broken, or unavailable, stop local dispatch and report the installation failure. Keep or restore GitHub-hosted routing. Do not improvise an alternate runner.
 
 ## Boundaries
 
 - GitHub-hosted is the default for absent, unhealthy, ambiguous, or unauthorized repositories.
+- The only valid local execution path is the managed JIT path in the dedicated `Ubuntu-24.04-CI` distro under the dedicated service identity, with GARM, a fresh unprivileged Incus container, one job, and verified cleanup.
+- Never register or launch a persistent/ad-hoc GitHub Actions runner in a personal WSL distro, home directory, shell, `tmux`, `screen`, `nohup`, LaunchAgent, or manually managed service. In particular, paths such as `~/actions-runner-*` are not an acceptable fallback or canary.
+- Never route work by setting a repository variable to a generic `runs-on: self-hosted` label. A local job must use the allocation-specific JIT label produced by the canonical control plane.
+- Never install CI dependencies interactively or mutate the personal/dedicated WSL host to make one repository pass. Browser, Playwright, system, language, and build dependencies belong in the versioned, pinned ephemeral runner image or its reviewed provisioning contract.
+- A runner that is merely promised to be unregistered later is non-conforming. Cleanup must be automatic, lifecycle-bound, and verified after success, failure, cancellation, timeout, agent loss, and reboot.
+- A successful job on a non-conforming runner is diagnostic evidence only. Do not describe it as proof that `self-hosted-ci` is operational, do not use it to satisfy a required check, and do not merge on that basis.
 - Never accept wildcards, an owner without a repository, or “all repositories”.
 - Never expose, copy, print, or place GitHub App keys, signing keys, tokens, installation credentials, or private host evidence in a repository or chat.
 - This product owns CI routing only. These commands do not enable, configure, or run AI review.
