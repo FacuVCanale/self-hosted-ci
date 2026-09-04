@@ -66,6 +66,21 @@ class InstallAgentInterfacesTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.home / ".config/self-hosted-ci/config.json").exists())
 
+    def test_skill_forbids_ad_hoc_persistent_runner_fallbacks(self):
+        skill = (ROOT / "skills/self-hosted-ci/SKILL.md").read_text(encoding="utf-8")
+        for required in (
+            "dedicated `Ubuntu-24.04-CI` distro",
+            "Never register or launch a persistent/ad-hoc GitHub Actions runner",
+            "`~/actions-runner-*`",
+            "generic `runs-on: self-hosted` label",
+            "allocation-specific JIT label",
+            "dependencies belong in the versioned, pinned ephemeral runner image",
+            "successful job on a non-conforming runner is diagnostic evidence only",
+            "Do not improvise an alternate runner",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, skill)
+
 
 if __name__ == "__main__":
     unittest.main()
