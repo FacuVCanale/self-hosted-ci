@@ -17,17 +17,15 @@ readonly RUNTIME_CLI_HOME=/run/self-hosted-ci/garm-cli
 readonly TRANSIENT_UNIT=self-hosted-ci-garm-configure.service
 readonly CALLBACK_URL=http://10.254.0.1:8080/api/v1/callbacks
 readonly METADATA_URL=http://10.254.0.1:8080/api/v1/metadata
-readonly GITHUB_CREDENTIAL_NAME=self-hosted-ci-sandbox-app
-readonly GITHUB_CREDENTIAL_DESCRIPTION='Self-hosted CI sandbox GitHub App'
 
 die() { printf 'garm-jit configuration blocked: %s\n' "$*" >&2; exit 1; }
 usage() {
-  printf 'usage: %s [--plan] | --apply --config-template FILE --jwt-secret-file FILE --database-passphrase-file FILE --garm-admin-username-file FILE --garm-admin-password-file FILE --runner-manager-app-config-file FILE --dispatcher-app-config-file FILE --live-job-verifier-app-config-file FILE --garm-cli-home /run/self-hosted-ci/garm-cli --authority-kind personal-repository --repository-id ID [--entity-id UUID] --entity-name OWNER/REPO --image-alias ALIAS --image-fingerprint SHA256 --allocation-authority-public-key FILE --live-job-verifier /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py --acknowledge-root-secret-installation --acknowledge-garm-database-mutation --acknowledge-external-github-configuration\n' "$0" >&2
+  printf 'usage: %s [--plan] | --apply --config-template FILE --jwt-secret-file FILE --database-passphrase-file FILE --garm-admin-username-file FILE --garm-admin-password-file FILE --runner-manager-app-config-file FILE --dispatcher-app-config-file FILE --live-job-verifier-app-config-file FILE --garm-cli-home /run/self-hosted-ci/garm-cli --authority-kind personal-repository|organization-runner-group --repository OWNER/REPO --repository-id ID --default-branch BRANCH [--entity-id UUID] --entity-name OWNER/REPO|ORGANIZATION [--runner-group GROUP] --image-alias ALIAS --image-fingerprint SHA256 --allocation-authority-public-key FILE --live-job-verifier /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py --acknowledge-root-secret-installation --acknowledge-garm-database-mutation --acknowledge-external-github-configuration\n' "$0" >&2
   exit 2
 }
 
 mode=plan; template=""; jwt_file=""; passphrase_file=""; admin_username_file=""; admin_password_file=""; runner_manager_app_config_file=""; dispatcher_app_config_file=""; live_job_verifier_app_config_file=""; cli_home=""; authority_kind=""
-repository_id=""; entity_id=""; entity_name=""; runner_group=""; image_alias=""; image_fingerprint=""; allocation_public_key=""; live_job_verifier=""
+repository=""; repository_id=""; default_branch=""; entity_id=""; entity_name=""; runner_group=""; image_alias=""; image_fingerprint=""; allocation_public_key=""; live_job_verifier=""
 ack_secrets=false; ack_database=false; ack_github=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,7 +41,9 @@ while [[ $# -gt 0 ]]; do
     --live-job-verifier-app-config-file) [[ $# -ge 2 ]] || usage; live_job_verifier_app_config_file="$2"; shift 2 ;;
     --garm-cli-home) [[ $# -ge 2 ]] || usage; cli_home="$2"; shift 2 ;;
     --authority-kind) [[ $# -ge 2 ]] || usage; authority_kind="$2"; shift 2 ;;
+    --repository) [[ $# -ge 2 ]] || usage; repository="$2"; shift 2 ;;
     --repository-id) [[ $# -ge 2 ]] || usage; repository_id="$2"; shift 2 ;;
+    --default-branch) [[ $# -ge 2 ]] || usage; default_branch="$2"; shift 2 ;;
     --entity-id) [[ $# -ge 2 ]] || usage; entity_id="$2"; shift 2 ;;
     --entity-name) [[ $# -ge 2 ]] || usage; entity_name="$2"; shift 2 ;;
     --runner-group) [[ $# -ge 2 ]] || usage; runner_group="$2"; shift 2 ;;
@@ -59,7 +59,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${mode}" == plan ]]; then
-  printf '{"mode":"plan","host_changes":false,"external_calls":"not_performed","garm_enabled":false,"runner_registration":"not_performed","sequence":["render manager/provider config and install login credentials from root-only files","initialize the controller through loopback without exposing the password","reconcile the exact GitHub App credential and sandbox repository","derive the repository UUID from live GARM state","verify exact local Incus image fingerprint and selected target authority","temporarily start GARM without enabling its service","set runner-reachable callback and metadata URLs","require zero scale sets and zero runtime instances","install root-owned broker target/public-key/live-verifier contract","derive atomic manager health state","stop transient GARM"]}\n'
+  printf '{"mode":"plan","host_changes":false,"external_calls":"not_performed","garm_enabled":false,"runner_registration":"not_performed","sequence":["render manager/provider config and install login credentials from root-only files","initialize the controller through loopback without exposing the password","reconcile a repository-bound GitHub App credential and exact repo or organization entity","derive the entity UUID from live GARM state","verify exact local Incus image fingerprint and selected target authority","temporarily start GARM without enabling its service","set runner-reachable callback and metadata URLs","require zero scale sets and zero runtime instances","install root-owned broker target/public-key/live-verifier contract","derive atomic manager health state","stop transient GARM"]}\n'
   exit 0
 fi
 
@@ -67,9 +67,24 @@ fi
 [[ "${WSL_DISTRO_NAME:-}" == Ubuntu-24.04-CI ]] || die 'WSL_DISTRO_NAME must be Ubuntu-24.04-CI'
 grep -qi wsl2 /proc/sys/kernel/osrelease || die 'host must be WSL2'
 [[ "${ack_secrets}" == true && "${ack_database}" == true && "${ack_github}" == true ]] || die '--apply requires all three explicit acknowledgements'
-[[ "${authority_kind}" == personal-repository ]] || die 'bootstrap configuration currently requires personal-repository authority'
-[[ -z "${entity_id}" || "${entity_id}" =~ ^[0-9a-fA-F-]{36}$ ]] || die 'optional expected entity ID must be an exact UUID'
+[[ "${authority_kind}" == personal-repository || "${authority_kind}" == organization-runner-group ]] || die 'authority kind must be personal-repository or organization-runner-group'
+validate_uuid() {
+  python3 - "$1" <<'PY'
+import sys, uuid
+try:
+    value=uuid.UUID(sys.argv[1])
+except (ValueError, AttributeError):
+    raise SystemExit(1)
+if str(value) != sys.argv[1].lower():
+    raise SystemExit(1)
+PY
+}
+[[ -z "${entity_id}" ]] || validate_uuid "${entity_id}" || die 'optional expected entity ID must be an exact UUID'
+[[ "${repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die 'repository must be exact owner/repo'
 [[ "${repository_id}" =~ ^[1-9][0-9]*$ ]] || die 'repository ID must be a canonical positive integer'
+GITHUB_CREDENTIAL_NAME="self-hosted-ci-runner-manager-${repository_id}"
+GITHUB_CREDENTIAL_DESCRIPTION="Self-hosted CI runner manager for repository ${repository_id}"
+[[ "${default_branch}" =~ ^[A-Za-z0-9._/-]+$ && "${default_branch}" != /* && "${default_branch}" != */ && "${default_branch}" != *//* ]] || die 'default branch is invalid'
 [[ "${entity_name}" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?$ ]] || die 'entity name is invalid'
 [[ "${image_alias}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{2,127}$ && "${image_alias}" != *:* ]] || die 'image must be a local immutable alias without a remote prefix'
 [[ "${image_fingerprint}" =~ ^[0-9a-f]{64}$ ]] || die 'image fingerprint must be lowercase SHA-256'
@@ -79,8 +94,19 @@ grep -qi wsl2 /proc/sys/kernel/osrelease || die 'host must be WSL2'
 [[ "$(stat -c '%u:%h' "${live_job_verifier}")" == 0:1 ]] || die 'live workflow-job verifier must be root-owned with one link'
 verifier_mode="$(stat -c '%a' "${live_job_verifier}")"
 (( (8#${verifier_mode} & 8#022) == 0 )) || die 'live workflow-job verifier must not be writable by group or other'
-[[ -z "${runner_group}" && "${entity_name}" == */* ]] || die 'personal repository authority requires owner/repo and forbids a runner group'
-entity_flag=--repo
+if [[ "${authority_kind}" == personal-repository ]]; then
+  [[ -z "${runner_group}" && "${entity_name}" == */* && "${entity_name}" == "${repository}" ]] || die 'personal repository authority requires the exact owner/repo entity and forbids a runner group'
+  entity_flag=--repo
+else
+  [[ "${entity_name}" != */* && "${repository%%/*}" == "${entity_name}" ]] || die 'organization authority requires the repository owner as its exact organization entity'
+  python3 - "${runner_group}" <<'PY' || die 'organization authority requires an exact selected runner group'
+import sys
+value=sys.argv[1]
+if not value or value!=value.strip() or len(value)>100 or "*" in value or "\r" in value or "\n" in value:
+    raise SystemExit(1)
+PY
+  entity_flag=--org
+fi
 
 require_root_secret() {
   local path="$1" mode_value
@@ -94,11 +120,16 @@ require_root_secret "${admin_username_file}"; require_root_secret "${admin_passw
 require_root_secret "${runner_manager_app_config_file}"
 require_root_secret "${dispatcher_app_config_file}"
 require_root_secret "${live_job_verifier_app_config_file}"
-mapfile -t app_values < <(python3 - "${runner_manager_app_config_file}" "${dispatcher_app_config_file}" "${live_job_verifier_app_config_file}" "${entity_name}" "${repository_id}" <<'PY'
-import json, pathlib, sys
-paths=map(pathlib.Path,sys.argv[1:4]); repository=sys.argv[4]; repository_id=sys.argv[5]
+mapfile -t app_values < <(python3 - "${runner_manager_app_config_file}" "${dispatcher_app_config_file}" "${live_job_verifier_app_config_file}" "${repository}" "${repository_id}" "${default_branch}" "${authority_kind}" <<'PY'
+import json, pathlib, re, sys
+paths=map(pathlib.Path,sys.argv[1:4]); repository=sys.argv[4]; repository_id=sys.argv[5]; default_branch=sys.argv[6]; authority=sys.argv[7]
+runner_permissions=(
+ {"metadata":"read","actions":"read","administration":"write"}
+ if authority=="personal-repository"
+ else {"metadata":"read","organization_self_hosted_runners":"write"}
+)
 expected=(
- ("garm-runner-manager",{"metadata":"read","actions":"read","administration":"write"}),
+ ("garm-runner-manager",runner_permissions),
  ("workflow-dispatch",{"metadata":"read","pull_requests":"read","actions":"write","administration":"read"}),
  ("live-job-read",{"metadata":"read","actions":"read"}),
 )
@@ -108,13 +139,14 @@ for path,(purpose,permissions) in zip(paths,expected,strict=True):
  role_required=required | ({"default_branch","workflow_id","workflow_path"} if purpose=="workflow-dispatch" else set())
  if set(v)!=role_required or v.get("schema_version")!=1 or v.get("purpose")!=purpose: raise SystemExit(purpose+" App config fields drifted")
  if v.get("permissions")!=permissions: raise SystemExit(purpose+" App permissions drifted")
+ if not isinstance(v.get("app_slug"),str) or not re.fullmatch(r"[A-Za-z0-9-]+",v["app_slug"]): raise SystemExit(purpose+" App slug is invalid")
  if v.get("repository")!=repository or str(v.get("repository_id"))!=repository_id or v.get("repository_selection")!="selected": raise SystemExit(purpose+" App repository binding drifted")
- if purpose=="workflow-dispatch" and (v.get("default_branch")!="main" or v.get("workflow_id")!="ci-jit-canary-child.yml" or v.get("workflow_path")!=".github/workflows/ci-jit-canary-child.yml"): raise SystemExit("workflow-dispatch App workflow binding drifted")
+ if purpose=="workflow-dispatch" and (v.get("default_branch")!=default_branch or v.get("workflow_id")!="ci-jit-canary-child.yml" or v.get("workflow_path")!=".github/workflows/ci-jit-canary-child.yml"): raise SystemExit("workflow-dispatch App workflow binding drifted")
  if type(v.get("app_id")) is not int or v["app_id"]<1 or type(v.get("installation_id")) is not int or v["installation_id"]<1: raise SystemExit(purpose+" App IDs must be positive integers")
  key=v.get("private_key_file")
  if not isinstance(key,str) or not key.startswith("/etc/self-hosted-ci/secrets/"): raise SystemExit(purpose+" App key path is outside the protected secrets tree")
  values.append(v)
-if len({v["app_id"] for v in values})!=3 or len({v["installation_id"] for v in values})!=3 or len({v["private_key_file"] for v in values})!=3: raise SystemExit("GitHub App identities and private keys must be pairwise distinct")
+if len({v["app_id"] for v in values})!=3 or len({v["app_slug"] for v in values})!=3 or len({v["installation_id"] for v in values})!=3 or len({v["private_key_file"] for v in values})!=3: raise SystemExit("GitHub App identities and private keys must be pairwise distinct")
 runner,dispatcher,verifier=values
 for item in (runner["app_id"],runner["installation_id"],runner["private_key_file"],dispatcher["private_key_file"],verifier["app_id"],verifier["installation_id"],verifier["private_key_file"]): print(item)
 PY
@@ -185,11 +217,11 @@ if [[ -e "${GARM_BLOB_DATABASE}" ]]; then cp -a "${GARM_BLOB_DATABASE}" "${trans
 if [[ -e "${LIVE_VERIFIER_CONFIG}" ]]; then cp -a "${LIVE_VERIFIER_CONFIG}" "${transaction_dir}/github-live-job-verifier.json"; had_live_verifier_config=true; fi
 candidate="$(mktemp /etc/self-hosted-ci/garm/.config.toml.XXXXXX)"
 transaction_succeeded=false
-created_repository_id=""; created_credential_id=""
+created_entity_id=""; created_entity_kind=""; created_credential_id=""
 cleanup() {
   rm -f "${candidate:-}"
   if [[ "${transaction_succeeded}" != true ]]; then
-    if [[ -n "${created_repository_id}" ]]; then garm_cli repo delete "${created_repository_id}" --keep-webhook >/dev/null 2>&1 || true; fi
+    if [[ -n "${created_entity_id}" ]]; then garm_cli "${created_entity_kind}" delete "${created_entity_id}" --keep-webhook >/dev/null 2>&1 || true; fi
     if [[ -n "${created_credential_id}" ]]; then garm_cli github credentials delete "${created_credential_id}" >/dev/null 2>&1 || true; fi
   fi
   systemctl stop "${TRANSIENT_UNIT}" >/dev/null 2>&1 || true
@@ -325,12 +357,12 @@ credential_id="$(python3 - "${credentials}" "${GITHUB_CREDENTIAL_NAME}" <<'PY'
 import json,sys
 inventory=json.loads(sys.argv[1])
 if inventory is None: inventory=[]
-if not isinstance(inventory,list): raise SystemExit("sandbox GitHub credential inventory is not an array")
+if not isinstance(inventory,list): raise SystemExit("GitHub credential inventory is not an array")
 matches=[v for v in inventory if v.get("name")==sys.argv[2]]
-if len(matches)>1: raise SystemExit("duplicate sandbox GitHub credentials")
+if len(matches)>1: raise SystemExit("duplicate repository-bound GitHub credentials")
 if matches:
     v=matches[0]
-    if v.get("auth-type")!="app" or v.get("endpoint",{}).get("name")!="github.com": raise SystemExit("sandbox GitHub credential type/endpoint drifted")
+    if v.get("auth-type")!="app" or v.get("endpoint",{}).get("name")!="github.com": raise SystemExit("repository-bound GitHub credential type/endpoint drifted")
     print(v["id"])
 PY
 )"
@@ -340,39 +372,71 @@ else
   credential="$(garm_cli github credentials add --name "${GITHUB_CREDENTIAL_NAME}" --description "${GITHUB_CREDENTIAL_DESCRIPTION}" --endpoint github.com --auth-type app --app-id "${github_app_id}" --app-installation-id "${github_installation_id}" --private-key-path "${github_private_key}")"
   created_credential_id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "${credential}")"
 fi
-repo_owner="${entity_name%%/*}"; repo_name="${entity_name#*/}"
-repositories="$(garm_cli repo list --owner "${repo_owner}" --name "${repo_name}" --endpoint github.com)" || die 'sandbox repository inventory failed'
-derived_entity_id="$(python3 - "${repositories}" "${repo_owner}" "${repo_name}" "${GITHUB_CREDENTIAL_NAME}" <<'PY'
+if [[ "${authority_kind}" == personal-repository ]]; then
+  repo_owner="${entity_name%%/*}"; repo_name="${entity_name#*/}"
+  entities="$(garm_cli repo list --owner "${repo_owner}" --name "${repo_name}" --endpoint github.com)" || die 'repository inventory failed'
+  derived_entity_id="$(python3 - "${entities}" "${repo_owner}" "${repo_name}" <<'PY'
 import json,sys
 inventory=json.loads(sys.argv[1])
 if inventory is None: inventory=[]
-if not isinstance(inventory,list): raise SystemExit("sandbox repository inventory is not an array")
+if not isinstance(inventory,list): raise SystemExit("repository inventory is not an array")
 matches=[v for v in inventory if v.get("owner")==sys.argv[2] and v.get("name")==sys.argv[3]]
-if len(matches)>1: raise SystemExit("duplicate sandbox repository")
+if len(matches)>1: raise SystemExit("duplicate repository")
 if matches:
     v=matches[0]
-    if v.get("agent_mode") is not False: raise SystemExit("sandbox repository agent mode must remain disabled")
+    if v.get("agent_mode") is not False: raise SystemExit("repository agent mode must remain disabled")
     print(v["id"])
 PY
 )"
-if [[ -n "${derived_entity_id}" ]]; then
-  garm_cli repo update "${derived_entity_id}" --credentials "${GITHUB_CREDENTIAL_NAME}" --pool-balancer-type roundrobin --agent-mode=false >/dev/null
-else
-  repository="$(garm_cli repo add --owner "${repo_owner}" --name "${repo_name}" --forge-type github --credentials "${GITHUB_CREDENTIAL_NAME}" --random-webhook-secret --pool-balancer-type roundrobin --agent-mode=false)"
-  derived_entity_id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "${repository}")"
-  created_repository_id="${derived_entity_id}"
-fi
-[[ "${derived_entity_id}" =~ ^[0-9a-fA-F-]{36}$ ]] || die 'GARM returned an invalid repository UUID'
-[[ -z "${entity_id}" || "${entity_id,,}" == "${derived_entity_id,,}" ]] || die 'expected entity ID does not match the reconciled repository'
-entity_id="${derived_entity_id}"
-repository="$(garm_cli repo show "${entity_id}" --endpoint github.com)" || die 'reconciled sandbox repository cannot be read'
-python3 - "${repository}" "${repo_owner}" "${repo_name}" "${GITHUB_CREDENTIAL_NAME}" <<'PY'
+  if [[ -n "${derived_entity_id}" ]]; then
+    garm_cli repo update "${derived_entity_id}" --credentials "${GITHUB_CREDENTIAL_NAME}" --pool-balancer-type roundrobin --agent-mode=false >/dev/null
+  else
+    entity="$(garm_cli repo add --owner "${repo_owner}" --name "${repo_name}" --forge-type github --credentials "${GITHUB_CREDENTIAL_NAME}" --random-webhook-secret --pool-balancer-type roundrobin --agent-mode=false)"
+    derived_entity_id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "${entity}")"
+    created_entity_id="${derived_entity_id}"; created_entity_kind=repo
+  fi
+  entity="$(garm_cli repo show "${derived_entity_id}" --endpoint github.com)" || die 'reconciled repository cannot be read'
+  python3 - "${entity}" "${repo_owner}" "${repo_name}" "${GITHUB_CREDENTIAL_NAME}" <<'PY'
 import json,sys
 v=json.loads(sys.argv[1])
 credential=v.get("credentials",{})
-if v.get("owner")!=sys.argv[2] or v.get("name")!=sys.argv[3] or v.get("agent_mode") is not False: raise SystemExit("sandbox repository identity drifted")
-if credential.get("name")!=sys.argv[4] or credential.get("auth-type")!="app" or v.get("pool_balancing_type")!="roundrobin": raise SystemExit("sandbox repository credential/balancer drifted")
+if v.get("owner")!=sys.argv[2] or v.get("name")!=sys.argv[3] or v.get("agent_mode") is not False: raise SystemExit("repository identity drifted")
+if credential.get("name")!=sys.argv[4] or credential.get("auth-type")!="app" or v.get("pool_balancing_type")!="roundrobin": raise SystemExit("repository credential/balancer drifted")
 PY
+else
+  entities="$(garm_cli org list --name "${entity_name}" --endpoint github.com)" || die 'organization inventory failed'
+  derived_entity_id="$(python3 - "${entities}" "${entity_name}" <<'PY'
+import json,sys
+inventory=json.loads(sys.argv[1])
+if inventory is None: inventory=[]
+if not isinstance(inventory,list): raise SystemExit("organization inventory is not an array")
+matches=[v for v in inventory if v.get("name")==sys.argv[2]]
+if len(matches)>1: raise SystemExit("duplicate organization")
+if matches:
+    v=matches[0]
+    if v.get("agent_mode") is not False: raise SystemExit("organization agent mode must remain disabled")
+    print(v["id"])
+PY
+)"
+  if [[ -n "${derived_entity_id}" ]]; then
+    garm_cli org update "${derived_entity_id}" --credentials "${GITHUB_CREDENTIAL_NAME}" --pool-balancer-type roundrobin --agent-mode=false >/dev/null
+  else
+    entity="$(garm_cli org add --name "${entity_name}" --forge-type github --credentials "${GITHUB_CREDENTIAL_NAME}" --random-webhook-secret --pool-balancer-type roundrobin --agent-mode=false)"
+    derived_entity_id="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["id"])' "${entity}")"
+    created_entity_id="${derived_entity_id}"; created_entity_kind=org
+  fi
+  entity="$(garm_cli org show "${derived_entity_id}" --endpoint github.com)" || die 'reconciled organization cannot be read'
+  python3 - "${entity}" "${entity_name}" "${GITHUB_CREDENTIAL_NAME}" <<'PY'
+import json,sys
+v=json.loads(sys.argv[1])
+credential=v.get("credentials",{})
+if v.get("name")!=sys.argv[2] or v.get("agent_mode") is not False: raise SystemExit("organization identity drifted")
+if credential.get("name")!=sys.argv[3] or credential.get("auth-type")!="app" or v.get("pool_balancing_type")!="roundrobin": raise SystemExit("organization credential/balancer drifted")
+PY
+fi
+validate_uuid "${derived_entity_id}" || die 'GARM returned an invalid entity UUID'
+[[ -z "${entity_id}" || "${entity_id,,}" == "${derived_entity_id,,}" ]] || die 'expected entity ID does not match the reconciled entity'
+entity_id="${derived_entity_id}"
 
 inventory="$(garm_cli scaleset list "${entity_flag}" "${entity_id}")"
 instances="$(incus list --project ci-jit --format json)"

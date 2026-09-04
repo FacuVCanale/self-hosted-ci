@@ -202,6 +202,36 @@ class LocalApprovalTests(unittest.TestCase):
             request["pilot_package"]["allocation_id"],
         )
 
+    def test_pilot_builder_preserves_explicit_organization_runner_authority(self):
+        builder = PilotWorkRequestBuilder(
+            "d" * 64,
+            authority_kind="organization-runner-group",
+            runner_group="overworld-ci-jit",
+        )
+        target = ResolvedApprovalTarget(
+            "1172953958",
+            "alethia-earth/Overworld",
+            42,
+            "a" * 40,
+            "master",
+            "alethia-earth/Overworld/.github/workflows/ci-jit-pilot-child.yml@refs/heads/master",
+            "b" * 40,
+            "c" * 40,
+        )
+        request = builder.build(
+            target,
+            head_generation=1,
+            request_id="request-1",
+            nonce="A" * 43,
+            now=NOW,
+            ttl=timedelta(minutes=4),
+        )
+        self.assertEqual(
+            "organization-runner-group",
+            request["reservation"]["authority_kind"],
+        )
+        self.assertEqual("overworld-ci-jit", request["reservation"]["runner_group"])
+
 
 if __name__ == "__main__":
     unittest.main()

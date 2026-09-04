@@ -91,6 +91,8 @@ def root_config(path: Path):
     required = {
         "schema_version",
         "mode",
+        "authority_kind",
+        "runner_group",
         "app_id",
         "app_slug",
         "installation_id",
@@ -122,6 +124,26 @@ def root_config(path: Path):
         or value["mode"] not in {"ci-jit-pilot", "ci-gate-full"}
     ):
         raise LocalApprovalError("outbound worker config fields are not exact")
+    if (
+        value["authority_kind"] == "personal-repository"
+        and value["runner_group"] is not None
+    ) or (
+        value["authority_kind"] == "organization-runner-group"
+        and (
+            not isinstance(value["runner_group"], str)
+            or value["runner_group"] != value["runner_group"].strip()
+            or not 1 <= len(value["runner_group"]) <= 100
+            or "*" in value["runner_group"]
+            or "\r" in value["runner_group"]
+            or "\n" in value["runner_group"]
+        )
+    ):
+        raise LocalApprovalError("outbound worker runner authority is invalid")
+    if value["authority_kind"] not in {
+        "personal-repository",
+        "organization-runner-group",
+    }:
+        raise LocalApprovalError("outbound worker authority kind is invalid")
     return value
 
 
@@ -145,7 +167,11 @@ def runtime(config_path):
         HTTPS(c["request_timeout_seconds"]),
     )
     builder = (
-        PilotWorkRequestBuilder(c["image_fingerprint"])
+        PilotWorkRequestBuilder(
+            c["image_fingerprint"],
+            authority_kind=c["authority_kind"],
+            runner_group=c["runner_group"],
+        )
         if c["mode"] == "ci-jit-pilot"
         else ExternalAuthorityBuilder(
             Path(c["authority_helper_file"]),

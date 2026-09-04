@@ -27,6 +27,8 @@ BROKER_TARGET = "/usr/local/lib/self-hosted-ci/garm-allocation-broker.py"
 REQUIRED_FIELDS = {
     "schema_version",
     "mode",
+    "authority_kind",
+    "runner_group",
     "app_id",
     "app_slug",
     "installation_id",
@@ -92,6 +94,23 @@ def load_config(path: Path) -> dict[str, Any]:
         raise InstallError(
             "runtime-ready installation supports only schema v1 ci-jit-pilot"
         )
+    authority_kind = value["authority_kind"]
+    runner_group = value["runner_group"]
+    if authority_kind == "personal-repository":
+        if runner_group is not None:
+            raise InstallError("personal repository authority forbids a runner group")
+    elif authority_kind == "organization-runner-group":
+        if (
+            not isinstance(runner_group, str)
+            or runner_group != runner_group.strip()
+            or not 1 <= len(runner_group) <= 100
+            or "*" in runner_group
+            or "\r" in runner_group
+            or "\n" in runner_group
+        ):
+            raise InstallError("organization authority requires an exact runner group")
+    else:
+        raise InstallError("authority_kind is invalid")
     for field in ("app_id", "installation_id", "repository_id"):
         if (
             isinstance(value[field], bool)

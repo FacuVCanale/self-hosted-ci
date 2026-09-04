@@ -185,12 +185,39 @@ class ExternalAuthorityBuilder:
 class PilotWorkRequestBuilder:
     """Build a non-gating pilot request from live GitHub facts, without offline authority."""
 
-    def __init__(self, image_fingerprint: str):
+    def __init__(
+        self,
+        image_fingerprint: str,
+        *,
+        authority_kind: str = "personal-repository",
+        runner_group: str | None = None,
+    ):
         if not re.fullmatch(r"[0-9a-f]{64}", image_fingerprint):
             raise LocalApprovalError(
                 "pilot image fingerprint must be lowercase SHA-256"
             )
         self.image_fingerprint = image_fingerprint
+        if authority_kind == "personal-repository":
+            if runner_group is not None:
+                raise LocalApprovalError(
+                    "personal pilot authority cannot name a runner group"
+                )
+        elif authority_kind == "organization-runner-group":
+            if (
+                not isinstance(runner_group, str)
+                or runner_group != runner_group.strip()
+                or not 1 <= len(runner_group) <= 100
+                or "*" in runner_group
+                or "\r" in runner_group
+                or "\n" in runner_group
+            ):
+                raise LocalApprovalError(
+                    "organization pilot authority requires an exact runner group"
+                )
+        else:
+            raise LocalApprovalError("pilot authority kind is invalid")
+        self.authority_kind = authority_kind
+        self.runner_group = runner_group
 
     def build(self, target, *, head_generation, request_id, nonce, now, ttl):
         allocation_id = str(uuid4())
@@ -202,8 +229,8 @@ class PilotWorkRequestBuilder:
             "head_sha": target.head_sha,
             "workflow_ref": target.workflow_ref,
             "job_name": "local-quality",
-            "authority_kind": "personal-repository",
-            "runner_group": None,
+            "authority_kind": self.authority_kind,
+            "runner_group": self.runner_group,
             "scale_set_name": "",
             "labels": [],
             "image_fingerprint": self.image_fingerprint,

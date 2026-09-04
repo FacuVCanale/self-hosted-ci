@@ -36,7 +36,7 @@ def authorization():
         "tested_merge_sha": "c" * 40,
         "workflow_ref": "FacuVCanale/self-hosted-ci-sandbox/.github/workflows/ci-jit-canary-child.yml@refs/heads/main",
         "dispatch_sha": "d" * 40,
-        "garm_entity": {"authority_kind": "personal-repository", "entity_id": "12345678-1234-4123-8123-123456789abc", "entity_name": "sandbox", "runner_group": None},
+        "garm_entity": {"authority_kind": "personal-repository", "entity_id": "12345678-1234-4123-8123-123456789abc", "entity_name": "FacuVCanale/self-hosted-ci-sandbox", "runner_group": None},
         "image_alias": "ci-jit", "image_fingerprint": "1" * 64,
         "allocation_signer_fingerprint": "2" * 64, "github_app_config_digest": "3" * 64,
         "live_job_verifier_digest": "4" * 64, "network_policy_digest": "5" * 64,

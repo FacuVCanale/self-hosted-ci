@@ -186,7 +186,7 @@ install -o root -g root -m 0644 "${repo_root}/templates/garm/garm-provider-incus
 install -o root -g root -m 0644 "${repo_root}/templates/garm/runner-install-offline.sh.tmpl" "/usr/local/share/self-hosted-ci/runner-install-offline.sh.tmpl"
 install -o root -g root -m 0644 "${repo_root}/templates/garm/outbound-worker.json.example" "/usr/local/share/self-hosted-ci/outbound-worker.json.example"
 install -o root -g root -m 0644 "${repo_root}/templates/garm/worker-app-authority.json.example" "/usr/local/share/self-hosted-ci/worker-app-authority.json.example"
-for app_contract in runner-manager-app dispatcher-app live-job-verifier-app; do
+for app_contract in runner-manager-app runner-manager-org-app dispatcher-app live-job-verifier-app; do
   install -o root -g root -m 0644 "${repo_root}/templates/garm/${app_contract}.json.example" "/usr/local/share/self-hosted-ci/${app_contract}.json.example"
 done
 install -o root -g root -m 0755 "${repo_root}/scripts/host/install-incus-garm-tls.sh" "/usr/local/lib/self-hosted-ci/install-incus-garm-tls.sh"

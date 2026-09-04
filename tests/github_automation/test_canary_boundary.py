@@ -109,6 +109,40 @@ class CanaryBoundaryTests(unittest.TestCase):
                 now=NOW,
             )
 
+    def test_organization_authority_is_bound_to_repository_owner_and_exact_group(self):
+        org = authorization(
+            repository="alethia-earth/Overworld",
+            workflow_ref="alethia-earth/Overworld/.github/workflows/ci-jit-canary-child.yml@refs/heads/master",
+            garm_entity={
+                "authority_kind": "organization-runner-group",
+                "entity_id": "12345678-1234-4123-8123-123456789abc",
+                "entity_name": "alethia-earth",
+                "runner_group": "overworld-ci-jit",
+            },
+        )
+        signed = sign_canary_authorization(org, PRIVATE)
+        decision = verify_canary_authorization(
+            signed, PRIVATE.public_key(), pinned_fingerprint=FINGERPRINT, now=NOW
+        )
+        self.assertTrue(decision.authorized, decision.blockers)
+        for entity_name, runner_group in (
+            ("another-org", "overworld-ci-jit"),
+            ("alethia-earth", "*"),
+            ("alethia-earth", " padded"),
+            ("alethia-earth", "padded "),
+            ("alethia-earth", "line\nbreak"),
+            ("alethia-earth", "x" * 101),
+        ):
+            invalid = dict(org)
+            invalid["garm_entity"] = dict(
+                org["garm_entity"],
+                entity_name=entity_name,
+                runner_group=runner_group,
+            )
+            with self.subTest(entity_name=entity_name, runner_group=runner_group):
+                with self.assertRaises(CanaryBoundaryError):
+                    sign_canary_authorization(invalid, PRIVATE)
+
     def test_sign_and_verify_clis_keep_private_key_external(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
             root = Path(directory)

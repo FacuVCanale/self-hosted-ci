@@ -223,6 +223,45 @@ class CanaryRuntimeAssemblerTests(unittest.TestCase):
         for path in output.iterdir():
             self.assertEqual(0o600, stat_mode(path))
 
+    def test_prepare_accepts_exact_organization_runner_group_and_rejects_drift(self):
+        auth = json.loads(self.paths["authorization-template.json"].read_text())
+        auth["repository"] = "alethia-earth/Overworld"
+        auth["repository_id"] = 1172953958
+        auth["workflow_ref"] = "alethia-earth/Overworld/.github/workflows/ci-jit-canary-child.yml@refs/heads/master"
+        auth["garm_entity"] = {
+            "authority_kind": "organization-runner-group",
+            "entity_id": "12345678-1234-4123-8123-123456789abc",
+            "entity_name": "alethia-earth",
+            "runner_group": "overworld-ci-jit",
+        }
+        dispatcher = json.loads(self.paths["dispatcher.json"].read_text())
+        dispatcher.update(repository=auth["repository"], repository_id=auth["repository_id"], default_branch="master")
+        target = dict(auth["garm_entity"], entity_flag="--org")
+        health = json.loads(self.paths["health.json"].read_text())
+        broker = json.loads(self.paths["broker.json"].read_text())
+        health["targets"] = {str(auth["repository_id"]): target}
+        broker["targets"] = {str(auth["repository_id"]): target}
+        self._json("authorization-template.json", auth, private=True)
+        self._json("dispatcher.json", dispatcher, private=True)
+        self._json("health.json", health, private=True)
+        self._json("broker.json", broker, private=True)
+
+        output = self.root / "prepared-org"
+        args = self.prepare_args(output)
+        args[args.index("--default-branch") + 1] = "master"
+        self.assertEqual(0, self.run_main(args))
+
+        original_broker = json.loads(self.paths["broker.json"].read_text())
+        for index, (field, value) in enumerate((("runner_group", "wrong-group"), ("entity_flag", "--repo"))):
+            drifted = json.loads(self.paths["broker.json"].read_text())
+            drifted["targets"][str(auth["repository_id"])][field] = value
+            self._json("broker.json", drifted, private=True)
+            with self.subTest(field=field):
+                drift_args = self.prepare_args(self.root / f"prepared-org-drift-{index}")
+                drift_args[drift_args.index("--default-branch") + 1] = "master"
+                self.assertNotEqual(0, self.run_main(drift_args))
+            self._json("broker.json", original_broker, private=True)
+
     def test_timeout_scenario_completes_before_default_observer_deadline(self):
         workflow = (
             ROOT / "templates/workflows/ci-jit-canary-child.yml"

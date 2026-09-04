@@ -23,5 +23,15 @@
     "expires_at": {"type": "string", "format": "date-time"},
     "max_jobs": {"const": 1},
     "ephemeral": {"const": true}
-  }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"authority_kind": {"const": "personal-repository"}}, "required": ["authority_kind"]},
+      "then": {"properties": {"runner_group": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"authority_kind": {"const": "organization-runner-group"}}, "required": ["authority_kind"]},
+      "then": {"properties": {"runner_group": {"type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[^*\\s](?:[^*\\r\\n]*[^*\\s])?$"}}}
+    }
+  ]
 }
