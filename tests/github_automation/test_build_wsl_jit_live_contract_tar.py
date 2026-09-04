@@ -52,7 +52,14 @@ class LiveContractTarBuilderTests(unittest.TestCase):
                 ))
                 for member in members:
                     self.assertEqual((member.uid, member.gid, member.mtime), (0, 0, 0))
-                    self.assertEqual(member.mode, 0o755 if member.isdir() else 0o644)
+                    expected_mode = (
+                        0o755
+                        if member.isdir()
+                        else 0o640
+                        if member.name.startswith("contract/evidence/")
+                        else 0o644
+                    )
+                    self.assertEqual(member.mode, expected_mode)
 
     def test_builds_signed_bundle_without_private_key_input(self):
         with tempfile.TemporaryDirectory() as temporary:

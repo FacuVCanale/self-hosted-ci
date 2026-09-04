@@ -91,7 +91,12 @@ def _write_tar(output: Path, entries: list[tuple[str, bytes | None]]) -> None:
                     archive.addfile(info)
                 else:
                     info.type = tarfile.REGTYPE
-                    info.mode = 0o644
+                    # Host evidence is carried forward into the signed bundle
+                    # and is not rewritten by the live stager. Keep it at the
+                    # root-only-readable mode required by the evidence
+                    # installer; public runtime sources are regenerated and
+                    # remeasured separately during installation.
+                    info.mode = 0o640 if name.startswith("contract/evidence/") else 0o644
                     info.size = len(data)
                     archive.addfile(info, io.BytesIO(data))
             raw.flush()
