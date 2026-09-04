@@ -182,6 +182,10 @@ class OutboundWorkerRuntimeInstallerTests(unittest.TestCase):
                 self.assertEqual("verified", verified["status"])
             sentinel = root / "etc/self-hosted-ci/outbound-worker.runtime-ready"
             self.assertEqual(0o600, os.stat(sentinel).st_mode & 0o777)
+            self.assertEqual(
+                0o751,
+                os.stat(root / "etc/self-hosted-ci").st_mode & 0o777,
+            )
 
     def test_failed_apply_removes_existing_readiness(self) -> None:
         installer = load_installer()

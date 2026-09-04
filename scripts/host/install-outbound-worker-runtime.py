@@ -338,7 +338,11 @@ def install_runtime(
     secrets_root = _physical(prefix, SECRET_ROOT)
     state_root = _physical(prefix, STATE_ROOT)
     for directory, mode in (
-        (etc_root, 0o750),
+        # The proxy and GARM service identities need execute-only traversal
+        # through this shared root to reach their separately protected
+        # subdirectories. Provisioning establishes the same 0751 boundary;
+        # never tighten it as a side effect of installing the worker.
+        (etc_root, 0o751),
         (secrets_root, 0o700),
         (state_root, 0o700),
     ):
