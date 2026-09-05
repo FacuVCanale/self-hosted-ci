@@ -213,11 +213,12 @@ rollback() {
   set +e
   systemctl stop "$1" >/dev/null 2>&1
   systemctl disable "$1" >/dev/null 2>&1
-  systemctl is-active --quiet "$1"
-  active_rc=$?
-  systemctl is-enabled --quiet "$1"
+  systemctl reset-failed "$1" >/dev/null 2>&1
+  active_state=$(systemctl show "$1" --property ActiveState --value 2>/dev/null)
+  active_query_rc=$?
+  enabled_state=$(systemctl is-enabled "$1" 2>/dev/null)
   enabled_rc=$?
-  if [[ $active_rc -eq 0 || $enabled_rc -eq 0 ]]; then
+  if [[ $active_query_rc -ne 0 || $active_state != inactive || $enabled_rc -ne 1 || $enabled_state != disabled ]]; then
     echo 'runner rollback postcondition could not be proven' >&2
     exit 125
   fi

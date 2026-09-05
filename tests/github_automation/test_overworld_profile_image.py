@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 
 
@@ -155,11 +157,39 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn('runuser -u runner -- test ! -x /usr/bin/sudo', source)
         for rollback_contract in (
             "trap - EXIT",
-            "systemctl is-active --quiet",
-            "systemctl is-enabled --quiet",
+            "--property ActiveState --value",
+            "systemctl is-enabled",
             "exit 125",
         ):
             self.assertIn(rollback_contract, source)
+
+    def test_runner_finalizer_rollback_rejects_unproven_systemd_state(self) -> None:
+        source = (PROFILE / "provision.py").read_text(encoding="utf-8")
+        start = source.index("rollback() {")
+        end = source.index("\n}\ntrap rollback EXIT", start) + 2
+        rollback = source[start:end]
+        with tempfile.TemporaryDirectory() as directory:
+            systemctl = Path(directory) / "systemctl"
+            systemctl.write_text(
+                """#!/bin/bash
+case "$1" in
+  stop|disable|reset-failed) exit 1 ;;
+  show) [[ ${MOCK_STATE:-error} == error ]] && exit 4; echo "${MOCK_STATE}"; exit 0 ;;
+  is-enabled) [[ ${MOCK_ENABLED:-error} == error ]] && exit 4; echo "${MOCK_ENABLED}"; [[ $MOCK_ENABLED == disabled ]] && exit 1; exit 0 ;;
+esac
+exit 9
+""",
+                encoding="utf-8",
+            )
+            systemctl.chmod(0o755)
+            env = {**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"}
+            harness = f"set +e\n{rollback}\ncommitted=false\nfalse\nrollback actions.runner.test.service\n"
+            for state, enabled in (("error", "error"), ("active", "disabled"), ("inactive", "enabled")):
+                result = subprocess.run(
+                    ["bash", "-c", harness], env={**env, "MOCK_STATE": state, "MOCK_ENABLED": enabled},
+                    text=True, capture_output=True,
+                )
+                self.assertEqual(125, result.returncode, (state, enabled, result.stderr))
 
     def test_verifier_enforces_exact_profile_marker_and_offline_dependencies(self) -> None:
         source = (PROFILE / "verify.py").read_text(encoding="utf-8")
