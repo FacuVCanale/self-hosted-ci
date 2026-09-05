@@ -7,12 +7,14 @@ The outbound worker uses a dedicated GitHub App installed only on repositories e
 The App must have exactly these repository permissions:
 
 - Metadata: read
+- Contents: read
 - Pull requests: read
 - Actions: write
+- Administration: read
 
 Install it with **Only select repositories** and choose each CI repository explicitly. The runtime rejects `repository_selection: all`, extra permissions, a different App or installation, a token covering more than one repository, repository identity drift, and workflow drift.
 
-The fixed API root is `https://api.github.com`; every request carries API version `2026-03-10`. The client only exposes App inspection, repository installation inspection, installation-token creation, exact repository and pull-request reads, fixed workflow inspection and dispatch, and exact workflow run/job reads.
+The fixed API root is `https://api.github.com`; every request carries API version `2026-03-10`. The client only exposes App inspection, repository installation inspection, installation-token creation, exact repository and pull-request reads, the potential merge commit required to pin the tested merge identity, fixed workflow inspection and dispatch, and exact workflow run/job reads. `Contents: read` is required by GitHub's GraphQL authorization for `potentialMergeCommit`; it does not grant source writes.
 
 ## Local files
 

@@ -163,7 +163,7 @@ class GarmConfigurationTests(unittest.TestCase):
         self.assertIn('{"metadata":"read","actions":"read","administration":"write"}', source)
         self.assertIn('{"metadata":"read","organization_self_hosted_runners":"write"}', source)
         self.assertIn(
-            '{"metadata":"read","pull_requests":"read","actions":"write","administration":"read"}',
+            '{"metadata":"read","contents":"read","pull_requests":"read","actions":"write","administration":"read"}',
             source,
         )
         self.assertIn('("live-job-read",{"metadata":"read","actions":"read"})', source)
@@ -176,6 +176,7 @@ class GarmConfigurationTests(unittest.TestCase):
         self.assertEqual(
             {
                 "metadata": "read",
+                "contents": "read",
                 "pull_requests": "read",
                 "actions": "write",
                 "administration": "read",

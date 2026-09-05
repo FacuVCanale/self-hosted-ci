@@ -376,7 +376,9 @@ en menos de cinco minutos y sólo existe en `/run/self-hosted-ci/garm-cli`
 La entidad ya no se prepara a mano. El comando valida primero tres identidades:
 
 - runner-manager: `Metadata: read`, `Actions: read`, `Administration: write`;
-- dispatcher: `Metadata: read`, `Pull requests: read`, `Actions: write`;
+- dispatcher: `Metadata: read`, `Contents: read`, `Pull requests: read`,
+  `Actions: write`, `Administration: read`; `Contents: read` is required for
+  the GraphQL `potentialMergeCommit` used to pin the tested merge identity;
 - live-job verifier: `Metadata: read`, `Actions: read`.
 
 Sus app IDs, installation IDs, rutas PEM y fingerprints SPKI-SHA256 deben ser

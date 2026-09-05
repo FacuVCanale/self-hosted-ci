@@ -130,7 +130,7 @@ runner_permissions=(
 )
 expected=(
  ("garm-runner-manager",runner_permissions),
- ("workflow-dispatch",{"metadata":"read","pull_requests":"read","actions":"write","administration":"read"}),
+ ("workflow-dispatch",{"metadata":"read","contents":"read","pull_requests":"read","actions":"write","administration":"read"}),
  ("live-job-read",{"metadata":"read","actions":"read"}),
 )
 values=[]; required={"schema_version","purpose","app_id","app_slug","installation_id","repository","repository_id","repository_selection","permissions","private_key_file"}
