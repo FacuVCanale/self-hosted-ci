@@ -27,6 +27,8 @@ readonly MINIO_PORT=59002
 readonly BACKEND_PORT=3000
 readonly FRONTEND_PORT=3001
 readonly TESTED_MERGE_SHA="${PROFILE_TESTED_MERGE_SHA:?PROFILE_TESTED_MERGE_SHA is required}"
+export GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 
 ACTIVE_PHASE=
 ACTIVE_SAMPLER_PID=
@@ -108,6 +110,8 @@ finish_phase_measurement() {
 
 require_image_contract() {
   local chromium_candidates headless_candidates
+  (( EUID >= 1000 ))
+  [[ ! -w /sys/fs/cgroup/memory.peak && ! -w /sys/fs/cgroup/memory.events ]]
   [[ $(cat /sys/fs/cgroup/memory.max) == "$EXPECTED_MEMORY_BYTES" ]]
   [[ $(bun --version) == 1.4.0 ]]
   [[ $(uv --version) == "uv 0.8.22" ]]
@@ -140,9 +144,14 @@ install_prebaked_node_modules() {
 prepare_workspace() {
   local phase=$1
   [[ "$TESTED_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]
-  /usr/bin/git -c core.hooksPath=/dev/null reset --hard "$TESTED_MERGE_SHA" >/dev/null
-  /usr/bin/git -c core.hooksPath=/dev/null clean -ffdx >/dev/null
+  [[ -d .git && ! -L .git && -d .git/objects && ! -L .git/objects ]]
+  [[ -z $(/usr/bin/git for-each-ref --format='%(refname)' refs/replace) ]]
+  [[ ! -e .git/objects/info/alternates && ! -e .git/info/grafts ]]
+  printf '[core]\n\trepositoryformatversion = 0\n\tbare = false\n\thooksPath = /dev/null\n\tfsmonitor = false\n' > .git/config
+  /usr/bin/git -c core.attributesFile=/dev/null reset --hard "$TESTED_MERGE_SHA" >/dev/null
+  /usr/bin/git -c core.attributesFile=/dev/null clean -ffdx >/dev/null
   [[ $(/usr/bin/git rev-parse HEAD) == "$TESTED_MERGE_SHA" ]]
+  [[ $(/usr/bin/git rev-parse 'HEAD^{tree}') == $(/usr/bin/git rev-parse "$TESTED_MERGE_SHA^{tree}") ]]
   case "$phase" in
     backend) install_prebaked_node_modules backend "$BACKEND_LOCK_SHA256" "$BACKEND_MODULES" ;;
     frontend|e2e)

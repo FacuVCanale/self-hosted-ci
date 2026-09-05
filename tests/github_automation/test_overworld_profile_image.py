@@ -97,6 +97,10 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn("10.254.0.1:8079", source)
         self.assertIn("RuntimeMaxSec=2h", source)
         self.assertIn("Conflicts=${FENCED_SERVICES[*]}", source)
+        self.assertIn("--collect", source)
+        self.assertIn("KillMode=control-group", source)
+        self.assertIn("systemctl is-active --quiet \"${BUILD_PROXY_UNIT}\" && status=1", source)
+        self.assertIn("grep -Eq '(^|:)8079$'", source)
 
     def test_build_egress_is_exact_and_not_a_general_wildcard(self) -> None:
         policy = (PROFILE / "squid-build.conf").read_text(encoding="utf-8")
@@ -170,6 +174,7 @@ class OverworldProfileImageTests(unittest.TestCase):
             '("16", "3.4")',
             '("17", "3.5")',
             "default cluster persisted",
+            "runner privilege boundary drifted",
         ):
             self.assertIn(token, source)
 

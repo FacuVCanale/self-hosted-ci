@@ -86,7 +86,10 @@ cleanup(){
   local status=$?
   trap - ERR EXIT
   set +e
-  incus delete "${builder}" --project "${PROJECT}" --force >/dev/null 2>&1
+  if incus list "${builder}" --project "${PROJECT}" --format csv -c n 2>/dev/null | grep -Fxq "${builder}"; then
+    incus delete "${builder}" --project "${PROJECT}" --force >/dev/null 2>&1||status=1
+  fi
+  if incus list "${builder}" --project "${PROJECT}" --format csv -c n 2>/dev/null | grep -Fxq "${builder}"; then status=1; fi
   if [[ "${transaction_succeeded}" != true && "${alias_published}" == true ]]; then
     if [[ -z "${published_fingerprint}" ]]; then
       published_fingerprint="$(python3 - "${candidate_alias}" "$(incus image alias list --project "${PROJECT}" --format json 2>/dev/null)" <<'PY' 2>/dev/null
@@ -96,20 +99,28 @@ print(rows[0].get("target","") if len(rows)==1 else "")
 PY
 )"
     fi
-    incus image alias delete "${candidate_alias}" --project "${PROJECT}" >/dev/null 2>&1
+    incus image alias delete "${candidate_alias}" --project "${PROJECT}" >/dev/null 2>&1||status=1
+    if incus image alias list --project "${PROJECT}" --format csv -c n 2>/dev/null | grep -Fxq "${candidate_alias}"; then status=1; fi
     if [[ -n "${published_fingerprint}" && "${published_fingerprint}" != "${base_fingerprint}" ]]; then
       aliases="$(incus image alias list --project "${PROJECT}" --format json 2>/dev/null)"
       if python3 - "${published_fingerprint}" "${aliases}" <<'PY' >/dev/null 2>&1
 import json,sys
 if any(r.get("target")==sys.argv[1] for r in json.loads(sys.argv[2])): raise SystemExit(1)
 PY
-      then incus image delete "${published_fingerprint}" --project "${PROJECT}" >/dev/null 2>&1; fi
+      then incus image delete "${published_fingerprint}" --project "${PROJECT}" >/dev/null 2>&1||status=1; fi
     fi
   fi
-  systemctl stop "${BUILD_PROXY_UNIT}" >/dev/null 2>&1
-  systemctl reset-failed "${BUILD_PROXY_UNIT}" >/dev/null 2>&1
+  systemctl stop "${BUILD_PROXY_UNIT}" >/dev/null 2>&1||status=1
+  systemctl is-active --quiet "${BUILD_PROXY_UNIT}" && status=1
+  if ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq '(^|:)8079$'; then status=1; fi
+  systemctl reset-failed "${BUILD_PROXY_UNIT}" >/dev/null 2>&1||true
   for service in "${FENCED_SERVICES[@]}"; do
-    if [[ "${was_active[${service}]}" == true ]]; then systemctl start "${service}" >/dev/null 2>&1||status=1; fi
+    if [[ "${was_active[${service}]}" == true ]]; then
+      systemctl start "${service}" >/dev/null 2>&1||status=1
+      systemctl is-active --quiet "${service}"||status=1
+    else
+      systemctl is-active --quiet "${service}" && status=1
+    fi
   done
   rm -rf --one-file-system "${workdir}"
   exit "${status}"
@@ -122,7 +133,8 @@ systemctl is-active --quiet "${PROXY_SERVICE}"||die 'egress proxy must already b
 squid -k parse -f "${profile_dir}/squid-build.conf" >/dev/null 2>&1||die 'build-only Squid policy is invalid'
 systemctl is-active --quiet "${BUILD_PROXY_UNIT}" && die 'stale build-only proxy unit is active'
 systemd-run --quiet --unit="${BUILD_PROXY_UNIT%.service}" \
-  --property=Type=simple --property=RuntimeMaxSec=2h \
+  --collect --property=Type=simple --property=RuntimeMaxSec=2h \
+  --property=TimeoutStopSec=30s --property=KillMode=control-group \
   --property="Conflicts=${FENCED_SERVICES[*]}" \
   /usr/sbin/squid -N -f "${profile_dir}/squid-build.conf"
 systemctl is-active --quiet "${BUILD_PROXY_UNIT}"||die 'isolated build-only proxy failed to start'

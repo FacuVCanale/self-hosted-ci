@@ -17,6 +17,16 @@ def output(*args: str) -> str:
 
 
 def main() -> int:
+    runner_uid = int(output("id", "-u", "runner"))
+    runner_groups = set(output("id", "-nG", "runner").split())
+    if runner_uid < 1000 or runner_groups & {"sudo", "admin", "wheel", "docker", "lxd"}:
+        raise SystemExit("runner privilege boundary drifted")
+    sudoers = subprocess.run(
+        ["grep", "-R", "-E", "(^|[[:space:],:])runner([[:space:],:]|$)", "/etc/sudoers", "/etc/sudoers.d"],
+        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if sudoers.returncode == 0:
+        raise SystemExit("runner has explicit sudoers authorization")
     marker = json.loads(MARKER.read_text(encoding="utf-8"))
     if set(marker) != {
         "repository_profile_image_marker_version", "repository", "profile_id",

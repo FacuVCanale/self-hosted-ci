@@ -224,6 +224,7 @@ class RepositoryProfileTests(unittest.TestCase):
             "memory.current", "memory.peak", "memory.events", "memory.swap.current",
             "memory.swap.peak", "pids.current", "memory.max", "memory.jsonl",
             "MEMORY_FIT_LIMIT_BYTES=3865470566", "oom_kill_delta",
+            "! -w /sys/fs/cgroup/memory.peak", "GIT_NO_REPLACE_OBJECTS=1",
         ):
             self.assertIn(evidence, text)
         for forbidden in (
@@ -261,6 +262,8 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn("PG16_DATA", text)
         self.assertIn("PG17_DATA", text)
         self.assertIn("stop_postgres", text)
+        self.assertIn("for-each-ref --format='%(refname)' refs/replace", text)
+        self.assertIn("HEAD^{tree}", text)
 
     def test_exact_reviewed_postgres_tests_are_all_and_only_listed(self):
         text = SCRIPT.read_text()
