@@ -38,7 +38,7 @@ jobs:
         with:
           ref: ${{ steps.validate.outputs.base_sha }}
           fetch-depth: 0
-          persist-credentials: false
+          persist-credentials: true
       - name: Fetch and verify exact GitHub merge ref
         shell: bash
         env:
@@ -54,6 +54,8 @@ jobs:
           git config --local protocol.file.allow never
           git config --local commit.gpgsign false
           git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head:refs/ci-jit-pilot/head" "refs/pull/${PR_NUMBER}/merge:refs/ci-jit-pilot/merge"
+          git config --local --unset-all http.https://github.com/.extraheader
+          test -z "$(git config --local --get-all http.https://github.com/.extraheader || true)"
           test "$(git rev-parse refs/ci-jit-pilot/head)" = "$HEAD_SHA"
           test "$(git rev-parse refs/ci-jit-pilot/merge)" = "$EXPECTED_MERGE_SHA"
           test "$(git rev-parse refs/ci-jit-pilot/merge^1)" = "$BASE_SHA"
