@@ -150,6 +150,8 @@ prepare_workspace() {
   [[ -z $(/usr/bin/git for-each-ref --format='%(refname)' refs/replace) ]]
   [[ ! -e .git/objects/info/alternates && ! -e .git/info/grafts ]]
   printf '[core]\n\trepositoryformatversion = 0\n\tbare = false\n\thooksPath = /dev/null\n\tfsmonitor = false\n' > .git/config
+  [[ ! -e .git/index.lock ]]
+  unlink .git/index 2>/dev/null || true
   /usr/bin/git -c core.attributesFile=/dev/null reset --hard "$TESTED_MERGE_SHA" >/dev/null
   /usr/bin/git -c core.attributesFile=/dev/null clean -ffdx >/dev/null
   [[ $(/usr/bin/git rev-parse HEAD) == "$TESTED_MERGE_SHA" ]]

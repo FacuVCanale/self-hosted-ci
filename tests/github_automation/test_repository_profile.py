@@ -267,6 +267,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn("! -e .git/config.worktree", text)
         self.assertIn("! -e .git/info/attributes", text)
         self.assertIn("! -e .git/info/sparse-checkout", text)
+        self.assertIn("unlink .git/index", text)
         self.assertIn("HEAD^{tree}", text)
 
     def test_exact_reviewed_postgres_tests_are_all_and_only_listed(self):
