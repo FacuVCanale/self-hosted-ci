@@ -266,35 +266,40 @@ class JitPilotTests(unittest.TestCase):
         text = (root / "templates/workflows/ci-jit-pilot-child.yml").read_text()
         self.assertIn("name: non-gating JIT pilot", text)
         self.assertIn("name: local-quality", text)
+        self.assertIn("group: __SELF_HOSTED_CI_EXACT_RUNNER_GROUP__", text)
         self.assertIn(
-            "runs-on: ${{ needs.validate-package.outputs.runner_label }}", text
+            "labels: ${{ fromJSON(inputs.pilot_package).runner_label }}", text
         )
+        self.assertNotIn("group: ${{", text)
+        self.assertNotIn("runs-on: ubuntu-24.04", text)
+        self.assertIn("id: validate", text)
+        self.assertLess(text.index("id: validate"), text.index("uses: actions/checkout"))
         self.assertIn(
             "actions/jit-pilot-validate@0000000000000000000000000000000000000000", text
         )
         self.assertEqual(
-            2, text.count('"refs/pull/${PR_NUMBER}/merge:refs/ci-jit-pilot/merge"')
+            1, text.count('"refs/pull/${PR_NUMBER}/merge:refs/ci-jit-pilot/merge"')
         )
         self.assertEqual(
-            2,
+            1,
             text.count(
                 'test "$(git rev-parse refs/ci-jit-pilot/merge)" = "$EXPECTED_MERGE_SHA"'
             ),
         )
         self.assertEqual(
-            2,
+            1,
             text.count(
                 'test "$(git rev-parse refs/ci-jit-pilot/merge^1)" = "$BASE_SHA"'
             ),
         )
         self.assertEqual(
-            2,
+            1,
             text.count(
                 'test "$(git rev-parse refs/ci-jit-pilot/merge^2)" = "$HEAD_SHA"'
             ),
         )
         self.assertEqual(
-            2, text.count("run: python3 -m compileall -q .")
+            1, text.count("run: python3 -m compileall -q .")
         )
         for forbidden in (
             "child-claim",

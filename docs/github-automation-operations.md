@@ -76,6 +76,14 @@ privado. Si falta autoridad seleccionada devuelve
 la GitHub App sólo para ese repo y reanudar. Un plan bloqueado nunca se registra
 como local.
 
+Para `organization-runner-group`, el pilot no depende de un job preliminar
+GitHub-hosted: usa un único job efímero y combina el runner group literal,
+renderizado desde la autoridad root-only del host, con la label única de la
+reserva. El validador fijado por SHA es el primer step, antes de checkout o
+código consumidor. La variante `personal-repository` conserva la prevalidación
+GitHub-hosted porque no dispone de un runner group que confine la label antes de
+que empiecen los steps.
+
 ## Volver a GitHub-hosted
 
 Deshabilitar el routing local del repositorio en el registry. La coordinación debe fallar cerrada y utilizar exclusivamente la ruta GitHub-hosted; nunca debe aceptar una ejecución local histórica o no autorizada.

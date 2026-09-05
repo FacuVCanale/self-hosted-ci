@@ -29,6 +29,8 @@ class FakeOperator(AgentOperator):
             "default_branch": "main",
             "workflow_path": ".github/workflows/ci-jit-pilot-child.yml",
             "mode": "ci-jit-pilot",
+            "authority_kind": "personal-repository",
+            "runner_group": None,
         }
         self.github = {"id": 42, "nameWithOwner": "FacuVCanale/demo", "defaultBranch": "main"}
         self.health = {"eligible": True, "blockers": [], "generated_at": "now", "probe_error": None}
@@ -50,7 +52,7 @@ class FakeOperator(AgentOperator):
     def _github_pr(self, repository, pr):
         return {"number": pr, "state": "open", "headSha": "a" * 40, "headRepo": repository}
 
-    def _render_workflow(self):
+    def _render_workflow(self, authority=None):
         return b"name: local\n"
 
     def _ssh(self, command, *, timeout=45):
@@ -85,6 +87,40 @@ class AgentOperatorTests(unittest.TestCase):
         for value in ("FacuVCanale/*", "FacuVCanale", "*/demo", "owner/repo/extra"):
             with self.subTest(value=value), self.assertRaises(AgentOperatorError):
                 exact_repository(value)
+
+    def test_workflow_rendering_confines_org_label_to_exact_runner_group(self):
+        authority = {
+            **self.operator.authority,
+            "authority_kind": "organization-runner-group",
+            "runner_group": "overworld-ci-jit",
+        }
+        rendered = AgentOperator._render_workflow(self.operator, authority).decode()
+        self.assertIn("group: overworld-ci-jit", rendered)
+        self.assertIn(
+            "labels: ${{ fromJSON(inputs.pilot_package).runner_label }}", rendered
+        )
+        self.assertNotIn("__SELF_HOSTED_CI_EXACT_RUNNER_GROUP__", rendered)
+        self.assertNotIn("runs-on: ubuntu-24.04", rendered)
+
+    def test_personal_authority_keeps_hosted_prevalidation_template(self):
+        rendered = AgentOperator._render_workflow(
+            self.operator, self.operator.authority
+        ).decode()
+        self.assertIn("name: validate non-gating pilot package", rendered)
+        self.assertIn("runs-on: ubuntu-24.04", rendered)
+
+    def test_remote_org_authority_rejects_unsafe_runner_groups(self):
+        base = {
+            **self.operator.authority,
+            "authority_kind": "organization-runner-group",
+        }
+        for group in (None, "", "*", "bad group", "bad\nname", "${{ inputs.x }}"):
+            with self.subTest(group=group), mock.patch.object(
+                AgentOperator,
+                "_ssh",
+                return_value=json.dumps({**base, "runner_group": group}),
+            ), self.assertRaisesRegex(AgentOperatorError, "authority"):
+                AgentOperator(self.store, self.host)._remote_worker_config()
 
     def test_absent_repository_is_github_hosted_by_default(self):
         self.operator.workflow = None
