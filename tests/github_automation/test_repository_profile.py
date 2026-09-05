@@ -265,6 +265,8 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn("for-each-ref --format='%(refname)' refs/replace", text)
         self.assertIn("! -e .git/commondir", text)
         self.assertIn("! -e .git/config.worktree", text)
+        self.assertIn("! -e .git/info/attributes", text)
+        self.assertIn("! -e .git/info/sparse-checkout", text)
         self.assertIn("HEAD^{tree}", text)
 
     def test_exact_reviewed_postgres_tests_are_all_and_only_listed(self):
