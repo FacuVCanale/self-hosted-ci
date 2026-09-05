@@ -122,7 +122,7 @@ require_image_contract() {
   [[ $($PG16_BIN/psql --version) == "psql (PostgreSQL) 16."* ]]
   [[ $($PG17_BIN/psql --version) == "psql (PostgreSQL) 17."* ]]
   [[ -x "$WATERFALL_ROOT/.venv/bin/python" ]]
-  [[ $(git -C "$WATERFALL_ROOT" rev-parse HEAD) == "$WATERFALL_REVISION" ]]
+  [[ $(<"$WATERFALL_ROOT/.self-hosted-ci-commit") == "$WATERFALL_REVISION" ]]
   chromium_candidates=(/opt/ms-playwright/chromium-1217*/chrome-linux*/chrome)
   [[ ${#chromium_candidates[@]} == 1 && -x ${chromium_candidates[0]} ]]
   command -v minio mc bun uv curl unlink cp sha256sum stat >/dev/null
