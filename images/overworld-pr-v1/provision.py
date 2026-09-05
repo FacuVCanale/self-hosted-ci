@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""Provision the public, credential-free Overworld CI image payload."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+import zipfile
+
+
+ROOT = Path("/run/self-hosted-ci-profile-build")
+MANIFEST = ROOT / "manifest.json"
+PROFILE = ROOT / "profile.json"
+BUNDLE_INPUTS = ROOT / "bundle-inputs.json"
+
+
+def run(*args: str, env: dict[str, str] | None = None, cwd: Path | None = None) -> str:
+    return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, env=env, cwd=cwd).stdout.strip()
+
+
+def fetch(url: str, digest: str, target: Path) -> None:
+    request = urllib.request.Request(url, headers={"User-Agent": "self-hosted-ci-image-builder/1"})
+    with urllib.request.urlopen(request, timeout=180) as response, target.open("wb") as output:
+        shutil.copyfileobj(response, output)
+    if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+        raise SystemExit(f"artifact digest mismatch: {url}")
+
+
+def fetch_unpinned(url: str, target: Path) -> None:
+    request = urllib.request.Request(url, headers={"User-Agent": "self-hosted-ci-image-builder/1"})
+    with urllib.request.urlopen(request, timeout=180) as response, target.open("wb") as output:
+        shutil.copyfileobj(response, output)
+
+
+def verify_bundle(name: str, commit: str, digest: str) -> None:
+    bundle = ROOT / f"{name}.bundle"
+    if hashlib.sha256(bundle.read_bytes()).hexdigest() != digest:
+        raise SystemExit(f"{name} bundle digest drifted")
+    heads = run("git", "bundle", "list-heads", str(bundle)).splitlines()
+    if not any(line.split(maxsplit=1)[0] == commit for line in heads):
+        raise SystemExit(f"{name} commit is not an advertised bundle head")
+
+
+def output_commit(repository: Path) -> str:
+    return run("git", "-C", str(repository), "rev-parse", "HEAD")
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def require_profile(value: object, waterfall_commit: str) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != {
+        "repository_command_profile_version", "profile_id", "repository", "image_marker",
+        "runner_memory_bytes", "source_workflow_path", "source_workflow_sha256",
+        "dependency_snapshots", "runner_script", "runner_script_sha256", "phases", "toolchain",
+    }:
+        raise SystemExit("repository profile shape drifted")
+    expected_toolchain = {
+        "bun": "1.4.0", "garm": "0.2.1", "minio": "RELEASE.2025-07-23T15-54-02Z",
+        "playwright": "1.59.1", "postgresql_backend": "16", "postgis_backend": "3.4",
+        "postgresql_e2e": "17", "postgis_e2e": "3.5", "python": "3.12", "uv": "0.8.22",
+        "waterfall_revision": waterfall_commit,
+    }
+    if (
+        value["repository_command_profile_version"] != 1
+        or value["repository"] != "alethia-earth/Overworld"
+        or value["profile_id"] != "overworld-ci-v1"
+        or value["image_marker"] != "overworld-ci-jit-v1"
+        or value["runner_memory_bytes"] != 4294967296
+        or value["phases"] != ["backend", "frontend", "e2e"]
+        or value["toolchain"] != expected_toolchain
+    ):
+        raise SystemExit("repository profile identity drifted")
+    snapshots = value["dependency_snapshots"]
+    if not isinstance(snapshots, dict) or set(snapshots) != {"backend", "frontend"}:
+        raise SystemExit("repository dependency snapshot shape drifted")
+    for component in ("backend", "frontend"):
+        snapshot = snapshots[component]
+        if not isinstance(snapshot, dict) or set(snapshot) != {
+            "lock_path", "lock_sha256", "node_modules_path"
+        }:
+            raise SystemExit(f"{component} dependency snapshot shape drifted")
+        if (
+            snapshot["lock_path"] != f"{component}/bun.lock"
+            or snapshot["node_modules_path"] != f"/opt/self-hosted-ci/overworld-deps/{component}-node_modules"
+            or not isinstance(snapshot["lock_sha256"], str)
+            or not re_full_sha256(snapshot["lock_sha256"])
+        ):
+            raise SystemExit(f"{component} dependency snapshot identity drifted")
+    return value
+
+
+def re_full_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def require_manifest(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version", "profile", "repository", "architecture", "ubuntu_version",
+        "pgdg", "artifacts", "apt_packages", "marker_path", "inventory_path",
+    }:
+        raise SystemExit("profile manifest shape drifted")
+    if value["schema_version"] != 1 or value["profile"] != "overworld-pr-v1":
+        raise SystemExit("profile manifest identity drifted")
+    pgdg = value["pgdg"]
+    if not isinstance(pgdg, dict) or set(pgdg) != {
+        "key_url", "key_fingerprint", "repository", "suite"
+    }:
+        raise SystemExit("PGDG repository contract drifted")
+    if (
+        pgdg["key_url"] != "https://www.postgresql.org/media/keys/ACCC4CF8.asc"
+        or pgdg["key_fingerprint"] != "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8"
+        or pgdg["repository"] != "https://apt-archive.postgresql.org/pub/repos/apt"
+        or pgdg["suite"] != "noble-pgdg-archive"
+    ):
+        raise SystemExit("PGDG repository identity drifted")
+    artifacts = value["artifacts"]
+    if not isinstance(artifacts, dict) or set(artifacts) != {
+        "bun", "uv", "pyright", "playwright", "playwright_core", "minio", "mc"
+    }:
+        raise SystemExit("profile artifact set drifted")
+    for name, artifact in artifacts.items():
+        if not isinstance(artifact, dict) or not str(artifact.get("url", "")).startswith("https://"):
+            raise SystemExit(f"{name} source is not trusted HTTPS")
+        digest = artifact.get("sha256")
+        if not isinstance(digest, str) or not re_full_sha256(digest):
+            raise SystemExit(f"{name} digest is not lowercase SHA-256")
+    return value
+
+
+def extract_npm(archive: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=False)
+    with tarfile.open(archive, "r:gz") as source:
+        members = source.getmembers()
+        if any(not member.name.startswith("package/") or member.issym() or member.islnk() for member in members):
+            raise SystemExit("npm archive contains an unsafe member")
+        for member in members:
+            member.name = member.name.removeprefix("package/")
+            if member.name:
+                source.extract(member, destination, filter="data")
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        raise SystemExit("provisioner must run as container root")
+    manifest = require_manifest(json.loads(MANIFEST.read_text(encoding="utf-8")))
+    bundle_inputs = json.loads(BUNDLE_INPUTS.read_text(encoding="utf-8"))
+    profile_digest = hashlib.sha256(PROFILE.read_bytes()).hexdigest()
+    if set(bundle_inputs) != {
+        "overworld_commit", "overworld_bundle_sha256", "waterfall_commit", "waterfall_bundle_sha256"
+    }:
+        raise SystemExit("bundle input contract drifted")
+    profile = require_profile(
+        json.loads(PROFILE.read_text(encoding="utf-8")), str(bundle_inputs["waterfall_commit"])
+    )
+    os_release = Path("/etc/os-release").read_text(encoding="utf-8")
+    if 'ID=ubuntu' not in os_release or 'VERSION_ID="24.04"' not in os_release:
+        raise SystemExit("Ubuntu 24.04 is required")
+    env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+    sources = Path("/etc/apt/sources.list.d/ubuntu.sources")
+    if sources.exists():
+        text = sources.read_text(encoding="utf-8")
+        text = text.replace("http://archive.ubuntu.com", "https://archive.ubuntu.com")
+        text = text.replace("http://security.ubuntu.com", "https://security.ubuntu.com")
+        sources.write_text(text, encoding="utf-8")
+    run("apt-get", "update", env=env)
+    run("apt-get", "install", "-y", "--no-install-recommends", "gnupg", env=env)
+    pgdg = manifest["pgdg"]
+    assert isinstance(pgdg, dict)
+    with tempfile.TemporaryDirectory(prefix="pgdg-key-") as key_temp:
+        armored = Path(key_temp) / "pgdg.asc"
+        fetch_unpinned(str(pgdg["key_url"]), armored)
+        fingerprint = run("gpg", "--batch", "--show-keys", "--with-colons", str(armored))
+        fingerprints = [line.split(":")[9] for line in fingerprint.splitlines() if line.startswith("fpr:")]
+        if fingerprints[:1] != [pgdg["key_fingerprint"]]:
+            raise SystemExit("PGDG signing key fingerprint drifted")
+        run("gpg", "--batch", "--dearmor", "--output", "/usr/share/keyrings/postgresql-pgdg.gpg", str(armored))
+    Path("/etc/apt/sources.list.d/pgdg.list").write_text(
+        f'deb [signed-by=/usr/share/keyrings/postgresql-pgdg.gpg] {pgdg["repository"]} {pgdg["suite"]} main\n',
+        encoding="utf-8",
+    )
+    run("apt-get", "update", env=env)
+    run("apt-get", "install", "-y", "--no-install-recommends", *manifest["apt_packages"], env=env)
+    for package, prefix in (
+        ("postgresql-16-postgis-3", "3.4."),
+        ("postgresql-17-postgis-3", "3.5."),
+    ):
+        if not run("dpkg-query", "-W", "-f=${Version}", package).startswith(prefix):
+            raise SystemExit(f"{package} semantic version drifted")
+    for major in ("16", "17"):
+        cluster = Path(f"/etc/postgresql/{major}/main")
+        if cluster.exists():
+            run("pg_dropcluster", "--stop", major, "main")
+    run("systemctl", "disable", "postgresql.service")
+    artifacts: dict[str, dict[str, str]] = manifest["artifacts"]  # type: ignore[assignment]
+    with tempfile.TemporaryDirectory(prefix="overworld-image-") as temp:
+        tx = Path(temp)
+        downloaded: dict[str, Path] = {}
+        for name, artifact in artifacts.items():
+            target = tx / name
+            fetch(artifact["url"], artifact["sha256"], target)
+            downloaded[name] = target
+
+        with zipfile.ZipFile(downloaded["bun"]) as archive:
+            names = archive.namelist()
+            if names != ["bun-linux-x64/", "bun-linux-x64/bun"]:
+                raise SystemExit("Bun archive inventory drifted")
+            archive.extractall(tx / "bun")
+        shutil.copy2(tx / "bun/bun-linux-x64/bun", "/usr/local/bin/bun")
+        os.chmod("/usr/local/bin/bun", 0o755)
+
+        with tarfile.open(downloaded["uv"], "r:gz") as archive:
+            safe = [m for m in archive.getmembers() if not (m.issym() or m.islnk())]
+            if len(safe) != len(archive.getmembers()):
+                raise SystemExit("uv archive contains links")
+            archive.extractall(tx / "uv", members=safe, filter="data")
+        for binary in ("uv", "uvx"):
+            matches = list((tx / "uv").glob(f"*/{binary}"))
+            if len(matches) != 1:
+                raise SystemExit(f"uv archive lacks exact {binary} binary")
+            shutil.copy2(matches[0], f"/usr/local/bin/{binary}")
+            os.chmod(f"/usr/local/bin/{binary}", 0o755)
+
+        node_modules = Path("/opt/self-hosted-ci/node_modules")
+        node_modules.mkdir(parents=True, exist_ok=False)
+        for package in ("pyright", "playwright", "playwright_core"):
+            target_name = "playwright-core" if package == "playwright_core" else package
+            extract_npm(downloaded[package], node_modules / target_name)
+        Path("/usr/local/bin/pyright").write_text(
+            "#!/bin/sh\nexec /usr/local/bin/bun /opt/self-hosted-ci/node_modules/pyright/index.js \"$@\"\n",
+            encoding="utf-8",
+        )
+        Path("/usr/local/bin/playwright").write_text(
+            "#!/bin/sh\nexport PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright\nexec /usr/local/bin/bun /opt/self-hosted-ci/node_modules/playwright/cli.js \"$@\"\n",
+            encoding="utf-8",
+        )
+        os.chmod("/usr/local/bin/pyright", 0o755)
+        os.chmod("/usr/local/bin/playwright", 0o755)
+        for name in ("minio", "mc"):
+            shutil.copy2(downloaded[name], f"/usr/local/bin/{name}")
+            os.chmod(f"/usr/local/bin/{name}", 0o755)
+
+    Path("/opt/ms-playwright").mkdir(mode=0o755)
+    run("playwright", "install", "chromium", env={**os.environ, "PLAYWRIGHT_BROWSERS_PATH": "/opt/ms-playwright"})
+    chromium_candidates = list(Path("/opt/ms-playwright/chromium-1217").glob("*/chrome"))
+    if len(chromium_candidates) != 1:
+        raise SystemExit("Playwright Chromium executable inventory drifted")
+    browser_contract = Path("/opt/self-hosted-ci/browsers")
+    browser_contract.mkdir(parents=True, exist_ok=False)
+    (browser_contract / "chromium").symlink_to(chromium_candidates[0].parent)
+    run("apt-get", "clean")
+    shutil.rmtree("/var/lib/apt/lists", ignore_errors=True)
+
+    dependencies = Path("/opt/self-hosted-ci/overworld-deps")
+    dependencies.mkdir(parents=True, exist_ok=False)
+    verify_bundle("overworld", bundle_inputs["overworld_commit"], bundle_inputs["overworld_bundle_sha256"])
+    verify_bundle("waterfall", bundle_inputs["waterfall_commit"], bundle_inputs["waterfall_bundle_sha256"])
+    waterfall = dependencies / "waterfall"
+    run("git", "clone", "--no-checkout", str(ROOT / "waterfall.bundle"), str(waterfall))
+    run("git", "-C", str(waterfall), "checkout", "--detach", bundle_inputs["waterfall_commit"])
+    if output_commit(waterfall) != bundle_inputs["waterfall_commit"]:
+        raise SystemExit("Waterfall checkout drifted")
+    uv_cache = dependencies / "uv-cache"
+    run("uv", "sync", "--frozen", "--project", str(waterfall), env={**os.environ, "UV_CACHE_DIR": str(uv_cache)})
+    pyright_wrapper = waterfall / ".venv/bin/pyright"
+    pyright_wrapper.write_text("#!/bin/sh\nexec /usr/local/bin/pyright \"$@\"\n", encoding="utf-8")
+    pyright_wrapper.chmod(0o755)
+    overworld = Path("/var/tmp/overworld-source")
+    run("git", "clone", "--no-checkout", str(ROOT / "overworld.bundle"), str(overworld))
+    run("git", "-C", str(overworld), "checkout", "--detach", bundle_inputs["overworld_commit"])
+    if output_commit(overworld) != bundle_inputs["overworld_commit"]:
+        raise SystemExit("Overworld checkout drifted")
+    bun_cache = dependencies / "bun-cache"
+    snapshots = profile["dependency_snapshots"]
+    assert isinstance(snapshots, dict)
+    for component in ("backend", "frontend"):
+        component_root = overworld / component
+        snapshot = snapshots[component]
+        assert isinstance(snapshot, dict)
+        lockfile = overworld / str(snapshot["lock_path"])
+        if sha256_file(lockfile) != snapshot["lock_sha256"]:
+            raise SystemExit(f"{component} lockfile digest drifted")
+        run("bun", "install", "--frozen-lockfile", cwd=component_root, env={**os.environ, "BUN_INSTALL_CACHE_DIR": str(bun_cache)})
+        shutil.move(str(component_root / "node_modules"), dependencies / f"{component}-node_modules")
+    pyright_target = overworld / "backend/src/modules/methodology-obligations/waterfall-stage-push-contract.py"
+    run(
+        str(pyright_wrapper), str(pyright_target),
+        env={**os.environ, "PYTHONPATH": f"{waterfall}:{waterfall / 'src'}"},
+    )
+    for tree in (waterfall / ".git", overworld, ROOT / "overworld.bundle", ROOT / "waterfall.bundle"):
+        if tree.is_dir():
+            shutil.rmtree(tree)
+        elif tree.exists():
+            tree.unlink()
+    (waterfall / ".self-hosted-ci-commit").write_text(bundle_inputs["waterfall_commit"] + "\n", encoding="ascii")
+    for path in dependencies.rglob("*"):
+        if path.is_dir():
+            path.chmod((path.stat().st_mode & ~0o022) | 0o055)
+        elif path.is_file():
+            path.chmod((path.stat().st_mode & ~0o022) | 0o044)
+    for forbidden_git in dependencies.rglob(".git"):
+        raise SystemExit(f"source-control metadata persisted: {forbidden_git}")
+    retained_source = [path for path in waterfall.rglob("*") if waterfall / ".venv" not in path.parents]
+    for forbidden_name in (".env", ".npmrc", ".netrc", "hosts.yml"):
+        if any(path.is_file() and path.name == forbidden_name for path in retained_source):
+            raise SystemExit(f"credential-shaped file persisted: {forbidden_name}")
+
+    manifest_bytes = MANIFEST.read_bytes()
+    manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+    binaries = ["bun", "uv", "uvx", "pyright", "playwright", "minio", "mc", "psql"]
+    binary_inventory = {}
+    for name in binaries:
+        resolved = shutil.which(name)
+        if not resolved:
+            raise SystemExit(f"required executable is absent: {name}")
+        path = Path(resolved).resolve()
+        binary_inventory[name] = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    postgres = Path(run("pg_config", "--bindir")) / "postgres"
+    if not postgres.is_file():
+        raise SystemExit("PostgreSQL server executable is absent")
+    binary_inventory["postgres"] = {
+        "path": str(postgres),
+        "sha256": hashlib.sha256(postgres.read_bytes()).hexdigest(),
+    }
+    if "POSTGIS=" not in run("pg_config", "--configure") and not Path("/usr/share/postgresql/16/extension/postgis.control").is_file():
+        raise SystemExit("PostGIS extension contract is absent")
+    packages = run("dpkg-query", "-W", "-f=${Package}\t${Version}\n").splitlines()
+    inventory = {
+        "schema_version": 1,
+        "profile": manifest["profile"],
+        "manifest_sha256": manifest_sha,
+        "artifacts": artifacts,
+        "binaries": binary_inventory,
+        "dpkg": sorted(packages),
+        "playwright_chromium_revision": artifacts["playwright"]["chromium_revision"],
+        "repository_profile_digest": profile_digest,
+        "source_bundles": bundle_inputs,
+    }
+    inventory_path = Path(str(manifest["inventory_path"]))
+    inventory_path.parent.mkdir(parents=True, exist_ok=True)
+    inventory_path.write_text(json.dumps(inventory, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    marker = {
+        "repository_profile_image_marker_version": 1,
+        "repository": profile["repository"],
+        "profile_id": profile["profile_id"],
+        "profile_digest": profile_digest,
+        "image_marker": profile["image_marker"],
+        "runner_memory_bytes": profile["runner_memory_bytes"],
+        "toolchain": profile["toolchain"],
+    }
+    marker_path = Path(str(manifest["marker_path"]))
+    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    marker_path.write_text(json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    for forbidden in (Path("/root/.npmrc"), Path("/root/.netrc"), Path("/root/.config/gh/hosts.yml")):
+        if forbidden.exists():
+            raise SystemExit(f"credential surface persisted: {forbidden}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

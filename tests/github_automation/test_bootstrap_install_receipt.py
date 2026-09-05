@@ -83,9 +83,9 @@ class BootstrapInstallReceiptTests(unittest.TestCase):
             bootstrap, installed, receipt, _ = self.fixture(Path(directory))
             with self.root_stat():
                 measured = VERIFIER.measure(bootstrap, installed)
-            self.assertEqual(83, measured["artifact_count"])
+            self.assertEqual(88, measured["artifact_count"])
             self.assertEqual(
-                "1a10c8337f27637f3911182933e1bf613f5c19738761c5591e19ddf58e6daa22",
+                "a0bb66f4a15439fcb4ad3a5c4c481800616e71e40c2584cea257935cd6663f3d",
                 measured["bootstrap_mapping_digest"],
             )
             with (
@@ -97,7 +97,7 @@ class BootstrapInstallReceiptTests(unittest.TestCase):
             with self.root_stat():
                 stored = VERIFIER.verify_receipt(receipt, measured)
             self.assertEqual(64, len(stored["receipt_digest"]))
-            self.assertEqual(83, len(stored["installed_targets"]))
+            self.assertEqual(88, len(stored["installed_targets"]))
 
     def test_content_mode_symlink_and_hardlink_drift_fail_closed(self):
         for mutation in ("content", "mode", "symlink", "parent-symlink", "hardlink"):
