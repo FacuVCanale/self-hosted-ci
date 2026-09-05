@@ -570,6 +570,7 @@ class HostHealthScriptTests(unittest.TestCase):
             'if ($heartbeat.status -ne "fresh")',
             '"--exec", "/bin/sleep", "infinity"',
             "dedicated distro keepalive exited before the supervisor started",
+            "dedicated distro keepalive exited while supervisor was running",
             "finally { Stop-WslKeepalive $keepalive }",
         ):
             self.assertIn(token, source)
