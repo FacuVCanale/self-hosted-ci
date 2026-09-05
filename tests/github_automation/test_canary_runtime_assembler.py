@@ -74,6 +74,7 @@ class CanaryRuntimeAssemblerTests(unittest.TestCase):
                 "workflow_path": ".github/workflows/ci-jit-canary-child.yml",
                 "permissions": {
                     "metadata": "read",
+                    "contents": "read",
                     "pull_requests": "read",
                     "actions": "write",
                     "administration": "read",
@@ -196,6 +197,7 @@ class CanaryRuntimeAssemblerTests(unittest.TestCase):
         self.assertEqual(
             {
                 "metadata": "read",
+                "contents": "read",
                 "pull_requests": "read",
                 "actions": "write",
                 "administration": "read",

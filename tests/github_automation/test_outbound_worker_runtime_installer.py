@@ -68,6 +68,7 @@ class OutboundWorkerRuntimeInstallerTests(unittest.TestCase):
             "workflow_path": ".github/workflows/ci-jit-pilot-child.yml",
             "permissions": {
                 "metadata": "read",
+                "contents": "read",
                 "pull_requests": "read",
                 "actions": "write",
                 "administration": "read",

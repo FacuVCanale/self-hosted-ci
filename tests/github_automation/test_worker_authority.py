@@ -97,6 +97,7 @@ class WorkerAuthorityTests(unittest.TestCase):
 
     def test_exact_selected_repository_token_and_headers(self) -> None:
         self.assertEqual("read", WORKER_PERMISSIONS["administration"])
+        self.assertEqual("read", WORKER_PERMISSIONS["contents"])
         self.assertNotEqual("write", WORKER_PERMISSIONS["administration"])
         client, token, transport, signer = self.authenticate()
         self.assertNotIn(token.value, repr(token))
@@ -149,7 +150,7 @@ class WorkerAuthorityTests(unittest.TestCase):
             {"installation": lambda value: value.update(repository_selection="all")},
             {
                 "installation": lambda value: value["permissions"].update(
-                    contents="read"
+                    issues="read"
                 )
             },
             {"token": lambda value: value["permissions"].update(actions="read")},
@@ -293,7 +294,7 @@ class WorkerAuthorityTests(unittest.TestCase):
     ) -> None:
         for changes in (
             {"repository_selection": "all"},
-            {"permissions": {**WORKER_PERMISSIONS, "contents": "read"}},
+            {"permissions": {**WORKER_PERMISSIONS, "issues": "read"}},
             {"workflow_path": ".github/workflows/other.yml"},
         ):
             with self.subTest(changes=changes), self.assertRaises(WorkerAuthorityError):
@@ -324,6 +325,7 @@ class WorkerAuthorityTests(unittest.TestCase):
             "GET /repos/{owner}/{repo}/actions/runners",
             policy["allowed_endpoints"],
         )
+        self.assertIn("POST /graphql", policy["allowed_endpoints"])
         self.assertNotIn(
             "POST /repos/{owner}/{repo}/actions/runners",
             policy["allowed_endpoints"],

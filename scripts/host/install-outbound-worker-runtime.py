@@ -55,6 +55,7 @@ REQUIRED_FIELDS = {
 }
 EXACT_PERMISSIONS = {
     "metadata": "read",
+    "contents": "read",
     "pull_requests": "read",
     "actions": "write",
     "administration": "read",

@@ -21,6 +21,7 @@ API_ROOT = "https://api.github.com"
 API_VERSION = "2026-03-10"
 WORKER_PERMISSIONS = {
     "metadata": "read",
+    "contents": "read",
     "pull_requests": "read",
     "actions": "write",
     "administration": "read",
