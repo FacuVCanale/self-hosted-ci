@@ -1,0 +1,29 @@
+name: Run immutable repository command profile
+description: Validate one literal repository/profile/image binding and execute its fixed runner script.
+inputs:
+  repository:
+    required: true
+    description: Exact allowlisted OWNER/REPO literal.
+  profile-id:
+    required: true
+    description: Exact allowlisted profile identifier literal.
+  profile-digest:
+    required: true
+    description: Lowercase SHA-256 of the immutable profile JSON.
+  image-marker:
+    required: true
+    description: Exact image contract marker literal.
+  base-sha:
+    required: true
+    description: Trusted base SHA emitted by jit-pilot-validate.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        PROFILE_REPOSITORY: ${{ inputs.repository }}
+        PROFILE_ID: ${{ inputs.profile-id }}
+        PROFILE_DIGEST: ${{ inputs.profile-digest }}
+        PROFILE_IMAGE_MARKER: ${{ inputs.image-marker }}
+        PROFILE_BASE_SHA: ${{ inputs.base-sha }}
+      run: python3 "$GITHUB_ACTION_PATH/run.py"

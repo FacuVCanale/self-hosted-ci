@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://self-hosted-ci.invalid/schemas/repository-command-profile-v1.schema.json",
+  "title": "Repository command profile v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "repository_command_profile_version",
+    "profile_id",
+    "repository",
+    "image_marker",
+    "runner_memory_bytes",
+    "source_workflow_path",
+    "source_workflow_sha256",
+    "dependency_snapshots",
+    "runner_script",
+    "runner_script_sha256",
+    "phases",
+    "toolchain"
+  ],
+  "properties": {
+    "repository_command_profile_version": {"const": 1},
+    "profile_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "image_marker": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+    "runner_memory_bytes": {"type": "integer", "minimum": 1073741824, "maximum": 17179869184},
+    "source_workflow_path": {"const": ".github/workflows/ci.yml"},
+    "source_workflow_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "dependency_snapshots": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend", "frontend"],
+      "properties": {
+        "backend": {"$ref": "#/$defs/dependencySnapshot"},
+        "frontend": {"$ref": "#/$defs/dependencySnapshot"}
+      }
+    },
+    "runner_script": {"type": "string", "pattern": "^repository_profiles/[a-z0-9-]+/[a-z0-9-]+\\.sh$"},
+    "runner_script_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "phases": {
+      "type": "array",
+      "prefixItems": [
+        {"const": "backend"},
+        {"const": "frontend"},
+        {"const": "e2e"}
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bun", "garm", "minio", "playwright", "postgresql_backend", "postgis_backend", "postgresql_e2e", "postgis_e2e", "python", "uv", "waterfall_revision"],
+      "properties": {
+        "bun": {"const": "1.4.0"},
+        "garm": {"const": "0.2.1"},
+        "minio": {"type": "string", "minLength": 1},
+        "playwright": {"const": "1.59.1"},
+        "postgresql_backend": {"const": "16"},
+        "postgis_backend": {"const": "3.4"},
+        "postgresql_e2e": {"const": "17"},
+        "postgis_e2e": {"const": "3.5"},
+        "python": {"const": "3.12"},
+        "uv": {"const": "0.8.22"},
+        "waterfall_revision": {"const": "6df90210830b2ebe36eda6b96d91237914d000e4"}
+      }
+    }
+  },
+  "$defs": {
+    "dependencySnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lock_path", "lock_sha256", "node_modules_path"],
+      "properties": {
+        "lock_path": {"type": "string", "pattern": "^(backend|frontend)/bun\\.lock$"},
+        "lock_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "node_modules_path": {"type": "string", "pattern": "^/opt/self-hosted-ci/overworld-deps/(backend|frontend)-node_modules$"}
+      }
+    }
+  }
+}

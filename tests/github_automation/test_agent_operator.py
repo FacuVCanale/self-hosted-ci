@@ -113,8 +113,13 @@ class AgentOperatorTests(unittest.TestCase):
         )
         clear = rendered.index(tolerant_clear)
         verify_absent = rendered.index(absence_check)
-        quality = rendered.index("Run pilot quality command")
+        quality = rendered.index("Run reviewed Overworld CI profile")
         self.assertIn("persist-credentials: true", rendered)
+        self.assertIn("repository: alethia-earth/Overworld", rendered)
+        self.assertIn("profile-id: overworld-ci-v1", rendered)
+        self.assertIn("image-marker: overworld-ci-jit-v1", rendered)
+        self.assertRegex(rendered, r"profile-digest: [0-9a-f]{64}")
+        self.assertNotIn("__OVERWORLD_PROFILE_SHA256__", rendered)
         self.assertLess(fetch, clear)
         self.assertLess(clear, verify_absent)
         self.assertLess(verify_absent, quality)
@@ -125,6 +130,8 @@ class AgentOperatorTests(unittest.TestCase):
         ).decode()
         self.assertIn("name: validate non-gating pilot package", rendered)
         self.assertIn("runs-on: ubuntu-24.04", rendered)
+        self.assertNotIn("run-repository-profile", rendered)
+        self.assertIn("run: python3 -m compileall -q .", rendered)
 
     def test_remote_org_authority_rejects_unsafe_runner_groups(self):
         base = {

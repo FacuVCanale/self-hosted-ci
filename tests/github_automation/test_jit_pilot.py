@@ -261,7 +261,7 @@ class JitPilotTests(unittest.TestCase):
         self.assertEqual(("finish", ALLOCATION, "failure"), broker.calls[0])
         self.assertEqual("prove", broker.calls[1][0])
 
-    def test_workflow_is_separate_non_gating_python_only_and_uses_exact_job_name(self):
+    def test_workflow_is_separate_non_gating_profile_only_and_uses_exact_job_name(self):
         root = Path(__file__).parents[2]
         text = (root / "templates/workflows/ci-jit-pilot-child.yml").read_text()
         self.assertIn("name: non-gating JIT pilot", text)
@@ -298,9 +298,12 @@ class JitPilotTests(unittest.TestCase):
                 'test "$(git rev-parse refs/ci-jit-pilot/merge^2)" = "$HEAD_SHA"'
             ),
         )
-        self.assertEqual(
-            1, text.count("run: python3 -m compileall -q .")
-        )
+        self.assertEqual(1, text.count("actions/run-repository-profile@"))
+        self.assertIn("repository: alethia-earth/Overworld", text)
+        self.assertIn("profile-id: overworld-ci-v1", text)
+        self.assertIn("profile-digest: __OVERWORLD_PROFILE_SHA256__", text)
+        self.assertIn("image-marker: overworld-ci-jit-v1", text)
+        self.assertNotIn("run: python3 -m compileall -q .", text)
         for forbidden in (
             "child-claim",
             "child-mark-started",

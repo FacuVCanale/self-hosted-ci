@@ -33,6 +33,7 @@ def main() -> int:
         "actions/ci-control": 6,
         "actions/jit-canary-validate": 1,
         "actions/jit-pilot-validate": 2,
+        "actions/run-repository-profile": 1,
     }
     observed_action_counts = {
         action: sum(1 for observed, _ in references if observed == action)
