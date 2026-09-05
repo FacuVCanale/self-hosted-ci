@@ -151,6 +151,8 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertNotIn("WATERFALL_CI_TOKEN", source)
         self.assertNotIn("GITHUB_TOKEN", source)
         self.assertNotIn('run("playwright", "install"', source)
+        self.assertIn('[[ $(id -nG runner) == runner ]]', source)
+        self.assertIn('runuser -u runner -- test ! -x /usr/bin/sudo', source)
 
     def test_verifier_enforces_exact_profile_marker_and_offline_dependencies(self) -> None:
         source = (PROFILE / "verify.py").read_text(encoding="utf-8")
@@ -176,6 +178,7 @@ class OverworldProfileImageTests(unittest.TestCase):
             "default cluster persisted",
             "runner privilege boundary drifted",
             "runner finalizer ownership or mode drifted",
+            'runner_groups != {"runner"}',
         ):
             self.assertIn(token, source)
 

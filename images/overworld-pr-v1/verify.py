@@ -19,7 +19,7 @@ def output(*args: str) -> str:
 def main() -> int:
     runner_uid = int(output("id", "-u", "runner"))
     runner_groups = set(output("id", "-nG", "runner").split())
-    if runner_uid < 1000 or runner_groups & {"sudo", "admin", "wheel", "docker", "lxd"}:
+    if runner_uid < 1000 or runner_groups != {"runner"}:
         raise SystemExit("runner privilege boundary drifted")
     sudoers = subprocess.run(
         ["grep", "-R", "-E", "(^|[[:space:],:])runner([[:space:],:]|$)", "/etc/sudoers", "/etc/sudoers.d"],

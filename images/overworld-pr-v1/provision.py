@@ -193,9 +193,11 @@ def main() -> int:
     if subprocess.run(["id", "runner"], check=False, stdout=subprocess.DEVNULL).returncode != 0:
         run("useradd", "--create-home", "--shell", "/bin/bash", "--user-group", "runner")
     run("passwd", "--lock", "runner")
-    for group in ("sudo", "admin", "wheel", "docker", "lxd"):
-        if subprocess.run(["getent", "group", group], check=False, stdout=subprocess.DEVNULL).returncode == 0:
-            subprocess.run(["gpasswd", "--delete", "runner", group], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for group in output("id", "-nG", "runner").split():
+        if group != "runner":
+            run("gpasswd", "--delete", "runner", group)
+    if output("id", "-nG", "runner") != "runner":
+        raise SystemExit("runner supplementary groups could not be removed")
     finalizer = Path("/usr/local/sbin/self-hosted-ci-finalize-runner")
     finalizer.write_text(
         """#!/bin/bash
@@ -205,11 +207,13 @@ set -euo pipefail
 unit=/etc/systemd/system/$1
 [[ -f $unit && ! -L $unit && $(stat -c %U:%G:%a $unit) == root:root:644 ]]
 grep -Fxq 'User=runner' "$unit"
-for group in sudo admin wheel docker lxd; do
-  getent group "$group" >/dev/null 2>&1 && gpasswd --delete runner "$group" >/dev/null 2>&1 || true
+for group in $(id -nG runner); do
+  [[ $group == runner ]] || gpasswd --delete runner "$group" >/dev/null
 done
+[[ $(id -nG runner) == runner ]]
 chown root:root /usr/bin/sudo
 chmod 0750 /usr/bin/sudo
+runuser -u runner -- test ! -x /usr/bin/sudo
 systemctl start "$1"
 systemctl is-active --quiet "$1"
 main_pid=$(systemctl show "$1" --property MainPID --value)
