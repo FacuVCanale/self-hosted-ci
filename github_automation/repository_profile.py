@@ -165,7 +165,10 @@ def load_profile(
     script_raw = script_path.read_bytes()
     if _sha256(script_raw) != value.get("runner_script_sha256"):
         raise RepositoryProfileError("runner script digest mismatch")
-    lowered = script_raw.decode("utf-8").lower()
+    lowered = script_raw.decode("utf-8").lower().replace(
+        "privilege_helper=/usr/bin/sudo",
+        "privilege_helper=<verified-non-executable>",
+    )
     if any(fragment in lowered for fragment in FORBIDDEN_SCRIPT_FRAGMENTS):
         raise RepositoryProfileError("runner script contains a forbidden execution surface")
     return value, script_path

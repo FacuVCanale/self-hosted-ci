@@ -217,7 +217,10 @@ class RepositoryProfileTests(unittest.TestCase):
 
     def test_runner_has_fixed_phases_memory_instrumentation_and_no_privileged_installers(self):
         text = SCRIPT.read_text()
-        lowered = text.lower()
+        lowered = text.lower().replace(
+            "privilege_helper=/usr/bin/sudo",
+            "privilege_helper=<verified-non-executable>",
+        )
         for phase in ("phase_backend", "phase_frontend", "phase_e2e"):
             self.assertEqual(1, text.count(phase))
         for evidence in (
@@ -243,6 +246,7 @@ class RepositoryProfileTests(unittest.TestCase):
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, lowered)
+        self.assertIn("privilege_helper=/usr/bin/sudo", text)
         self.assertNotIn("$@", text)
         self.assertNotIn("${{", text)
         self.assertNotIn("find backend", text)

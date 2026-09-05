@@ -205,8 +205,22 @@ set -euo pipefail
 [[ $EUID -eq 0 && $# -eq 2 && $2 == runner ]]
 [[ $1 =~ ^actions\\.runner\\.[A-Za-z0-9_.-]+\\.service$ ]]
 unit=/etc/systemd/system/$1
+committed=false
+rollback() {
+  if [[ $committed != true ]]; then
+    systemctl stop "$1" >/dev/null 2>&1 || true
+    systemctl disable "$1" >/dev/null 2>&1 || true
+  fi
+}
+trap 'rollback "$1"' EXIT
 [[ -f $unit && ! -L $unit && $(stat -c %U:%G:%a $unit) == root:root:644 ]]
 grep -Fxq 'User=runner' "$unit"
+! grep -Eq '^ExecStart=[+!]' "$unit"
+systemctl daemon-reload
+systemctl disable --now "$1" >/dev/null 2>&1 || true
+[[ $(systemctl show "$1" --property User --value) == runner ]]
+[[ -z $(systemctl show "$1" --property SupplementaryGroups --value) ]]
+[[ $(systemctl show "$1" --property DynamicUser --value) == no ]]
 for group in $(id -nG runner); do
   [[ $group == runner ]] || gpasswd --delete runner "$group" >/dev/null
 done
@@ -214,10 +228,13 @@ done
 chown root:root /usr/bin/sudo
 chmod 0750 /usr/bin/sudo
 runuser -u runner -- test ! -x /usr/bin/sudo
-systemctl start "$1"
+systemctl enable --now "$1"
 systemctl is-active --quiet "$1"
 main_pid=$(systemctl show "$1" --property MainPID --value)
 [[ $main_pid =~ ^[1-9][0-9]*$ && $(stat -c %U "/proc/$main_pid") == runner ]]
+primary_gid=$(id -g runner)
+[[ $(awk '/^Groups:/ { $1=""; sub(/^ /, ""); print }' "/proc/$main_pid/status") == "$primary_gid" ]]
+committed=true
 """,
         encoding="utf-8",
     )
