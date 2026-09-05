@@ -71,6 +71,7 @@ jobs:
           profile-digest: __OVERWORLD_PROFILE_SHA256__
           image-marker: overworld-ci-jit-v1
           base-sha: ${{ steps.validate.outputs.base_sha }}
+          tested-merge-sha: ${{ steps.validate.outputs.tested_merge_sha }}
 
 # A backend is selected before dispatch. There is intentionally no fallback,
 # GitHub-hosted validation dependency or second dispatch.

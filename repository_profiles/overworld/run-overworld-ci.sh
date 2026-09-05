@@ -26,6 +26,7 @@ readonly MINIO_DATA="$STATE_ROOT/minio"
 readonly MINIO_PORT=59002
 readonly BACKEND_PORT=3000
 readonly FRONTEND_PORT=3001
+readonly TESTED_MERGE_SHA="${PROFILE_TESTED_MERGE_SHA:?PROFILE_TESTED_MERGE_SHA is required}"
 
 ACTIVE_PHASE=
 ACTIVE_SAMPLER_PID=
@@ -91,18 +92,10 @@ finish_phase_measurement() {
   oom_kill_after=$(read_memory_event oom_kill)
   oom_delta=$((oom_after - ACTIVE_OOM))
   oom_kill_delta=$((oom_kill_after - ACTIVE_OOM_KILL))
-  phase_peak=$(python3 - "$phase" "$MEMORY_LOG" <<'PY'
-import json, sys
-phase, path = sys.argv[1:]
-print(max((row["memory_peak_bytes"] for row in map(json.loads, open(path)) if row["phase"] == phase), default=0))
-PY
-)
-  phase_swap_peak=$(python3 - "$phase" "$MEMORY_LOG" <<'PY'
-import json, sys
-phase, path = sys.argv[1:]
-print(max((row["memory_swap_peak_bytes"] for row in map(json.loads, open(path)) if row["phase"] == phase), default=0))
-PY
-)
+  # Enforce the limit from root-owned cgroup counters. JSONL is diagnostic
+  # only: untrusted workload code may share the runner UID and mutate it.
+  phase_peak=$(read_cgroup_value memory.peak)
+  phase_swap_peak=$(read_cgroup_value memory.swap.peak)
   printf '{"phase":"%s","memory_peak_bytes":%s,"memory_swap_peak_bytes":%s,"oom_delta":%s,"oom_kill_delta":%s,"fit_limit_bytes":%s}\n' \
     "$phase" "$phase_peak" "$phase_swap_peak" "$oom_delta" "$oom_kill_delta" "$MEMORY_FIT_LIMIT_BYTES" | tee -a "$MEMORY_SUMMARY"
   ACTIVE_PHASE=
@@ -114,7 +107,7 @@ PY
 }
 
 require_image_contract() {
-  local chromium_candidates
+  local chromium_candidates headless_candidates
   [[ $(cat /sys/fs/cgroup/memory.max) == "$EXPECTED_MEMORY_BYTES" ]]
   [[ $(bun --version) == 1.4.0 ]]
   [[ $(uv --version) == "uv 0.8.22" ]]
@@ -125,6 +118,8 @@ require_image_contract() {
   [[ $(<"$WATERFALL_ROOT/.self-hosted-ci-commit") == "$WATERFALL_REVISION" ]]
   chromium_candidates=(/opt/ms-playwright/chromium-1217*/chrome-linux*/chrome)
   [[ ${#chromium_candidates[@]} == 1 && -x ${chromium_candidates[0]} ]]
+  headless_candidates=(/opt/ms-playwright/chromium_headless_shell-1217*/chrome-headless-shell-linux*/chrome-headless-shell)
+  [[ ${#headless_candidates[@]} == 1 && -x ${headless_candidates[0]} ]]
   command -v minio mc bun uv curl unlink cp sha256sum stat >/dev/null
   [[ -x $PG16_BIN/initdb && -x $PG16_BIN/pg_ctl && -x $PG16_BIN/createdb ]]
   [[ -x $PG17_BIN/initdb && -x $PG17_BIN/pg_ctl && -x $PG17_BIN/createdb ]]
@@ -138,6 +133,24 @@ install_prebaked_node_modules() {
   permissions=$(stat -c %A "$prebaked")
   [[ ${permissions:5:1} != w && ${permissions:8:1} != w ]]
   cp -a "$prebaked" "$target"
+  (cd "$component" && BUN_INSTALL_CACHE_DIR=/opt/self-hosted-ci/overworld-deps/bun-cache \
+    bun install --frozen-lockfile --offline)
+}
+
+prepare_workspace() {
+  local phase=$1
+  [[ "$TESTED_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]
+  /usr/bin/git -c core.hooksPath=/dev/null reset --hard "$TESTED_MERGE_SHA" >/dev/null
+  /usr/bin/git -c core.hooksPath=/dev/null clean -ffdx >/dev/null
+  [[ $(/usr/bin/git rev-parse HEAD) == "$TESTED_MERGE_SHA" ]]
+  case "$phase" in
+    backend) install_prebaked_node_modules backend "$BACKEND_LOCK_SHA256" "$BACKEND_MODULES" ;;
+    frontend|e2e)
+      install_prebaked_node_modules backend "$BACKEND_LOCK_SHA256" "$BACKEND_MODULES"
+      install_prebaked_node_modules frontend "$FRONTEND_LOCK_SHA256" "$FRONTEND_MODULES"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 stop_postgres() {
@@ -310,10 +323,16 @@ phase_e2e() {
 }
 
 require_image_contract
-install_prebaked_node_modules backend "$BACKEND_LOCK_SHA256" "$BACKEND_MODULES"
-install_prebaked_node_modules frontend "$FRONTEND_LOCK_SHA256" "$FRONTEND_MODULES"
 for phase in backend frontend e2e; do
+  prepare_workspace "$phase"
   start_phase_measurement "$phase"
   "phase_$phase"
   finish_phase_measurement "$phase"
 done
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+  {
+    printf '## Overworld local CI memory\n\n```json\n'
+    cat "$MEMORY_SUMMARY"
+    printf '```\n'
+  } >> "$GITHUB_STEP_SUMMARY"
+fi

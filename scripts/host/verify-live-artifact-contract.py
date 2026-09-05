@@ -52,6 +52,7 @@ REQUIRED_LIVE_TARGETS = {
     "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/squid-build.conf",
     "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/provision.py",
     "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/verify.py",
+    "/usr/local/share/self-hosted-ci/repository-profiles/overworld/profile.json",
     "/usr/local/lib/self-hosted-ci/configure-garm-jit.sh",
     "/usr/local/lib/self-hosted-ci/activate-garm-jit.sh",
     "/usr/local/lib/self-hosted-ci/deactivate-garm-jit.sh",

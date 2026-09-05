@@ -21,6 +21,7 @@ def main() -> int:
     if set(marker) != {
         "repository_profile_image_marker_version", "repository", "profile_id",
         "profile_digest", "image_marker", "runner_memory_bytes", "toolchain",
+        "dependency_snapshots",
     }:
         raise SystemExit("image marker shape drifted")
     expected_toolchain = {
@@ -29,6 +30,18 @@ def main() -> int:
         "postgresql_e2e": "17", "postgis_e2e": "3.5", "python": "3.12", "uv": "0.8.22",
         "waterfall_revision": "6df90210830b2ebe36eda6b96d91237914d000e4",
     }
+    expected_snapshots = {
+        "backend": {
+            "lock_path": "backend/bun.lock",
+            "lock_sha256": "b235110fe83b4b3a4eafb337efc0bb8d7424aea33a72f0338b2192892ce79fdb",
+            "node_modules_path": "/opt/self-hosted-ci/overworld-deps/backend-node_modules",
+        },
+        "frontend": {
+            "lock_path": "frontend/bun.lock",
+            "lock_sha256": "6004b42bc89358fc0d83f81f8015658246139ce830e1e569279700850e5d63b3",
+            "node_modules_path": "/opt/self-hosted-ci/overworld-deps/frontend-node_modules",
+        },
+    }
     if (
         marker["repository_profile_image_marker_version"] != 1
         or marker["profile_id"] != "overworld-ci-v1"
@@ -36,6 +49,7 @@ def main() -> int:
         or marker["image_marker"] != "overworld-ci-jit-v1"
         or marker["runner_memory_bytes"] != 4294967296
         or marker["toolchain"] != expected_toolchain
+        or marker["dependency_snapshots"] != expected_snapshots
         or not re.fullmatch(r"[0-9a-f]{64}", marker["profile_digest"])
     ):
         raise SystemExit("image marker identity drifted")
@@ -63,6 +77,7 @@ def main() -> int:
         dependencies / "waterfall/.venv/bin/python",
         dependencies / "waterfall/.venv/bin/pyright",
         Path("/opt/self-hosted-ci/browsers/chromium/chrome"),
+        Path("/opt/ms-playwright/chromium_headless_shell-1217/chrome-headless-shell-linux64/chrome-headless-shell"),
     ):
         if not required.exists():
             raise SystemExit(f"offline dependency is absent: {required}")

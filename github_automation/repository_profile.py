@@ -227,6 +227,9 @@ def run_from_environment(environment: Mapping[str, str] | None = None) -> int:
             raise RepositoryProfileError("workflow image marker differs from profile")
         verify_image_marker(MARKER_PATH, profile=profile, profile_digest=digest)
         verify_source_workflow(profile, base_sha=env.get("PROFILE_BASE_SHA", ""), workspace=workspace)
+        tested_merge_sha = env.get("PROFILE_TESTED_MERGE_SHA", "")
+        if not FULL_SHA.fullmatch(tested_merge_sha):
+            raise RepositoryProfileError("tested merge SHA is invalid")
         result = subprocess.run([str(script)], cwd=workspace, check=False)
         if result.returncode:
             raise RepositoryProfileError(f"repository profile failed with exit code {result.returncode}")

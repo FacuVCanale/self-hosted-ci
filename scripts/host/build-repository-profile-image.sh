@@ -2,13 +2,13 @@
 set -Eeuo pipefail
 
 readonly PROJECT=ci-jit
-readonly SQUID_CONFIG=/etc/self-hosted-ci/network/squid.conf
 readonly FENCED_SERVICES=(self-hosted-ci-garm.service self-hosted-ci-allocation-broker.service self-hosted-ci-outbound-worker.service)
+readonly BUILD_PROXY_UNIT=self-hosted-ci-profile-build-proxy.service
 readonly TRANSACTION_LIB=/usr/local/lib/self-hosted-ci/garm-jit-transaction-lib.sh
 
 die(){ printf 'repository-profile image build blocked: %s\n' "$*" >&2; exit 1; }
 usage(){
-  printf 'usage: %s [--plan] | --apply --profile-directory DIR --repository-profile FILE --expected-profile-digest SHA256 --base-fingerprint SHA256 --expected-manifest-sha256 SHA256 --candidate-alias ALIAS --overworld-bundle FILE --overworld-bundle-sha256 SHA256 --expected-overworld-commit SHA --waterfall-bundle FILE --waterfall-bundle-sha256 SHA256 --expected-waterfall-commit SHA --https-proxy http://10.254.0.1:3128 --acknowledge-temporary-build-egress --acknowledge-new-image-publication\n' "$0" >&2
+  printf 'usage: %s [--plan] | --apply --profile-directory DIR --repository-profile FILE --expected-profile-digest SHA256 --base-fingerprint SHA256 --expected-manifest-sha256 SHA256 --candidate-alias ALIAS --overworld-bundle FILE --overworld-bundle-sha256 SHA256 --expected-overworld-commit SHA --waterfall-bundle FILE --waterfall-bundle-sha256 SHA256 --expected-waterfall-commit SHA --https-proxy http://10.254.0.1:8079 --acknowledge-temporary-build-egress --acknowledge-new-image-publication\n' "$0" >&2
   exit 2
 }
 
@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${mode}" == plan ]]; then
-  printf '%s\n' '{"mode":"plan","project":"ci-jit","network":"ci-jit-isolated","builder_privileged":false,"builder_nesting":false,"credentials":"forbidden","alias_reuse":false,"garm_and_worker_fenced":true,"runtime_must_be_empty":true,"build_egress":"temporary exact-domain allowlist","postcondition":"restore signed GitHub-only Squid config and prior service state","host_changes":false,"external_calls":"not_performed"}'
+  printf '%s\n' '{"mode":"plan","project":"ci-jit","network":"ci-jit-isolated","builder_privileged":false,"builder_nesting":false,"credentials":"forbidden","alias_reuse":false,"garm_and_worker_fenced":true,"runtime_must_be_empty":true,"build_egress":"isolated exact-domain proxy on fenced broker port 8079","production_proxy_policy_mutated":false,"postcondition":"stop isolated build proxy and restore prior service state","host_changes":false,"external_calls":"not_performed"}'
   exit 0
 fi
 
@@ -52,7 +52,7 @@ for digest in "${base_fingerprint}" "${manifest_sha}" "${profile_digest}" "${ove
 done
 [[ "${overworld_commit}" =~ ^[0-9a-f]{40}$ && "${waterfall_commit}" =~ ^[0-9a-f]{40}$ ]]||die 'bundle commits must be exact lowercase Git SHAs'
 [[ "${candidate_alias}" =~ ^overworld-pr-v1-[0-9a-f]{12,64}$ ]]||die 'candidate alias must be content-addressed and profile-scoped'
-[[ "${https_proxy}" == http://10.254.0.1:3128 ]]||die 'build proxy must be exact runner-network-v2 endpoint'
+[[ "${https_proxy}" == http://10.254.0.1:8079 ]]||die 'build proxy must be the isolated build-only endpoint on the fenced broker port'
 [[ -d "${profile_dir}" && ! -L "${profile_dir}" ]]||die 'profile directory is absent or unsafe'
 [[ -f "${repository_profile}" && ! -L "${repository_profile}" ]]||die 'repository profile is absent or unsafe'
 [[ "$(sha256sum "${repository_profile}"|cut -d' ' -f1)" == "${profile_digest}" ]]||die 'repository profile digest drifted'
@@ -66,7 +66,6 @@ for file in manifest.json provision.py verify.py squid-build.conf; do
 done
 [[ "$(sha256sum "${profile_dir}/manifest.json"|cut -d' ' -f1)" == "${manifest_sha}" ]]||die 'manifest digest drifted'
 [[ -f "${TRANSACTION_LIB}" && ! -L "${TRANSACTION_LIB}" ]]||die 'GARM transaction library is absent'
-[[ -f "${SQUID_CONFIG}" && ! -L "${SQUID_CONFIG}" ]]||die 'signed Squid policy is absent'
 command -v incus >/dev/null; command -v squid >/dev/null; command -v python3 >/dev/null; command -v git >/dev/null
 
 # Reuse the production transaction lock and its exact zero-scale-set checks.
@@ -76,9 +75,8 @@ zero_runtime_state||die 'GARM scale sets and ci-jit instances must both be empty
 
 workdir="$(mktemp -d /run/self-hosted-ci/profile-image.XXXXXX)"
 chmod 0700 "${workdir}"
-cp --preserve=all -- "${SQUID_CONFIG}" "${workdir}/squid.conf.before"
 builder="overworld-image-builder-${RANDOM}${RANDOM}"
-published_fingerprint=''; alias_published=false; transaction_succeeded=false; squid_replaced=false
+published_fingerprint=''; alias_published=false; transaction_succeeded=false
 declare -A was_active
 for service in "${FENCED_SERVICES[@]}"; do
   if systemctl is-active --quiet "${service}"; then was_active["${service}"]=true; else was_active["${service}"]=false; fi
@@ -108,12 +106,8 @@ PY
       then incus image delete "${published_fingerprint}" --project "${PROJECT}" >/dev/null 2>&1; fi
     fi
   fi
-  if [[ "${squid_replaced}" == true ]]; then
-    cp --preserve=all -- "${workdir}/squid.conf.before" "${SQUID_CONFIG}"
-    squid -k parse -f "${SQUID_CONFIG}" >/dev/null 2>&1
-    systemctl restart "${PROXY_SERVICE}" >/dev/null 2>&1
-    cmp -s -- "${workdir}/squid.conf.before" "${SQUID_CONFIG}"||status=1
-  fi
+  systemctl stop "${BUILD_PROXY_UNIT}" >/dev/null 2>&1
+  systemctl reset-failed "${BUILD_PROXY_UNIT}" >/dev/null 2>&1
   for service in "${FENCED_SERVICES[@]}"; do
     if [[ "${was_active[${service}]}" == true ]]; then systemctl start "${service}" >/dev/null 2>&1||status=1; fi
   done
@@ -126,9 +120,12 @@ systemctl stop self-hosted-ci-outbound-worker.service self-hosted-ci-allocation-
 incus_project_empty||die 'ci-jit instance inventory changed while fencing build services'
 systemctl is-active --quiet "${PROXY_SERVICE}"||die 'egress proxy must already be active'
 squid -k parse -f "${profile_dir}/squid-build.conf" >/dev/null 2>&1||die 'build-only Squid policy is invalid'
-squid_replaced=true
-cp --preserve=mode,ownership,timestamps -- "${profile_dir}/squid-build.conf" "${SQUID_CONFIG}"
-systemctl restart "${PROXY_SERVICE}"
+systemctl is-active --quiet "${BUILD_PROXY_UNIT}" && die 'stale build-only proxy unit is active'
+systemd-run --quiet --unit="${BUILD_PROXY_UNIT%.service}" \
+  --property=Type=simple --property=RuntimeMaxSec=2h \
+  --property="Conflicts=${FENCED_SERVICES[*]}" \
+  /usr/sbin/squid -N -f "${profile_dir}/squid-build.conf"
+systemctl is-active --quiet "${BUILD_PROXY_UNIT}"||die 'isolated build-only proxy failed to start'
 
 python3 - "${candidate_alias}" "$(incus image alias list --project "${PROJECT}" --format json)" <<'PY' || die 'candidate alias already exists'
 import json,sys

@@ -178,6 +178,8 @@ install -d -o root -g root -m 0755 "/usr/local/share/self-hosted-ci/images/overw
 for profile_config in manifest.json squid-build.conf; do
   install -o root -g root -m 0644 "${repo_root}/images/overworld-pr-v1/${profile_config}" "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/${profile_config}"
 done
+install -d -o root -g root -m 0755 "/usr/local/share/self-hosted-ci/repository-profiles/overworld"
+install -o root -g root -m 0644 "${repo_root}/repository_profiles/overworld/profile.json" "/usr/local/share/self-hosted-ci/repository-profiles/overworld/profile.json"
 for profile_script in provision.py verify.py; do
   install -o root -g root -m 0755 "${repo_root}/images/overworld-pr-v1/${profile_script}" "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/${profile_script}"
 done

@@ -108,6 +108,13 @@ PUBLIC_ARTIFACTS = (
         "incus",
     ),
     (
+        "repository_profiles/overworld/profile.json",
+        "/usr/local/share/self-hosted-ci/repository-profiles/overworld/profile.json",
+        "0644",
+        "public-config",
+        "incus",
+    ),
+    (
         "scripts/host/configure-garm-jit.sh",
         "/usr/local/lib/self-hosted-ci/configure-garm-jit.sh",
         "0755",

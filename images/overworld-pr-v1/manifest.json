@@ -37,6 +37,18 @@
       "url": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.59.1.tgz",
       "sha256": "22304c3d9106ed8372ff58656f645a93bc3a2b17df8567f1413079a730d8d6fa"
     },
+    "chromium": {
+      "version": "147.0.7727.15",
+      "revision": "1217",
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/147.0.7727.15/linux64/chrome-linux64.zip",
+      "sha256": "04883e331b31448d6255fa058f0e1c7e8657c004da1f8a1c04eb28855a37ec6c"
+    },
+    "chromium_headless_shell": {
+      "version": "147.0.7727.15",
+      "revision": "1217",
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/147.0.7727.15/linux64/chrome-headless-shell-linux64.zip",
+      "sha256": "cf779cd5486f3fc5a18bea4ac606026a1667ae16efaee15af51bd3ad3ae01092"
+    },
     "minio": {
       "version": "RELEASE.2025-07-23T15-54-02Z",
       "url": "https://dl.min.io/server/minio/release/linux-amd64/archive/minio.RELEASE.2025-07-23T15-54-02Z",

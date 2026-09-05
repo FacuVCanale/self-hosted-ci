@@ -22,12 +22,14 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertEqual("overworld-pr-v1", manifest["profile"])
         self.assertEqual("alethia-earth/Overworld", manifest["repository"])
         self.assertEqual(
-            {"bun", "uv", "pyright", "playwright", "playwright_core", "minio", "mc"},
+            {"bun", "uv", "pyright", "playwright", "playwright_core", "chromium", "chromium_headless_shell", "minio", "mc"},
             set(manifest["artifacts"]),
         )
         self.assertEqual("1.4.0", manifest["artifacts"]["bun"]["version"])
         self.assertEqual("1.1.408", manifest["artifacts"]["pyright"]["version"])
         self.assertEqual("1.59.1", manifest["artifacts"]["playwright"]["version"])
+        self.assertEqual("1217", manifest["artifacts"]["chromium"]["revision"])
+        self.assertEqual("1217", manifest["artifacts"]["chromium_headless_shell"]["revision"])
         for artifact in manifest["artifacts"].values():
             self.assertTrue(artifact["url"].startswith("https://"))
             self.assertRegex(artifact["sha256"], r"^[0-9a-f]{64}$")
@@ -68,8 +70,8 @@ class OverworldProfileImageTests(unittest.TestCase):
             "self-hosted-ci-outbound-worker.service",
             "self-hosted-ci-allocation-broker.service",
             "self-hosted-ci-garm.service",
-            'cp --preserve=all -- "${SQUID_CONFIG}" "${workdir}/squid.conf.before"',
-            'cmp -s -- "${workdir}/squid.conf.before" "${SQUID_CONFIG}"',
+            'squid -N -f "${profile_dir}/squid-build.conf"',
+            'systemctl stop "${BUILD_PROXY_UNIT}"',
             'security.privileged=false security.nesting=false security.idmap.isolated=true',
             'set(d)!={"eth0","root"}',
             'd["eth0"].get("network")!="ci-jit-isolated"',
@@ -91,6 +93,10 @@ class OverworldProfileImageTests(unittest.TestCase):
             self.assertIn(token, source)
         for forbidden in ("--reuse", "--copy-aliases", "security.privileged=true", "security.nesting=true", "/var/run/docker.sock"):
             self.assertNotIn(forbidden, source)
+        self.assertNotIn("SQUID_CONFIG", source)
+        self.assertIn("10.254.0.1:8079", source)
+        self.assertIn("RuntimeMaxSec=2h", source)
+        self.assertIn("Conflicts=${FENCED_SERVICES[*]}", source)
 
     def test_build_egress_is_exact_and_not_a_general_wildcard(self) -> None:
         policy = (PROFILE / "squid-build.conf").read_text(encoding="utf-8")
@@ -98,6 +104,7 @@ class OverworldProfileImageTests(unittest.TestCase):
             "archive.ubuntu.com",
             "security.ubuntu.com",
             "apt-archive.postgresql.org",
+            "storage.googleapis.com",
             "www.postgresql.org",
             "github.com",
             "release-assets.githubusercontent.com",
@@ -105,8 +112,6 @@ class OverworldProfileImageTests(unittest.TestCase):
             "pypi.org",
             "files.pythonhosted.org",
             "dl.min.io",
-            "cdn.playwright.dev",
-            "playwright.download.prss.microsoft.com",
         ):
             self.assertIn(domain, policy)
         self.assertNotIn("dstdomain .githubusercontent.com", policy)
@@ -121,10 +126,12 @@ class OverworldProfileImageTests(unittest.TestCase):
             '"profile_digest": profile_digest',
             '"runner_memory_bytes": profile["runner_memory_bytes"]',
             '"toolchain": profile["toolchain"]',
+            '"dependency_snapshots": profile["dependency_snapshots"]',
             "dpkg-query",
             "PLAYWRIGHT_BROWSERS_PATH",
             '"bun", "install", "--frozen-lockfile"',
             '"uv", "sync", "--frozen"',
+            'downloaded["chromium"], Path("/opt/ms-playwright/chromium-1217")',
             'str(pyright_wrapper), str(pyright_target)',
             'sha256_file(lockfile)',
             'run("pg_dropcluster", "--stop", major, "main")',
@@ -139,6 +146,7 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn("repository-profile-image-v1.json", manifest)
         self.assertNotIn("WATERFALL_CI_TOKEN", source)
         self.assertNotIn("GITHUB_TOKEN", source)
+        self.assertNotIn('run("playwright", "install"', source)
 
     def test_verifier_enforces_exact_profile_marker_and_offline_dependencies(self) -> None:
         source = (PROFILE / "verify.py").read_text(encoding="utf-8")
@@ -150,12 +158,14 @@ class OverworldProfileImageTests(unittest.TestCase):
             "image_marker",
             "runner_memory_bytes",
             "toolchain",
+            "dependency_snapshots",
         ):
             self.assertIn(f'"{field}"', source)
         for token in (
             "backend-node_modules",
             "frontend-node_modules",
             "waterfall/.self-hosted-ci-commit",
+            "chromium_headless_shell-1217",
             "source-control metadata persisted",
             '("16", "3.4")',
             '("17", "3.5")',
@@ -186,6 +196,7 @@ class OverworldProfileImageTests(unittest.TestCase):
             "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/squid-build.conf",
             "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/provision.py",
             "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/verify.py",
+            "/usr/local/share/self-hosted-ci/repository-profiles/overworld/profile.json",
         ):
             self.assertIn(target, stager)
             self.assertIn(target, verifier)

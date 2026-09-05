@@ -125,7 +125,8 @@ def require_manifest(value: object) -> dict[str, object]:
         raise SystemExit("PGDG repository identity drifted")
     artifacts = value["artifacts"]
     if not isinstance(artifacts, dict) or set(artifacts) != {
-        "bun", "uv", "pyright", "playwright", "playwright_core", "minio", "mc"
+        "bun", "uv", "pyright", "playwright", "playwright_core", "chromium",
+        "chromium_headless_shell", "minio", "mc"
     }:
         raise SystemExit("profile artifact set drifted")
     for name, artifact in artifacts.items():
@@ -147,6 +148,30 @@ def extract_npm(archive: Path, destination: Path) -> None:
             member.name = member.name.removeprefix("package/")
             if member.name:
                 source.extract(member, destination, filter="data")
+
+
+def extract_chromium(archive_path: Path, destination: Path, prefix: str, executable_name: str) -> Path:
+    destination.mkdir(parents=True, exist_ok=False)
+    with zipfile.ZipFile(archive_path) as archive:
+        entries = archive.infolist()
+        for entry in entries:
+            path = Path(entry.filename)
+            mode = entry.external_attr >> 16
+            if (
+                path.is_absolute()
+                or ".." in path.parts
+                or not entry.filename.startswith(f"{prefix}/")
+                or (mode & 0o170000) == 0o120000
+            ):
+                raise SystemExit("Chromium archive contains an unsafe member")
+        archive.extractall(destination)
+    chrome = destination / prefix / executable_name
+    if not chrome.is_file():
+        raise SystemExit("Chromium archive lacks the exact browser executable")
+    for executable in (chrome, destination / prefix / "chrome_sandbox"):
+        if executable.exists():
+            executable.chmod(executable.stat().st_mode | 0o111)
+    return chrome
 
 
 def main() -> int:
@@ -248,15 +273,19 @@ def main() -> int:
         for name in ("minio", "mc"):
             shutil.copy2(downloaded[name], f"/usr/local/bin/{name}")
             os.chmod(f"/usr/local/bin/{name}", 0o755)
-
-    Path("/opt/ms-playwright").mkdir(mode=0o755)
-    run("playwright", "install", "chromium", env={**os.environ, "PLAYWRIGHT_BROWSERS_PATH": "/opt/ms-playwright"})
-    chromium_candidates = list(Path("/opt/ms-playwright/chromium-1217").glob("*/chrome"))
-    if len(chromium_candidates) != 1:
-        raise SystemExit("Playwright Chromium executable inventory drifted")
-    browser_contract = Path("/opt/self-hosted-ci/browsers")
-    browser_contract.mkdir(parents=True, exist_ok=False)
-    (browser_contract / "chromium").symlink_to(chromium_candidates[0].parent)
+        Path("/opt/ms-playwright").mkdir(mode=0o755)
+        chromium = extract_chromium(
+            downloaded["chromium"], Path("/opt/ms-playwright/chromium-1217"),
+            "chrome-linux64", "chrome",
+        )
+        extract_chromium(
+            downloaded["chromium_headless_shell"],
+            Path("/opt/ms-playwright/chromium_headless_shell-1217"),
+            "chrome-headless-shell-linux64", "chrome-headless-shell",
+        )
+        browser_contract = Path("/opt/self-hosted-ci/browsers")
+        browser_contract.mkdir(parents=True, exist_ok=False)
+        (browser_contract / "chromium").symlink_to(chromium.parent)
     run("apt-get", "clean")
     shutil.rmtree("/var/lib/apt/lists", ignore_errors=True)
 
@@ -356,6 +385,7 @@ def main() -> int:
         "image_marker": profile["image_marker"],
         "runner_memory_bytes": profile["runner_memory_bytes"],
         "toolchain": profile["toolchain"],
+        "dependency_snapshots": profile["dependency_snapshots"],
     }
     marker_path = Path(str(manifest["marker_path"]))
     marker_path.parent.mkdir(parents=True, exist_ok=True)

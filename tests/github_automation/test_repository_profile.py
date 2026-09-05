@@ -245,7 +245,8 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertNotIn("$@", text)
         self.assertNotIn("${{", text)
         self.assertNotIn("find backend", text)
-        self.assertNotIn("bun install", text)
+        self.assertEqual(1, text.count("bun install --frozen-lockfile --offline"))
+        self.assertIn("BUN_INSTALL_CACHE_DIR=/opt/self-hosted-ci/overworld-deps/bun-cache", text)
         self.assertIn("install_prebaked_node_modules backend", text)
         self.assertIn("install_prebaked_node_modules frontend", text)
         self.assertIn("sha256sum \"$component/bun.lock\"", text)
@@ -281,6 +282,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertLess(checkout, scrub)
         self.assertLess(scrub, action)
         self.assertIn("base-sha: ${{ steps.validate.outputs.base_sha }}", text)
+        self.assertIn("tested-merge-sha: ${{ steps.validate.outputs.tested_merge_sha }}", text)
         self.assertNotIn("${{ inputs.repository", text)
         self.assertNotIn("${{ inputs.profile", text)
 
