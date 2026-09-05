@@ -112,7 +112,6 @@ cp "$RUN_HOME"/bin/runsvc.sh "$RUN_HOME"/ || fail "failed to copy runsvc.sh"
 # Chown is not needed for the cached runner
 # sudo chown {{ .RunnerUsername }}:{{ .RunnerGroup }} -R /home/{{ .RunnerUsername }} || fail "failed to change owner"
 sudo systemctl daemon-reload || fail "failed to reload systemd"
-sudo systemctl enable $SVC_NAME
 {{- else}}
 
 GITHUB_TOKEN=$(curl --retry 5 --retry-delay 5 --retry-connrefused --fail -s -X GET -H 'Accept: application/json' -H "Authorization: Bearer ${BEARER_TOKEN}" "${METADATA_URL}/runner-registration-token/")
@@ -165,10 +164,11 @@ if [ -f "$RUN_HOME/env.sh" ];then
 	source env.sh
 	popd
 fi
-sudo systemctl start $SVC_NAME || fail "failed to start service"
+sudo /usr/local/sbin/self-hosted-ci-finalize-runner "$SVC_NAME" "{{ .RunnerUsername }}" || fail "failed to finalize runner privilege and start service"
 {{- else}}
 sendStatus "starting service"
-sudo ./svc.sh start || fail "failed to start service"
+SVC_NAME=$(cat "$RUN_HOME"/.service)
+sudo /usr/local/sbin/self-hosted-ci-finalize-runner "$SVC_NAME" "{{ .RunnerUsername }}" || fail "failed to finalize runner privilege and start service"
 
 set +e
 AGENT_ID=$(grep "agentId" "$RUN_HOME"/.runner |  tr -d -c 0-9)

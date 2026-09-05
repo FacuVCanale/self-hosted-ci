@@ -63,8 +63,15 @@ jobs:
           test "$(git rev-list --parents -n 1 refs/ci-jit-pilot/merge | wc -w | tr -d ' ')" = 3
           git checkout --detach "$EXPECTED_MERGE_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_MERGE_SHA"
-      - name: Run pilot quality command
-        run: python3 -m compileall -q .
+      - name: Run reviewed Overworld CI profile
+        uses: FacuVCanale/self-hosted-ci/actions/run-repository-profile@0000000000000000000000000000000000000000
+        with:
+          repository: alethia-earth/Overworld
+          profile-id: overworld-ci-v1
+          profile-digest: __OVERWORLD_PROFILE_SHA256__
+          image-marker: overworld-ci-jit-v1
+          base-sha: ${{ steps.validate.outputs.base_sha }}
+          tested-merge-sha: ${{ steps.validate.outputs.tested_merge_sha }}
 
 # A backend is selected before dispatch. There is intentionally no fallback,
 # GitHub-hosted validation dependency or second dispatch.

@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "profile": "overworld-pr-v1",
+  "repository": "alethia-earth/Overworld",
+  "architecture": "x86_64",
+  "ubuntu_version": "24.04",
+  "pgdg": {
+    "key_url": "https://www.postgresql.org/media/keys/ACCC4CF8.asc",
+    "key_fingerprint": "B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8",
+    "repository": "https://apt-archive.postgresql.org/pub/repos/apt",
+    "suite": "noble-pgdg-archive"
+  },
+  "artifacts": {
+    "bun": {
+      "version": "1.4.0",
+      "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64.zip",
+      "sha256": "2d03fb5fb83ac8b567aca0a281b2ce1a1a19d488f56c2968d88c3f25e92fe452"
+    },
+    "uv": {
+      "version": "0.8.22",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.8.22/uv-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "741ff1f5742c5a4a25d2f829e8395355e43f7a5ae2ebc6368e9ae2df0efb69cf"
+    },
+    "pyright": {
+      "version": "1.1.408",
+      "url": "https://registry.npmjs.org/pyright/-/pyright-1.1.408.tgz",
+      "sha256": "16f73d4281d00ddbd549d5dbe574d0f2cf0aec34f276f91bd6ae63fe1001473e"
+    },
+    "playwright": {
+      "version": "1.59.1",
+      "chromium_revision": "1217",
+      "url": "https://registry.npmjs.org/playwright/-/playwright-1.59.1.tgz",
+      "sha256": "7a688a725929f2325b345997845b1ca50ace7798e76ae49b61516f83e08388ef"
+    },
+    "playwright_core": {
+      "version": "1.59.1",
+      "url": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.59.1.tgz",
+      "sha256": "22304c3d9106ed8372ff58656f645a93bc3a2b17df8567f1413079a730d8d6fa"
+    },
+    "chromium": {
+      "version": "147.0.7727.15",
+      "revision": "1217",
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/147.0.7727.15/linux64/chrome-linux64.zip",
+      "sha256": "04883e331b31448d6255fa058f0e1c7e8657c004da1f8a1c04eb28855a37ec6c"
+    },
+    "chromium_headless_shell": {
+      "version": "147.0.7727.15",
+      "revision": "1217",
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/147.0.7727.15/linux64/chrome-headless-shell-linux64.zip",
+      "sha256": "cf779cd5486f3fc5a18bea4ac606026a1667ae16efaee15af51bd3ad3ae01092"
+    },
+    "minio": {
+      "version": "RELEASE.2025-07-23T15-54-02Z",
+      "url": "https://dl.min.io/server/minio/release/linux-amd64/archive/minio.RELEASE.2025-07-23T15-54-02Z",
+      "sha256": "eef6581f6509f43ece007a6f2eb4c5e3ce41498c8956e919a7ac7b4b170fa431"
+    },
+    "mc": {
+      "version": "RELEASE.2025-07-21T05-28-08Z",
+      "url": "https://dl.min.io/client/mc/release/linux-amd64/archive/mc.RELEASE.2025-07-21T05-28-08Z",
+      "sha256": "ea4a453be116071ab1ccbd24eb8755bf0579649f41a7b94ab9e68571bb9f4a1e"
+    }
+  },
+  "apt_packages": [
+    "build-essential",
+    "ca-certificates",
+    "curl",
+    "git",
+    "jq",
+    "libnss3",
+    "libnspr4",
+    "fonts-freefont-ttf",
+    "fonts-ipafont-gothic",
+    "fonts-liberation",
+    "fonts-noto-color-emoji",
+    "fonts-tlwg-loma-otf",
+    "fonts-unifont",
+    "fonts-wqy-zenhei",
+    "libatk1.0-0t64",
+    "libatk-bridge2.0-0t64",
+    "libatspi2.0-0t64",
+    "libcups2t64",
+    "libdrm2",
+    "libdbus-1-3",
+    "libfontconfig1",
+    "libfreetype6",
+    "libxkbcommon0",
+    "libxcomposite1",
+    "libxdamage1",
+    "libxfixes3",
+    "libxrandr2",
+    "libgbm1",
+    "libasound2t64",
+    "libglib2.0-0t64",
+    "libpango-1.0-0",
+    "libcairo2",
+    "libwayland-client0",
+    "libx11-6",
+    "libxcb1",
+    "libxext6",
+    "postgresql-16=16.15-1.pgdg24.04+2",
+    "postgresql-client-16=16.15-1.pgdg24.04+2",
+    "postgresql-16-postgis-3=3.4.3+dfsg-2.pgdg24.04+1",
+    "postgresql-16-postgis-3-scripts=3.4.3+dfsg-2.pgdg24.04+1",
+    "postgresql-17=17.11-1.pgdg24.04+2",
+    "postgresql-client-17=17.11-1.pgdg24.04+2",
+    "postgresql-17-postgis-3=3.5.3+dfsg-2.pgdg24.04+1",
+    "postgresql-17-postgis-3-scripts=3.5.3+dfsg-2.pgdg24.04+1",
+    "procps",
+    "python3",
+    "python3-venv",
+    "rsync",
+    "time",
+    "unzip",
+    "xfonts-cyrillic",
+    "xfonts-scalable",
+    "xvfb"
+  ],
+  "marker_path": "/etc/self-hosted-ci/repository-profile-image-v1.json",
+  "inventory_path": "/usr/share/doc/self-hosted-ci/overworld-pr-v1-sbom.json"
+}

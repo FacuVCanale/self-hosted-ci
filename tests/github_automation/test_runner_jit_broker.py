@@ -350,12 +350,13 @@ class AllocationBrokerTests(unittest.TestCase):
             "{{ .MetadataURL }}",
             "{{ .CallbackURL }}",
             "{{- if .UseJITConfig }}",
-            "systemctl start $SVC_NAME",
+            "self-hosted-ci-finalize-runner",
             "verifying pre-baked runner dependencies",
         ):
             self.assertIn(required, template)
         for forbidden in ("installdependencies.sh", "apt-get", " apt "):
             self.assertNotIn(forbidden, template)
+        self.assertNotIn("systemctl enable $SVC_NAME", template)
 
     def test_garm_cli_commands_always_recreate_the_ephemeral_session(self):
         hook = Path(self.tempdir.name) / "hook.py"

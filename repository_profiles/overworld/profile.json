@@ -1,0 +1,37 @@
+{
+  "repository_command_profile_version": 1,
+  "profile_id": "overworld-ci-v1",
+  "repository": "alethia-earth/Overworld",
+  "image_marker": "overworld-ci-jit-v1",
+  "runner_memory_bytes": 4294967296,
+  "source_workflow_path": ".github/workflows/ci.yml",
+  "source_workflow_sha256": "b829e0b180bd1ae1ecd9809f33e218ac1df6ff9d37935e2ba5ddd98e7d33baa5",
+  "dependency_snapshots": {
+    "backend": {
+      "lock_path": "backend/bun.lock",
+      "lock_sha256": "b235110fe83b4b3a4eafb337efc0bb8d7424aea33a72f0338b2192892ce79fdb",
+      "node_modules_path": "/opt/self-hosted-ci/overworld-deps/backend-node_modules"
+    },
+    "frontend": {
+      "lock_path": "frontend/bun.lock",
+      "lock_sha256": "6004b42bc89358fc0d83f81f8015658246139ce830e1e569279700850e5d63b3",
+      "node_modules_path": "/opt/self-hosted-ci/overworld-deps/frontend-node_modules"
+    }
+  },
+  "runner_script": "repository_profiles/overworld/run-overworld-ci.sh",
+  "runner_script_sha256": "f286a813f5f85b35e9ed513d95ba8b320dec9d0a55cd12f13d9541f9d7cb2714",
+  "phases": ["backend", "frontend", "e2e"],
+  "toolchain": {
+    "bun": "1.4.0",
+    "garm": "0.2.1",
+    "minio": "RELEASE.2025-07-23T15-54-02Z",
+    "playwright": "1.59.1",
+    "postgresql_backend": "16",
+    "postgis_backend": "3.4",
+    "postgresql_e2e": "17",
+    "postgis_e2e": "3.5",
+    "python": "3.12",
+    "uv": "0.8.22",
+    "waterfall_revision": "6df90210830b2ebe36eda6b96d91237914d000e4"
+  }
+}

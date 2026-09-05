@@ -423,12 +423,24 @@ class AgentOperator:
             f"{DEFAULT_PUBLIC_REPOSITORY}/", f"{self.host.public_repository}/"
         ).replace("@" + "0" * 40, "@" + self.host.public_sha)
         if organization:
+            profile = (
+                Path(__file__).resolve().parents[1]
+                / "repository_profiles/overworld/profile.json"
+            )
+            if not profile.is_file():
+                raise AgentOperatorError(
+                    "distribution_incomplete", "Overworld command profile is absent"
+                )
             rendered = rendered.replace(
                 "__SELF_HOSTED_CI_EXACT_RUNNER_GROUP__", authority["runner_group"]
+            ).replace(
+                "__OVERWORLD_PROFILE_SHA256__",
+                hashlib.sha256(profile.read_bytes()).hexdigest(),
             )
         if (
             "0" * 40 in rendered
             or "__SELF_HOSTED_CI_EXACT_RUNNER_GROUP__" in rendered
+            or "__OVERWORLD_PROFILE_SHA256__" in rendered
             or f"{DEFAULT_PUBLIC_REPOSITORY}/" in rendered
             and self.host.public_repository != DEFAULT_PUBLIC_REPOSITORY
         ):

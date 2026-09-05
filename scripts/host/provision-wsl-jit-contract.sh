@@ -171,8 +171,17 @@ for collector_script in collect-wsl-jit-semantic-observations.py collect-wsl-jit
 done
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-allocation-broker.service" "/etc/systemd/system/self-hosted-ci-allocation-broker.service"
 install -o root -g root -m 0644 "${repo_root}/packaging/systemd/self-hosted-ci-outbound-worker.service" "/etc/systemd/system/self-hosted-ci-outbound-worker.service"
-for transaction_script in prepare-incus-runner-image.sh configure-garm-jit.sh activate-garm-jit.sh deactivate-garm-jit.sh garm-jit-transaction-lib.sh; do
+for transaction_script in prepare-incus-runner-image.sh build-repository-profile-image.sh configure-garm-jit.sh activate-garm-jit.sh deactivate-garm-jit.sh garm-jit-transaction-lib.sh; do
   install -o root -g root -m 0755 "${repo_root}/scripts/host/${transaction_script}" "/usr/local/lib/self-hosted-ci/${transaction_script}"
+done
+install -d -o root -g root -m 0755 "/usr/local/share/self-hosted-ci/images/overworld-pr-v1"
+for profile_config in manifest.json squid-build.conf; do
+  install -o root -g root -m 0644 "${repo_root}/images/overworld-pr-v1/${profile_config}" "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/${profile_config}"
+done
+install -d -o root -g root -m 0755 "/usr/local/share/self-hosted-ci/repository-profiles/overworld"
+install -o root -g root -m 0644 "${repo_root}/repository_profiles/overworld/profile.json" "/usr/local/share/self-hosted-ci/repository-profiles/overworld/profile.json"
+for profile_script in provision.py verify.py; do
+  install -o root -g root -m 0755 "${repo_root}/images/overworld-pr-v1/${profile_script}" "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/${profile_script}"
 done
 if [[ "${contract_mode}" == "runner-final" ]]; then
   "/usr/local/lib/self-hosted-ci/install-wsl-jit-evidence.py" \
