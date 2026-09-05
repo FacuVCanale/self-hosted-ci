@@ -16,45 +16,38 @@ permissions:
   actions: read
 
 jobs:
-  validate-package:
-    name: validate non-gating pilot package
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      backend: ${{ steps.validate.outputs.backend }}
-      repository: ${{ steps.validate.outputs.repository }}
-      pr_number: ${{ steps.validate.outputs.pr_number }}
-      base_sha: ${{ steps.validate.outputs.base_sha }}
-      head_sha: ${{ steps.validate.outputs.head_sha }}
-      tested_merge_sha: ${{ steps.validate.outputs.tested_merge_sha }}
-      runner_label: ${{ steps.validate.outputs.runner_label }}
+  # The local pilot is deliberately one job: one ephemeral allocation may run
+  # at most one job. The dispatcher is the sole writer of pilot_package, and
+  # the first step revalidates every repository, PR, merge and runner field
+  # before checkout or project code can execute.
+  local-quality:
+    name: local-quality
+    if: fromJSON(inputs.pilot_package).backend == 'local'
+    runs-on:
+      group: __SELF_HOSTED_CI_EXACT_RUNNER_GROUP__
+      labels: ${{ fromJSON(inputs.pilot_package).runner_label }}
+    timeout-minutes: 40
+    env:
+      CI_GATE_TRUSTED_TESTED_SHA: ${{ steps.validate.outputs.tested_merge_sha }}
     steps:
-      - name: Revalidate exact repository PR head base and workflow
+      - name: Revalidate exact repository PR head base workflow and runner
         id: validate
         uses: FacuVCanale/self-hosted-ci/actions/jit-pilot-validate@0000000000000000000000000000000000000000
         with:
           pilot-package: ${{ inputs.pilot_package }}
-
-  hosted-quality:
-    name: hosted-quality
-    needs: validate-package
-    if: needs.validate-package.outputs.backend == 'github'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
       - name: Check out exact base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ needs.validate-package.outputs.base_sha }}
+          ref: ${{ steps.validate.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Fetch and verify exact GitHub merge ref
         shell: bash
         env:
-          BASE_SHA: ${{ needs.validate-package.outputs.base_sha }}
-          HEAD_SHA: ${{ needs.validate-package.outputs.head_sha }}
-          EXPECTED_MERGE_SHA: ${{ needs.validate-package.outputs.tested_merge_sha }}
-          PR_NUMBER: ${{ needs.validate-package.outputs.pr_number }}
+          BASE_SHA: ${{ steps.validate.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.validate.outputs.head_sha }}
+          EXPECTED_MERGE_SHA: ${{ steps.validate.outputs.tested_merge_sha }}
+          PR_NUMBER: ${{ steps.validate.outputs.pr_number }}
         run: |
           set -euo pipefail
           export GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
@@ -73,45 +66,5 @@ jobs:
       - name: Run pilot quality command
         run: python3 -m compileall -q .
 
-  local-quality:
-    name: local-quality
-    needs: validate-package
-    if: needs.validate-package.outputs.backend == 'local'
-    runs-on: ${{ needs.validate-package.outputs.runner_label }}
-    timeout-minutes: 40
-    env:
-      CI_GATE_TRUSTED_TESTED_SHA: ${{ needs.validate-package.outputs.tested_merge_sha }}
-    steps:
-      - name: Check out exact base
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ needs.validate-package.outputs.base_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Fetch and verify exact GitHub merge ref
-        shell: bash
-        env:
-          BASE_SHA: ${{ needs.validate-package.outputs.base_sha }}
-          HEAD_SHA: ${{ needs.validate-package.outputs.head_sha }}
-          EXPECTED_MERGE_SHA: ${{ needs.validate-package.outputs.tested_merge_sha }}
-          PR_NUMBER: ${{ needs.validate-package.outputs.pr_number }}
-        run: |
-          set -euo pipefail
-          export GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
-          git config --local core.hooksPath /dev/null
-          git config --local core.attributesFile /dev/null
-          git config --local protocol.file.allow never
-          git config --local commit.gpgsign false
-          git fetch --no-tags origin "refs/pull/${PR_NUMBER}/head:refs/ci-jit-pilot/head" "refs/pull/${PR_NUMBER}/merge:refs/ci-jit-pilot/merge"
-          test "$(git rev-parse refs/ci-jit-pilot/head)" = "$HEAD_SHA"
-          test "$(git rev-parse refs/ci-jit-pilot/merge)" = "$EXPECTED_MERGE_SHA"
-          test "$(git rev-parse refs/ci-jit-pilot/merge^1)" = "$BASE_SHA"
-          test "$(git rev-parse refs/ci-jit-pilot/merge^2)" = "$HEAD_SHA"
-          test "$(git rev-list --parents -n 1 refs/ci-jit-pilot/merge | wc -w | tr -d ' ')" = 3
-          git checkout --detach "$EXPECTED_MERGE_SHA"
-          test "$(git rev-parse HEAD)" = "$EXPECTED_MERGE_SHA"
-      - name: Run pilot quality command
-        run: python3 -m compileall -q .
-
-# A backend is selected before dispatch. There is intentionally no fallback or
-# second dispatch after this workflow starts.
+# A backend is selected before dispatch. There is intentionally no fallback,
+# GitHub-hosted validation dependency or second dispatch.

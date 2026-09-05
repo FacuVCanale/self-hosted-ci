@@ -32,7 +32,7 @@ def main() -> int:
     expected_action_counts = {
         "actions/ci-control": 6,
         "actions/jit-canary-validate": 1,
-        "actions/jit-pilot-validate": 1,
+        "actions/jit-pilot-validate": 2,
     }
     observed_action_counts = {
         action: sum(1 for observed, _ in references if observed == action)

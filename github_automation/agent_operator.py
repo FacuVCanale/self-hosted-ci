@@ -26,6 +26,7 @@ REPOSITORY = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
 )
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+RUNNER_GROUP = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 DISTRO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SSH_TARGET = re.compile(r"^[A-Za-z0-9._@:-]+$")
 MANAGED_WORKFLOW = ".github/workflows/ci-jit-pilot-child.yml"
@@ -309,6 +310,8 @@ class AgentOperator:
                 "default_branch",
                 "workflow_path",
                 "mode",
+                "authority_kind",
+                "runner_group",
             )
         }
         try:
@@ -327,6 +330,21 @@ class AgentOperator:
             or not re.fullmatch(r"[A-Za-z0-9._/-]{1,255}", safe["default_branch"])
             or safe["workflow_path"] != MANAGED_WORKFLOW
             or safe["mode"] not in {"ci-jit-pilot", "ci-gate-full"}
+            or safe["authority_kind"] not in {
+                "personal-repository",
+                "organization-runner-group",
+            }
+            or (
+                safe["authority_kind"] == "personal-repository"
+                and safe["runner_group"] is not None
+            )
+            or (
+                safe["authority_kind"] == "organization-runner-group"
+                and (
+                    not isinstance(safe["runner_group"], str)
+                    or RUNNER_GROUP.fullmatch(safe["runner_group"]) is None
+                )
+            )
         ):
             raise AgentOperatorError("authority_unavailable", "host authority is not selected-repository exact")
         safe["repository"] = repository
@@ -391,14 +409,29 @@ class AgentOperator:
             "content_sha256": hashlib.sha256(content).hexdigest(),
         }
 
-    def _render_workflow(self) -> bytes:
-        template = Path(__file__).resolve().parents[1] / "templates/workflows/ci-jit-pilot-child.yml"
+    def _render_workflow(self, authority: Mapping[str, Any]) -> bytes:
+        organization = authority["authority_kind"] == "organization-runner-group"
+        template_name = (
+            "ci-jit-pilot-child.yml"
+            if organization
+            else "ci-jit-pilot-child-personal.yml"
+        )
+        template = Path(__file__).resolve().parents[1] / "templates/workflows" / template_name
         if not template.is_file():
             raise AgentOperatorError("distribution_incomplete", "managed workflow template is absent")
         rendered = template.read_text(encoding="utf-8").replace(
             f"{DEFAULT_PUBLIC_REPOSITORY}/", f"{self.host.public_repository}/"
         ).replace("@" + "0" * 40, "@" + self.host.public_sha)
-        if "0" * 40 in rendered or f"{DEFAULT_PUBLIC_REPOSITORY}/" in rendered and self.host.public_repository != DEFAULT_PUBLIC_REPOSITORY:
+        if organization:
+            rendered = rendered.replace(
+                "__SELF_HOSTED_CI_EXACT_RUNNER_GROUP__", authority["runner_group"]
+            )
+        if (
+            "0" * 40 in rendered
+            or "__SELF_HOSTED_CI_EXACT_RUNNER_GROUP__" in rendered
+            or f"{DEFAULT_PUBLIC_REPOSITORY}/" in rendered
+            and self.host.public_repository != DEFAULT_PUBLIC_REPOSITORY
+        ):
             raise AgentOperatorError("distribution_incomplete", "workflow rendering left a placeholder")
         return rendered.encode()
 
@@ -524,7 +557,7 @@ class AgentOperator:
         if not health["eligible"]:
             blockers.append("windows_host_ineligible")
         workflow = self._workflow(repository)
-        rendered = self._render_workflow()
+        rendered = self._render_workflow(authority)
         expected_digest = hashlib.sha256(rendered).hexdigest()
         with self.store.locked():
             registry = self.store.load()
