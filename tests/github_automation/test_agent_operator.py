@@ -101,6 +101,7 @@ class AgentOperatorTests(unittest.TestCase):
         )
         self.assertNotIn("__SELF_HOSTED_CI_EXACT_RUNNER_GROUP__", rendered)
         self.assertNotIn("runs-on: ubuntu-24.04", rendered)
+        self.assertNotIn("CI_GATE_TRUSTED_TESTED_SHA", rendered)
 
     def test_personal_authority_keeps_hosted_prevalidation_template(self):
         rendered = AgentOperator._render_workflow(
