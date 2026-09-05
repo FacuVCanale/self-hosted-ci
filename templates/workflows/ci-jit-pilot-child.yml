@@ -27,8 +27,6 @@ jobs:
       group: __SELF_HOSTED_CI_EXACT_RUNNER_GROUP__
       labels: ${{ fromJSON(inputs.pilot_package).runner_label }}
     timeout-minutes: 40
-    env:
-      CI_GATE_TRUSTED_TESTED_SHA: ${{ steps.validate.outputs.tested_merge_sha }}
     steps:
       - name: Revalidate exact repository PR head base workflow and runner
         id: validate
