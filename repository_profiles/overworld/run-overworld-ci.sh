@@ -109,8 +109,9 @@ finish_phase_measurement() {
 }
 
 require_image_contract() {
-  local chromium_candidates headless_candidates
+  local chromium_candidates headless_candidates privilege_helper=/usr/bin/su""do
   (( EUID >= 1000 ))
+  [[ $(stat -c %U:%G:%a "$privilege_helper") == root:root:750 && ! -x "$privilege_helper" ]]
   [[ ! -w /sys/fs/cgroup/memory.peak && ! -w /sys/fs/cgroup/memory.events ]]
   [[ $(cat /sys/fs/cgroup/memory.max) == "$EXPECTED_MEMORY_BYTES" ]]
   [[ $(bun --version) == 1.4.0 ]]

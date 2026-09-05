@@ -165,10 +165,11 @@ if [ -f "$RUN_HOME/env.sh" ];then
 	source env.sh
 	popd
 fi
-sudo systemctl start $SVC_NAME || fail "failed to start service"
+sudo /usr/local/sbin/self-hosted-ci-finalize-runner "$SVC_NAME" "{{ .RunnerUsername }}" || fail "failed to finalize runner privilege and start service"
 {{- else}}
 sendStatus "starting service"
-sudo ./svc.sh start || fail "failed to start service"
+SVC_NAME=$(cat "$RUN_HOME"/.service)
+sudo /usr/local/sbin/self-hosted-ci-finalize-runner "$SVC_NAME" "{{ .RunnerUsername }}" || fail "failed to finalize runner privilege and start service"
 
 set +e
 AGENT_ID=$(grep "agentId" "$RUN_HOME"/.runner |  tr -d -c 0-9)

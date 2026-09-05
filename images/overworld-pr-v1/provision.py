@@ -190,6 +190,34 @@ def main() -> int:
     os_release = Path("/etc/os-release").read_text(encoding="utf-8")
     if 'ID=ubuntu' not in os_release or 'VERSION_ID="24.04"' not in os_release:
         raise SystemExit("Ubuntu 24.04 is required")
+    if subprocess.run(["id", "runner"], check=False, stdout=subprocess.DEVNULL).returncode != 0:
+        run("useradd", "--create-home", "--shell", "/bin/bash", "--user-group", "runner")
+    run("passwd", "--lock", "runner")
+    for group in ("sudo", "admin", "wheel", "docker", "lxd"):
+        if subprocess.run(["getent", "group", group], check=False, stdout=subprocess.DEVNULL).returncode == 0:
+            subprocess.run(["gpasswd", "--delete", "runner", group], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    finalizer = Path("/usr/local/sbin/self-hosted-ci-finalize-runner")
+    finalizer.write_text(
+        """#!/bin/bash
+set -euo pipefail
+[[ $EUID -eq 0 && $# -eq 2 && $2 == runner ]]
+[[ $1 =~ ^actions\\.runner\\.[A-Za-z0-9_.-]+\\.service$ ]]
+unit=/etc/systemd/system/$1
+[[ -f $unit && ! -L $unit && $(stat -c %U:%G:%a $unit) == root:root:644 ]]
+grep -Fxq 'User=runner' "$unit"
+for group in sudo admin wheel docker lxd; do
+  getent group "$group" >/dev/null 2>&1 && gpasswd --delete runner "$group" >/dev/null 2>&1 || true
+done
+chown root:root /usr/bin/sudo
+chmod 0750 /usr/bin/sudo
+systemctl start "$1"
+systemctl is-active --quiet "$1"
+main_pid=$(systemctl show "$1" --property MainPID --value)
+[[ $main_pid =~ ^[1-9][0-9]*$ && $(stat -c %U "/proc/$main_pid") == runner ]]
+""",
+        encoding="utf-8",
+    )
+    finalizer.chmod(0o700)
     env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
     sources = Path("/etc/apt/sources.list.d/ubuntu.sources")
     if sources.exists():

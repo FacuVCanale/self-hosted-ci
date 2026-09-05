@@ -350,7 +350,7 @@ class AllocationBrokerTests(unittest.TestCase):
             "{{ .MetadataURL }}",
             "{{ .CallbackURL }}",
             "{{- if .UseJITConfig }}",
-            "systemctl start $SVC_NAME",
+            "self-hosted-ci-finalize-runner",
             "verifying pre-baked runner dependencies",
         ):
             self.assertIn(required, template)

@@ -175,6 +175,7 @@ class OverworldProfileImageTests(unittest.TestCase):
             '("17", "3.5")',
             "default cluster persisted",
             "runner privilege boundary drifted",
+            "runner finalizer ownership or mode drifted",
         ):
             self.assertIn(token, source)
 

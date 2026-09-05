@@ -27,6 +27,9 @@ def main() -> int:
     )
     if sudoers.returncode == 0:
         raise SystemExit("runner has explicit sudoers authorization")
+    finalizer = Path("/usr/local/sbin/self-hosted-ci-finalize-runner")
+    if not finalizer.is_file() or finalizer.stat().st_uid != 0 or (finalizer.stat().st_mode & 0o777) != 0o700:
+        raise SystemExit("runner finalizer ownership or mode drifted")
     marker = json.loads(MARKER.read_text(encoding="utf-8"))
     if set(marker) != {
         "repository_profile_image_marker_version", "repository", "profile_id",
