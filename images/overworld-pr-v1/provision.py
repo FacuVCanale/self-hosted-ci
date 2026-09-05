@@ -207,12 +207,23 @@ set -euo pipefail
 unit=/etc/systemd/system/$1
 committed=false
 rollback() {
-  if [[ $committed != true ]]; then
-    systemctl stop "$1" >/dev/null 2>&1 || true
-    systemctl disable "$1" >/dev/null 2>&1 || true
+  original_rc=$?
+  trap - EXIT
+  [[ $committed == true ]] && exit "$original_rc"
+  set +e
+  systemctl stop "$1" >/dev/null 2>&1
+  systemctl disable "$1" >/dev/null 2>&1
+  systemctl is-active --quiet "$1"
+  active_rc=$?
+  systemctl is-enabled --quiet "$1"
+  enabled_rc=$?
+  if [[ $active_rc -eq 0 || $enabled_rc -eq 0 ]]; then
+    echo 'runner rollback postcondition could not be proven' >&2
+    exit 125
   fi
+  exit "$original_rc"
 }
-trap 'rollback "$1"' EXIT
+trap rollback EXIT
 [[ -f $unit && ! -L $unit && $(stat -c %U:%G:%a $unit) == root:root:644 ]]
 grep -Fxq 'User=runner' "$unit"
 ! grep -Eq '^ExecStart=[+!]' "$unit"

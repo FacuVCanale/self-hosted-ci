@@ -153,6 +153,13 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertNotIn('run("playwright", "install"', source)
         self.assertIn('[[ $(id -nG runner) == runner ]]', source)
         self.assertIn('runuser -u runner -- test ! -x /usr/bin/sudo', source)
+        for rollback_contract in (
+            "trap - EXIT",
+            "systemctl is-active --quiet",
+            "systemctl is-enabled --quiet",
+            "exit 125",
+        ):
+            self.assertIn(rollback_contract, source)
 
     def test_verifier_enforces_exact_profile_marker_and_offline_dependencies(self) -> None:
         source = (PROFILE / "verify.py").read_text(encoding="utf-8")
