@@ -568,6 +568,9 @@ class HostHealthScriptTests(unittest.TestCase):
             "WSL heartbeat timestamp is ahead of the Windows clock",
             'if ([string]$reason -ne "heartbeat_not_fresh")',
             'if ($heartbeat.status -ne "fresh")',
+            '"--exec", "/bin/sleep", "infinity"',
+            "dedicated distro keepalive exited before the supervisor started",
+            "finally { Stop-WslKeepalive $keepalive }",
         ):
             self.assertIn(token, source)
         self.assertIn(

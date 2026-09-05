@@ -42,6 +42,32 @@ function Test-LocalTcpEndpoint([int]$Port) {
     }
 }
 
+function Start-WslKeepalive {
+    $arguments = @(
+        "--distribution", $ExpectedDistroName,
+        "--user", "root",
+        "--exec", "/bin/sleep", "infinity"
+    )
+    $process = Start-Process -FilePath "wsl.exe" -ArgumentList $arguments `
+        -WindowStyle Hidden -PassThru
+    Start-Sleep -Seconds 2
+    if ($process.HasExited) {
+        throw "dedicated distro keepalive exited before the supervisor started"
+    }
+    return $process
+}
+
+function Stop-WslKeepalive([Diagnostics.Process]$Process) {
+    if ($null -eq $Process) { return }
+    try {
+        if (-not $Process.HasExited) {
+            Stop-Process -Id $Process.Id -Force -ErrorAction Stop
+            $Process.WaitForExit(5000)
+        }
+    }
+    finally { $Process.Dispose() }
+}
+
 function Get-ServiceState([string]$Name, [scriptblock]$RunningProbe = $null) {
     try {
         $service = Get-Service -Name $Name -ErrorAction Stop
@@ -199,8 +225,13 @@ $expectedRoot = [IO.Path]::GetFullPath("C:\ProgramData\self-hosted-ci\health")
 $actualRoot = [IO.Path]::GetFullPath((Split-Path -Parent $SnapshotPath))
 if ($actualRoot -ne $expectedRoot) { throw "snapshot path must remain in the protected health directory" }
 
-do {
-    $snapshot = Get-Snapshot
-    Write-AtomicUtf8 $SnapshotPath ($snapshot | ConvertTo-Json -Depth 8 -Compress)
-    if (-not $Once) { Start-Sleep -Seconds $IntervalSeconds }
-} while (-not $Once)
+$keepalive = $null
+try {
+    if (-not $Once) { $keepalive = Start-WslKeepalive }
+    do {
+        $snapshot = Get-Snapshot
+        Write-AtomicUtf8 $SnapshotPath ($snapshot | ConvertTo-Json -Depth 8 -Compress)
+        if (-not $Once) { Start-Sleep -Seconds $IntervalSeconds }
+    } while (-not $Once)
+}
+finally { Stop-WslKeepalive $keepalive }

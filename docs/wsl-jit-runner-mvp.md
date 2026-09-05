@@ -126,6 +126,13 @@ credential. Uninstall deletes the task first and then rotates the account to a
 new unknown random password, invalidating that stored credential before it
 removes the exact health/control artifacts.
 
+While the supervisor is running it also owns one inert `wsl.exe` keepalive
+process (`/bin/sleep infinity`) for the dedicated distro. Microsoft documents
+that systemd services do not keep a WSL instance alive; without this Windows
+process the VM may hit `vmIdleTimeout` while a JIT job is starting and remove
+the authorization callback listener. The keepalive performs no repository or
+GitHub operation and is terminated in the supervisor's cleanup path.
+
 Inside WSL, `self-hosted-ci-health-heartbeat.timer` invokes a sandboxed oneshot
 every 30 seconds. The writer fsyncs a mode-0600 temporary file and atomically
 replaces `/var/lib/self-hosted-ci/health/heartbeat.json`. The Windows supervisor
