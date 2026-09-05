@@ -229,6 +229,9 @@ $keepalive = $null
 try {
     if (-not $Once) { $keepalive = Start-WslKeepalive }
     do {
+        if ($null -ne $keepalive -and $keepalive.HasExited) {
+            throw "dedicated distro keepalive exited while supervisor was running"
+        }
         $snapshot = Get-Snapshot
         Write-AtomicUtf8 $SnapshotPath ($snapshot | ConvertTo-Json -Depth 8 -Compress)
         if (-not $Once) { Start-Sleep -Seconds $IntervalSeconds }
