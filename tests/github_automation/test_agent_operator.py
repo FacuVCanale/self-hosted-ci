@@ -103,13 +103,21 @@ class AgentOperatorTests(unittest.TestCase):
         self.assertNotIn("runs-on: ubuntu-24.04", rendered)
         self.assertNotIn("CI_GATE_TRUSTED_TESTED_SHA", rendered)
         fetch = rendered.index('git fetch --no-tags origin')
-        clear = rendered.index(
-            'git config --local --unset-all http.https://github.com/.extraheader'
+        tolerant_clear = (
+            'git config --local --unset-all '
+            'http.https://github.com/.extraheader || true'
         )
+        absence_check = (
+            'test -z "$(git config --local --get-all '
+            'http.https://github.com/.extraheader || true)"'
+        )
+        clear = rendered.index(tolerant_clear)
+        verify_absent = rendered.index(absence_check)
         quality = rendered.index("Run pilot quality command")
         self.assertIn("persist-credentials: true", rendered)
         self.assertLess(fetch, clear)
-        self.assertLess(clear, quality)
+        self.assertLess(clear, verify_absent)
+        self.assertLess(verify_absent, quality)
 
     def test_personal_authority_keeps_hosted_prevalidation_template(self):
         rendered = AgentOperator._render_workflow(
