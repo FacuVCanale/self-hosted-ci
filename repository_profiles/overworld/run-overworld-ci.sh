@@ -145,6 +145,7 @@ prepare_workspace() {
   local phase=$1
   [[ "$TESTED_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]
   [[ -d .git && ! -L .git && -d .git/objects && ! -L .git/objects ]]
+  [[ ! -e .git/commondir && ! -e .git/config.worktree ]]
   [[ -z $(/usr/bin/git for-each-ref --format='%(refname)' refs/replace) ]]
   [[ ! -e .git/objects/info/alternates && ! -e .git/info/grafts ]]
   printf '[core]\n\trepositoryformatversion = 0\n\tbare = false\n\thooksPath = /dev/null\n\tfsmonitor = false\n' > .git/config
