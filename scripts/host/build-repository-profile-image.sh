@@ -73,7 +73,8 @@ source "${TRANSACTION_LIB}"
 acquire_transaction_lock
 zero_runtime_state||die 'GARM scale sets and ci-jit instances must both be empty'
 
-workdir="$(mktemp -d /run/self-hosted-ci/profile-image.XXXXXX)"
+install -d -o root -g root -m 0700 /var/lib/self-hosted-ci/profile-image-build
+workdir="$(mktemp -d /var/lib/self-hosted-ci/profile-image-build/transaction.XXXXXX)"
 chmod 0700 "${workdir}"
 builder="overworld-image-builder-${RANDOM}${RANDOM}"
 published_fingerprint=''; alias_published=false; transaction_succeeded=false
