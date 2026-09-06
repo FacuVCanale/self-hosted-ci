@@ -72,6 +72,7 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertNotIn('incus config show "${builder}"', source)
         self.assertIn('--env "https_proxy=${https_proxy}"', source)
         self.assertIn('--env "http_proxy=${https_proxy}"', source)
+        self.assertIn("cloud-init status --wait", source)
         required = (
             "acquire_transaction_lock",
             "zero_runtime_state",
@@ -159,6 +160,7 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertNotIn("WATERFALL_CI_TOKEN", source)
         self.assertNotIn("GITHUB_TOKEN", source)
         self.assertNotIn("output(", source)
+        self.assertIn("APT sources were not upgraded to HTTPS", source)
         self.assertNotIn('run("playwright", "install"', source)
         self.assertIn('[[ $(id -nG runner) == runner ]]', source)
         self.assertIn('runuser -u runner -- test ! -x /usr/bin/sudo', source)
