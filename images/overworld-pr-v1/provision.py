@@ -394,6 +394,8 @@ committed=true
         str(pyright_wrapper), str(pyright_target),
         env={**os.environ, "PYTHONPATH": f"{waterfall}:{waterfall / 'src'}"},
     )
+    shutil.rmtree(uv_cache)
+    uv_cache.mkdir(mode=0o755)
     for tree in (waterfall / ".git", overworld, ROOT / "overworld.bundle", ROOT / "waterfall.bundle"):
         if tree.is_dir():
             shutil.rmtree(tree)
