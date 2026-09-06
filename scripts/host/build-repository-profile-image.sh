@@ -152,10 +152,10 @@ PY
 
 incus init "${base_fingerprint}" "${builder}" --project "${PROJECT}" --profile ci-jit
 incus config set "${builder}" --project "${PROJECT}" security.privileged=false security.nesting=false security.idmap.isolated=true
-incus config show "${builder}" --project "${PROJECT}" --expanded --format json >"${workdir}/builder.json"
+incus query "/1.0/instances/${builder}?project=${PROJECT}&recursion=1" >"${workdir}/builder.json"
 python3 - "${workdir}/builder.json" <<'PY' || die 'builder confinement contract failed'
 import json,sys
-v=json.load(open(sys.argv[1])); c=v.get("config",{}); d=v.get("devices",{})
+v=json.load(open(sys.argv[1])); v=v.get("metadata",v); c=v.get("expanded_config",v.get("config",{})); d=v.get("expanded_devices",v.get("devices",{}))
 if c.get("security.privileged")!="false" or c.get("security.nesting")!="false" or c.get("security.idmap.isolated")!="true": raise SystemExit(1)
 if set(d)!={"eth0","root"} or d["eth0"].get("network")!="ci-jit-isolated" or d["root"].get("type")!="disk": raise SystemExit(1)
 if any(x.get("type") in {"proxy","unix-char","unix-block"} for x in d.values()): raise SystemExit(1)

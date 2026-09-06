@@ -68,6 +68,8 @@ class OverworldProfileImageTests(unittest.TestCase):
         source = BUILDER.read_text(encoding="utf-8")
         self.assertIn("/var/lib/self-hosted-ci/profile-image-build/transaction.", source)
         self.assertNotIn("mktemp -d /run/self-hosted-ci/profile-image", source)
+        self.assertIn('incus query "/1.0/instances/${builder}?project=${PROJECT}&recursion=1"', source)
+        self.assertNotIn('incus config show "${builder}"', source)
         required = (
             "acquire_transaction_lock",
             "zero_runtime_state",
