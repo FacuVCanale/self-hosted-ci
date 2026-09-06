@@ -164,6 +164,8 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn('downloads = tx / "downloads"', source)
         self.assertIn("target = downloads / name", source)
         self.assertNotIn("target = tx / name", source)
+        self.assertIn("shutil.rmtree(uv_cache)", source)
+        self.assertIn("uv_cache.mkdir(mode=0o755)", source)
         self.assertNotIn('run("playwright", "install"', source)
         self.assertIn('[[ $(id -nG runner) == runner ]]', source)
         self.assertIn('runuser -u runner -- test ! -x /usr/bin/sudo', source)
