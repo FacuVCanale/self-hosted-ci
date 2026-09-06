@@ -204,19 +204,21 @@ def main() -> int:
 set -euo pipefail
 [[ $EUID -eq 0 && $# -eq 2 && $2 == runner ]]
 [[ $1 =~ ^actions\\.runner\\.[A-Za-z0-9_.-]+\\.service$ ]]
-unit=/etc/systemd/system/$1
+service_name=$1
+runner_user=$2
+unit=/etc/systemd/system/$service_name
 committed=false
 rollback() {
   original_rc=$?
   trap - EXIT
   [[ $committed == true ]] && exit "$original_rc"
   set +e
-  systemctl stop "$1" >/dev/null 2>&1
-  systemctl disable "$1" >/dev/null 2>&1
-  systemctl reset-failed "$1" >/dev/null 2>&1
-  active_state=$(systemctl show "$1" --property ActiveState --value 2>/dev/null)
+  systemctl stop "$service_name" >/dev/null 2>&1
+  systemctl disable "$service_name" >/dev/null 2>&1
+  systemctl reset-failed "$service_name" >/dev/null 2>&1
+  active_state=$(systemctl show "$service_name" --property ActiveState --value 2>/dev/null)
   active_query_rc=$?
-  enabled_state=$(systemctl is-enabled "$1" 2>/dev/null)
+  enabled_state=$(systemctl is-enabled "$service_name" 2>/dev/null)
   enabled_rc=$?
   if [[ $active_query_rc -ne 0 || $active_state != inactive || $enabled_rc -ne 1 || $enabled_state != disabled ]]; then
     echo 'runner rollback postcondition could not be proven' >&2
@@ -225,14 +227,23 @@ rollback() {
   exit "$original_rc"
 }
 trap rollback EXIT
-[[ -f $unit && ! -L $unit && $(stat -c %U:%G:%a $unit) == root:root:644 ]]
+if [[ ! -f $unit || -L $unit ]]; then
+  exit 1
+fi
+unit_stat=$(stat -c %U:%G:%a "$unit")
+case "$unit_stat" in
+  root:root:644|root:root:664) ;;
+  *) exit 1 ;;
+esac
+chmod 0644 "$unit"
+[[ $(stat -c %U:%G:%a "$unit") == root:root:644 ]]
 grep -Fxq 'User=runner' "$unit"
 ! grep -Eq '^ExecStart=[+!]' "$unit"
 systemctl daemon-reload
-systemctl disable --now "$1" >/dev/null 2>&1 || true
-[[ $(systemctl show "$1" --property User --value) == runner ]]
-[[ -z $(systemctl show "$1" --property SupplementaryGroups --value) ]]
-[[ $(systemctl show "$1" --property DynamicUser --value) == no ]]
+systemctl disable --now "$service_name" >/dev/null 2>&1 || true
+[[ $(systemctl show "$service_name" --property User --value) == "$runner_user" ]]
+[[ -z $(systemctl show "$service_name" --property SupplementaryGroups --value) ]]
+[[ $(systemctl show "$service_name" --property DynamicUser --value) == no ]]
 for group in $(id -nG runner); do
   [[ $group == runner ]] || gpasswd --delete runner "$group" >/dev/null
 done
@@ -240,11 +251,11 @@ done
 chown root:root /usr/bin/sudo
 chmod 0750 /usr/bin/sudo
 runuser -u runner -- test ! -x /usr/bin/sudo
-systemctl enable --now "$1"
-systemctl is-active --quiet "$1"
-main_pid=$(systemctl show "$1" --property MainPID --value)
-[[ $main_pid =~ ^[1-9][0-9]*$ && $(stat -c %U "/proc/$main_pid") == runner ]]
-primary_gid=$(id -g runner)
+systemctl enable --now "$service_name"
+systemctl is-active --quiet "$service_name"
+main_pid=$(systemctl show "$service_name" --property MainPID --value)
+[[ $main_pid =~ ^[1-9][0-9]*$ && $(stat -c %U "/proc/$main_pid") == "$runner_user" ]]
+primary_gid=$(id -g "$runner_user")
 [[ $(awk '/^Groups:/ { $1=""; sub(/^ /, ""); print }' "/proc/$main_pid/status") == "$primary_gid" ]]
 committed=true
 """,
