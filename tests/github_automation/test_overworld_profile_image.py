@@ -169,6 +169,8 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertNotIn('run("playwright", "install"', source)
         self.assertIn('[[ $(id -nG runner) == runner ]]', source)
         self.assertIn('runuser -u runner -- test ! -x /usr/bin/sudo', source)
+        self.assertIn('root:root:644|root:root:664', source)
+        self.assertIn('chmod 0644 "$unit"', source)
         for rollback_contract in (
             "trap - EXIT",
             "--property ActiveState --value",
@@ -186,6 +188,7 @@ class OverworldProfileImageTests(unittest.TestCase):
             systemctl = Path(directory) / "systemctl"
             systemctl.write_text(
                 """#!/bin/bash
+[[ $2 == actions.runner.test.service ]] || exit 98
 case "$1" in
   stop|disable|reset-failed) exit 1 ;;
   show) [[ ${MOCK_STATE:-error} == error ]] && exit 4; echo "${MOCK_STATE}"; exit 0 ;;
@@ -197,13 +200,90 @@ exit 9
             )
             systemctl.chmod(0o755)
             env = {**os.environ, "PATH": f"{directory}:{os.environ['PATH']}"}
-            harness = f"set +e\n{rollback}\ncommitted=false\nfalse\nrollback actions.runner.test.service\n"
+            harness = (
+                f"set -uo pipefail\n{rollback}\ncommitted=false\n"
+                "service_name=actions.runner.test.service\n"
+                "(exit ${ORIGINAL_RC:-42}); rollback\n"
+            )
             for state, enabled in (("error", "error"), ("active", "disabled"), ("inactive", "enabled")):
                 result = subprocess.run(
                     ["bash", "-c", harness], env={**env, "MOCK_STATE": state, "MOCK_ENABLED": enabled},
                     text=True, capture_output=True,
                 )
                 self.assertEqual(125, result.returncode, (state, enabled, result.stderr))
+
+            result = subprocess.run(
+                ["bash", "-c", harness],
+                env={**env, "MOCK_STATE": "inactive", "MOCK_ENABLED": "disabled"},
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(42, result.returncode, result.stderr)
+
+    def test_runner_finalizer_validates_unit_mode_before_normalizing(self) -> None:
+        source = (PROFILE / "provision.py").read_text(encoding="utf-8")
+        start = source.index("if [[ ! -f $unit || -L $unit ]]")
+        end = source.index("\ngrep -Fxq", start)
+        mode_contract = source[start:end]
+        with tempfile.TemporaryDirectory() as directory:
+            unit = Path(directory) / "actions.runner.test.service"
+            unit.write_text("[Service]\nUser=runner\n", encoding="utf-8")
+            bin_dir = Path(directory) / "bin"
+            bin_dir.mkdir()
+            stat = bin_dir / "stat"
+            stat.write_text(
+                """#!/bin/bash
+if [[ -f $MOCK_CHMOD_MARKER ]]; then printf '%s\n' root:root:644; else printf '%s\n' "$MOCK_INITIAL_STAT"; fi
+""",
+                encoding="utf-8",
+            )
+            stat.chmod(0o755)
+            chmod = bin_dir / "chmod"
+            chmod.write_text(
+                """#!/bin/bash
+[[ $1 == 0644 && $2 == "$MOCK_UNIT" ]] || exit 97
+printf normalized > "$MOCK_CHMOD_MARKER"
+""",
+                encoding="utf-8",
+            )
+            chmod.chmod(0o755)
+            for initial, expected in (("root:root:664", 0), ("root:root:644", 0), ("root:root:666", 1), ("root:root:640", 1), ("other:root:664", 1)):
+                marker = Path(directory) / "normalized"
+                marker.unlink(missing_ok=True)
+                harness = f"set -euo pipefail\nunit={unit!s}\n{mode_contract}\n"
+                result = subprocess.run(
+                    ["bash", "-c", harness],
+                    env={
+                        **os.environ,
+                        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                        "MOCK_INITIAL_STAT": initial,
+                        "MOCK_CHMOD_MARKER": str(marker),
+                        "MOCK_UNIT": str(unit),
+                    },
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(expected, result.returncode, (initial, result.stderr))
+                self.assertEqual(expected == 0, marker.exists(), initial)
+
+            symlink = Path(directory) / "unit-link"
+            symlink.symlink_to(unit)
+            marker = Path(directory) / "normalized"
+            marker.unlink(missing_ok=True)
+            result = subprocess.run(
+                ["bash", "-c", f"set -euo pipefail\nunit={symlink!s}\n{mode_contract}\n"],
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "MOCK_INITIAL_STAT": "root:root:664",
+                    "MOCK_CHMOD_MARKER": str(marker),
+                    "MOCK_UNIT": str(symlink),
+                },
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse(marker.exists())
 
     def test_verifier_enforces_exact_profile_marker_and_offline_dependencies(self) -> None:
         source = (PROFILE / "verify.py").read_text(encoding="utf-8")
