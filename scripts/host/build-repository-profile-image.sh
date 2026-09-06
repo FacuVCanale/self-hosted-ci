@@ -172,7 +172,10 @@ import json,sys
 print(json.dumps(dict(zip(("overworld_commit","overworld_bundle_sha256","waterfall_commit","waterfall_bundle_sha256"),sys.argv[1:])),sort_keys=True,separators=(",",":")))
 PY
 incus file push "${workdir}/bundle-inputs.json" "${builder}/run/self-hosted-ci-profile-build/bundle-inputs.json" --project "${PROJECT}" --create-dirs --mode=0600
-incus exec "${builder}" --project "${PROJECT}" --env "HTTPS_PROXY=${https_proxy}" --env "HTTP_PROXY=${https_proxy}" --env "NO_PROXY=127.0.0.1,localhost" -- /usr/bin/python3 /run/self-hosted-ci-profile-build/provision.py
+incus exec "${builder}" --project "${PROJECT}" \
+  --env "HTTPS_PROXY=${https_proxy}" --env "HTTP_PROXY=${https_proxy}" --env "NO_PROXY=127.0.0.1,localhost" \
+  --env "https_proxy=${https_proxy}" --env "http_proxy=${https_proxy}" --env "no_proxy=127.0.0.1,localhost" \
+  -- /usr/bin/python3 /run/self-hosted-ci-profile-build/provision.py
 incus exec "${builder}" --project "${PROJECT}" -- /usr/bin/python3 /run/self-hosted-ci-profile-build/verify.py
 incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu 'rm -rf /run/self-hosted-ci-profile-build /root/.cache /root/.bun /tmp/* /var/tmp/*; test ! -e /root/.npmrc; test ! -e /root/.netrc; test ! -e /root/.config/gh/hosts.yml'
 incus stop "${builder}" --project "${PROJECT}" --timeout 60

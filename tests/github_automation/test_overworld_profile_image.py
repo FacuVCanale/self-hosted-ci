@@ -70,6 +70,8 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertNotIn("mktemp -d /run/self-hosted-ci/profile-image", source)
         self.assertIn('incus query "/1.0/instances/${builder}?project=${PROJECT}&recursion=1"', source)
         self.assertNotIn('incus config show "${builder}"', source)
+        self.assertIn('--env "https_proxy=${https_proxy}"', source)
+        self.assertIn('--env "http_proxy=${https_proxy}"', source)
         required = (
             "acquire_transaction_lock",
             "zero_runtime_state",
