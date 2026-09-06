@@ -66,6 +66,8 @@ class OverworldProfileImageTests(unittest.TestCase):
 
     def test_builder_is_transactional_fenced_and_never_moves_an_alias(self) -> None:
         source = BUILDER.read_text(encoding="utf-8")
+        self.assertIn("/var/lib/self-hosted-ci/profile-image-build/transaction.", source)
+        self.assertNotIn("mktemp -d /run/self-hosted-ci/profile-image", source)
         required = (
             "acquire_transaction_lock",
             "zero_runtime_state",
