@@ -258,6 +258,12 @@ committed=true
         text = text.replace("http://archive.ubuntu.com", "https://archive.ubuntu.com")
         text = text.replace("http://security.ubuntu.com", "https://security.ubuntu.com")
         sources.write_text(text, encoding="utf-8")
+        active_source_lines = [
+            line.strip() for line in text.splitlines()
+            if line.strip().startswith(("URIs:", "deb "))
+        ]
+        if not active_source_lines or any("http://" in line for line in active_source_lines):
+            raise SystemExit("APT sources were not upgraded to HTTPS")
     run("apt-get", "update", env=env)
     run("apt-get", "install", "-y", "--no-install-recommends", "gnupg", env=env)
     pgdg = manifest["pgdg"]

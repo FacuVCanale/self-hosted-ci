@@ -161,6 +161,7 @@ if set(d)!={"eth0","root"} or d["eth0"].get("network")!="ci-jit-isolated" or d["
 if any(x.get("type") in {"proxy","unix-char","unix-block"} for x in d.values()): raise SystemExit(1)
 PY
 incus start "${builder}" --project "${PROJECT}"
+incus exec "${builder}" --project "${PROJECT}" -- /usr/bin/timeout 180 /usr/bin/cloud-init status --wait >/dev/null
 for file in manifest.json provision.py verify.py; do
   incus file push "${profile_dir}/${file}" "${builder}/run/self-hosted-ci-profile-build/${file}" --project "${PROJECT}" --create-dirs --mode=0700
 done
