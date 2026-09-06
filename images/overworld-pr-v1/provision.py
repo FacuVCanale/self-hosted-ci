@@ -296,9 +296,11 @@ committed=true
     artifacts: dict[str, dict[str, str]] = manifest["artifacts"]  # type: ignore[assignment]
     with tempfile.TemporaryDirectory(prefix="overworld-image-") as temp:
         tx = Path(temp)
+        downloads = tx / "downloads"
+        downloads.mkdir(mode=0o700)
         downloaded: dict[str, Path] = {}
         for name, artifact in artifacts.items():
-            target = tx / name
+            target = downloads / name
             fetch(artifact["url"], artifact["sha256"], target)
             downloaded[name] = target
 
