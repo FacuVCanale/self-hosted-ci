@@ -156,6 +156,7 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn("repository-profile-image-v1.json", manifest)
         self.assertNotIn("WATERFALL_CI_TOKEN", source)
         self.assertNotIn("GITHUB_TOKEN", source)
+        self.assertNotIn("output(", source)
         self.assertNotIn('run("playwright", "install"', source)
         self.assertIn('[[ $(id -nG runner) == runner ]]', source)
         self.assertIn('runuser -u runner -- test ! -x /usr/bin/sudo', source)

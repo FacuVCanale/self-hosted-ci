@@ -193,10 +193,10 @@ def main() -> int:
     if subprocess.run(["id", "runner"], check=False, stdout=subprocess.DEVNULL).returncode != 0:
         run("useradd", "--create-home", "--shell", "/bin/bash", "--user-group", "runner")
     run("passwd", "--lock", "runner")
-    for group in output("id", "-nG", "runner").split():
+    for group in run("id", "-nG", "runner").split():
         if group != "runner":
             run("gpasswd", "--delete", "runner", group)
-    if output("id", "-nG", "runner") != "runner":
+    if run("id", "-nG", "runner") != "runner":
         raise SystemExit("runner supplementary groups could not be removed")
     finalizer = Path("/usr/local/sbin/self-hosted-ci-finalize-runner")
     finalizer.write_text(
