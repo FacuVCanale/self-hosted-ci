@@ -233,6 +233,7 @@ class RepositoryProfileTests(unittest.TestCase):
             "! -w /sys/fs/cgroup/memory.peak", "sampler_status=0",
             "sampler_status=$?", "(( sampler_status == 0 ))",
             "-r /sys/fs/cgroup/memory.current", "-r /sys/fs/cgroup/pids.current",
+            '$(cat /sys/fs/cgroup/memory.high) == "$MEMORY_FIT_LIMIT_BYTES"',
             "GIT_NO_REPLACE_OBJECTS=1",
         ):
             self.assertIn(evidence, text)
