@@ -492,6 +492,26 @@ committed=true
             shutil.rmtree(tree)
         elif tree.exists():
             tree.unlink()
+    # uv records a local editable differently once Git metadata is absent.
+    # Reconcile that final, publishable source shape while the build cache is
+    # still available, then prove below that the runner sees no further drift.
+    final_uv_environment = {
+        **uv_environment,
+        "HTTPS_PROXY": "http://127.0.0.1:9",
+        "HTTP_PROXY": "http://127.0.0.1:9",
+        "https_proxy": "http://127.0.0.1:9",
+        "http_proxy": "http://127.0.0.1:9",
+        "ALL_PROXY": "http://127.0.0.1:9",
+        "all_proxy": "http://127.0.0.1:9",
+        "NO_PROXY": "",
+        "no_proxy": "",
+    }
+    run("uv", "sync", "--frozen", "--offline", "--project", str(waterfall), env=final_uv_environment)
+    for path in dependencies.rglob("*"):
+        if path.is_dir():
+            path.chmod((path.stat().st_mode & ~0o022) | 0o055)
+        elif path.is_file():
+            path.chmod((path.stat().st_mode & ~0o022) | 0o044)
     uv_check_cache = Path("/var/tmp/waterfall-uv-check-cache")
     uv_check_cache.mkdir(mode=0o700)
     run("chown", "runner:runner", str(uv_check_cache))

@@ -252,7 +252,10 @@ class OverworldProfileImageTests(unittest.TestCase):
         initial_sync = source.index('run("uv", "sync", "--frozen", "--project"')
         offline_check = source.index('"uv", "sync", "--frozen", "--offline", "--check"')
         git_cleanup = source.index('for tree in (waterfall / ".git"')
+        final_reconcile = source.index('run("uv", "sync", "--frozen", "--offline", "--project"')
         self.assertLess(marker, initial_sync)
+        self.assertLess(git_cleanup, final_reconcile)
+        self.assertLess(final_reconcile, offline_check)
         self.assertLess(git_cleanup, offline_check)
         self.assertEqual(1, source.count('(waterfall / ".self-hosted-ci-commit").write_text'))
         for offline_smoke_contract in (
