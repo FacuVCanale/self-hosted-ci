@@ -410,6 +410,7 @@ committed=true
     run("git", "-C", str(waterfall), "checkout", "--detach", bundle_inputs["waterfall_commit"])
     if output_commit(waterfall) != bundle_inputs["waterfall_commit"]:
         raise SystemExit("Waterfall checkout drifted")
+    (waterfall / ".self-hosted-ci-commit").write_text(bundle_inputs["waterfall_commit"] + "\n", encoding="ascii")
     uv_cache = dependencies / "uv-cache"
     uv_python = dependencies / "uv-python"
     uv_python.mkdir(mode=0o755)
@@ -486,14 +487,27 @@ committed=true
         str(pyright_wrapper), str(pyright_target),
         env={**os.environ, "PYTHONPATH": f"{waterfall}:{waterfall / 'src'}"},
     )
-    shutil.rmtree(uv_cache)
-    uv_cache.mkdir(mode=0o755)
     for tree in (waterfall / ".git", overworld, ROOT / "overworld.bundle", ROOT / "waterfall.bundle"):
         if tree.is_dir():
             shutil.rmtree(tree)
         elif tree.exists():
             tree.unlink()
-    (waterfall / ".self-hosted-ci-commit").write_text(bundle_inputs["waterfall_commit"] + "\n", encoding="ascii")
+    uv_check_cache = Path("/var/tmp/waterfall-uv-check-cache")
+    uv_check_cache.mkdir(mode=0o700)
+    run("chown", "runner:runner", str(uv_check_cache))
+    run(
+        "runuser", "-u", "runner", "--", "env",
+        "HOME=/home/runner", f"UV_CACHE_DIR={uv_check_cache}",
+        f"UV_PYTHON_INSTALL_DIR={uv_python}",
+        "HTTPS_PROXY=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",
+        "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
+        "ALL_PROXY=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",
+        "NO_PROXY=", "no_proxy=",
+        "uv", "sync", "--frozen", "--offline", "--check", "--project", str(waterfall),
+    )
+    shutil.rmtree(uv_check_cache)
+    shutil.rmtree(uv_cache)
+    uv_cache.mkdir(mode=0o755)
     for forbidden_git in dependencies.rglob(".git"):
         raise SystemExit(f"source-control metadata persisted: {forbidden_git}")
     retained_source = [path for path in waterfall.rglob("*") if waterfall / ".venv" not in path.parents]
