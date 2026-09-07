@@ -157,7 +157,7 @@ def require_manifest(value: object) -> dict[str, object]:
         raise SystemExit("PGDG repository identity drifted")
     artifacts = value["artifacts"]
     if not isinstance(artifacts, dict) or set(artifacts) != {
-        "bun", "uv", "pyright", "playwright", "playwright_core", "chromium",
+        "bun", "uv", "pyright", "playwright", "playwright_core", "next", "chromium",
         "chromium_headless_shell", "minio", "mc"
     }:
         raise SystemExit("profile artifact set drifted")
