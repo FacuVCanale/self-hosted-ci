@@ -505,13 +505,12 @@ committed=true
         "NO_PROXY=", "no_proxy=",
         "uv", "--no-config", "pip", "check", "--python", str(waterfall_python),
     )
-    for cache_git in uv_cache.rglob(".git"):
-        if cache_git.is_dir():
-            shutil.rmtree(cache_git)
-        else:
-            cache_git.unlink()
+    uv_cache_sentinel = uv_cache / "sdists-v9/.git"
+    if not uv_cache_sentinel.is_file():
+        raise SystemExit("expected UV cache sentinel is absent or not a regular file")
     for forbidden_git in dependencies.rglob(".git"):
-        raise SystemExit(f"source-control metadata persisted: {forbidden_git}")
+        if forbidden_git != uv_cache_sentinel:
+            raise SystemExit(f"source-control metadata persisted: {forbidden_git}")
     retained_source = [path for path in waterfall.rglob("*") if waterfall / ".venv" not in path.parents]
     for forbidden_name in (".env", ".npmrc", ".netrc", "hosts.yml"):
         if any(path.is_file() and path.name == forbidden_name for path in retained_source):
