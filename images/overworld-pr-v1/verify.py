@@ -98,6 +98,7 @@ def main() -> int:
         dependencies / "bun-cache",
         dependencies / "waterfall/.venv/bin/python",
         dependencies / "waterfall/.venv/bin/pyright",
+        dependencies / "frontend-node_modules/next/dist/server/dev/browser-logs/file-logger.js",
         Path("/opt/self-hosted-ci/browsers/chromium/chrome"),
         Path("/opt/ms-playwright/chromium_headless_shell-1217/chrome-headless-shell-linux64/chrome-headless-shell"),
     ):
