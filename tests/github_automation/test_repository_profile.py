@@ -229,7 +229,10 @@ class RepositoryProfileTests(unittest.TestCase):
             "memory.current", "memory.peak", "memory.events", "memory.swap.current",
             "memory.swap.peak", "pids.current", "memory.max", "memory.jsonl",
             "MEMORY_FIT_LIMIT_BYTES=3865470566", "oom_kill_delta",
-            "! -w /sys/fs/cgroup/memory.peak", "GIT_NO_REPLACE_OBJECTS=1",
+            "! -w /sys/fs/cgroup/memory.peak", "sampler_status=0",
+            "sampler_status=$?", "(( sampler_status == 0 ))",
+            "-r /sys/fs/cgroup/memory.current", "-r /sys/fs/cgroup/pids.current",
+            "GIT_NO_REPLACE_OBJECTS=1",
         ):
             self.assertIn(evidence, text)
         for forbidden in (
@@ -335,6 +338,35 @@ class RepositoryProfileTests(unittest.TestCase):
                 result, remains = run(candidate, mode=mode, symlink=symlink)
                 self.assertEqual(succeeds, result.returncode == 0, result.stderr)
                 self.assertEqual(not succeeds and candidate is not None, remains)
+
+    def test_prebaked_modules_initialization_runs_under_nounset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            component = root / "component"
+            prebaked = root / "prebaked"
+            component.mkdir()
+            prebaked.mkdir()
+            (component / "bun.lock").write_text("lock\n")
+            prefix = SCRIPT.read_text().split("normalize_checkout_worktree_config() {", 1)[0]
+            command = prefix + f"""
+sha256sum() {{ printf '%s  %s\\n' expected "$1"; }}
+stat() {{ if [[ "$2" == %u ]]; then printf '0\\n'; else printf 'dr-xr-xr-x\\n'; fi; }}
+bun() {{ return 0; }}
+install_prebaked_node_modules {component} expected {prebaked}
+test -d {component}/node_modules
+"""
+            result = subprocess.run(
+                ["bash"],
+                input=command,
+                env={
+                    **os.environ,
+                    "RUNNER_TEMP": str(root / "runner-temp"),
+                    "PROFILE_TESTED_MERGE_SHA": "0" * 40,
+                },
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
 
     def test_exact_reviewed_postgres_tests_are_all_and_only_listed(self):
         text = SCRIPT.read_text()
