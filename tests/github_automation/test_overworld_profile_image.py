@@ -271,6 +271,8 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn('next_metadata.get("version") != "16.2.3"', source)
         self.assertIn('shutil.copytree(next_package, installed_next, symlinks=False)', source)
         self.assertNotIn('shutil.copytree(official_browser_logs, installed_browser_logs)', source)
+        self.assertIn('shutil.copytree(source_modules, target_modules, symlinks=False)', source)
+        self.assertNotIn('shutil.move(str(component_root / "node_modules")', source)
         self.assertIn('browser-logs/file-logger.js', source)
         self.assertIn('node-environment-extensions/console-file.js', source)
         self.assertEqual(1, source.count('"bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts"'))
