@@ -456,7 +456,13 @@ committed=true
                 raise SystemExit("Bun did not install the pinned Next.js package directory")
             shutil.rmtree(installed_next)
             shutil.copytree(next_package, installed_next, symlinks=False)
-        shutil.move(str(component_root / "node_modules"), dependencies / f"{component}-node_modules")
+        source_modules = component_root / "node_modules"
+        target_modules = dependencies / f"{component}-node_modules"
+        shutil.copytree(source_modules, target_modules, symlinks=False)
+        if source_modules.is_symlink():
+            source_modules.unlink()
+        else:
+            shutil.rmtree(source_modules)
     shutil.rmtree(next_package)
     # Frontend's postinstall recreates the exact backend dependency tree while
     # emitting the shared type bridge. Accept only that observed byproduct.
