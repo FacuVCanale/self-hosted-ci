@@ -77,6 +77,7 @@ install -d -o root -g root -m 0700 /var/lib/self-hosted-ci/profile-image-build
 workdir="$(mktemp -d /var/lib/self-hosted-ci/profile-image-build/transaction.XXXXXX)"
 chmod 0700 "${workdir}"
 builder="overworld-image-builder-${RANDOM}${RANDOM}"
+published_verifier="${builder}-published"
 published_fingerprint=''; alias_published=false; transaction_succeeded=false
 declare -A was_active
 for service in "${FENCED_SERVICES[@]}"; do
@@ -91,6 +92,10 @@ cleanup(){
     incus delete "${builder}" --project "${PROJECT}" --force >/dev/null 2>&1||status=1
   fi
   if incus list "${builder}" --project "${PROJECT}" --format csv -c n 2>/dev/null | grep -Fxq "${builder}"; then status=1; fi
+  if incus list "${published_verifier}" --project "${PROJECT}" --format csv -c n 2>/dev/null | grep -Fxq "${published_verifier}"; then
+    incus delete "${published_verifier}" --project "${PROJECT}" --force >/dev/null 2>&1||status=1
+  fi
+  if incus list "${published_verifier}" --project "${PROJECT}" --format csv -c n 2>/dev/null | grep -Fxq "${published_verifier}"; then status=1; fi
   if [[ "${transaction_succeeded}" != true && "${alias_published}" == true ]]; then
     if [[ -z "${published_fingerprint}" ]]; then
       published_fingerprint="$(python3 - "${candidate_alias}" "$(incus image alias list --project "${PROJECT}" --format json 2>/dev/null)" <<'PY' 2>/dev/null
@@ -178,7 +183,7 @@ incus exec "${builder}" --project "${PROJECT}" \
   --env "https_proxy=${https_proxy}" --env "http_proxy=${https_proxy}" --env "no_proxy=127.0.0.1,localhost" \
   -- /usr/bin/python3 /run/self-hosted-ci-profile-build/provision.py
 incus exec "${builder}" --project "${PROJECT}" -- /usr/bin/python3 /run/self-hosted-ci-profile-build/verify.py
-incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu 'rm -rf /run/self-hosted-ci-profile-build /root/.cache /root/.bun /tmp/* /var/tmp/*; test ! -e /root/.npmrc; test ! -e /root/.netrc; test ! -e /root/.config/gh/hosts.yml'
+incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu 'rm -rf /run/self-hosted-ci-profile-build /root/.cache /root/.bun /tmp/* /var/tmp/*; test ! -e /root/.npmrc; test ! -e /root/.netrc; test ! -e /root/.config/gh/hosts.yml; test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js'
 incus exec "${builder}" --project "${PROJECT}" -- /bin/sync
 if ! incus stop "${builder}" --project "${PROJECT}" --timeout 60; then
   incus stop "${builder}" --project "${PROJECT}" --force
@@ -201,6 +206,14 @@ import json,sys
 rows=[r for r in json.load(open(sys.argv[2])) if r.get("fingerprint")==sys.argv[1]]
 if len(rows)!=1 or rows[0].get("type")!="container" or rows[0].get("architecture")!="x86_64": raise SystemExit(1)
 PY
+incus init "${published_fingerprint}" "${published_verifier}" --project "${PROJECT}" --profile ci-jit
+incus start "${published_verifier}" --project "${PROJECT}"
+incus exec "${published_verifier}" --project "${PROJECT}" -- /bin/test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js \
+  || die 'published image boot verification failed'
+incus delete "${published_verifier}" --project "${PROJECT}" --force
+if incus list "${published_verifier}" --project "${PROJECT}" --format csv -c n | grep -Fxq "${published_verifier}"; then
+  die 'published image verifier cleanup failed'
+fi
 incus delete "${builder}" --project "${PROJECT}"
 transaction_succeeded=true
 printf '{"status":"built","project":"%s","profile":"overworld-pr-v1","base_fingerprint":"%s","manifest_sha256":"%s","candidate_alias":"%s","fingerprint":"%s","builder_privileged":false,"builder_nesting":false,"credentials_persisted":false,"alias_moved":false}\n' \

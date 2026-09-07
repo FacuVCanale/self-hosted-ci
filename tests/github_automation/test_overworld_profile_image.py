@@ -256,7 +256,9 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn('"python", "-c", "import waterfall"', source)
         self.assertIn('downloaded["next"], next_package', source)
         self.assertIn('next_metadata.get("version") != "16.2.3"', source)
-        self.assertIn('shutil.copytree(next_package, installed_next)', source)
+        self.assertIn('official_browser_logs = next_package / "dist/server/dev/browser-logs"', source)
+        self.assertIn('shutil.copytree(official_browser_logs, installed_browser_logs)', source)
+        self.assertNotIn('shutil.copytree(next_package, installed_next)', source)
         self.assertIn('browser-logs/file-logger.js', source)
         self.assertIn('node-environment-extensions/console-file.js', source)
         self.assertEqual(1, source.count('"bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts"'))
@@ -476,6 +478,11 @@ printf normalized > "$MOCK_CHMOD_MARKER"
         self.assertLess(source.index(graceful), source.index(forced))
         self.assertLess(source.index(forced), source.index(stopped))
         self.assertLess(source.index(stopped), source.index(publish))
+        post_cleanup_file_check = "test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js"
+        boot_check = 'incus exec "${published_verifier}" --project "${PROJECT}" -- /bin/test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js'
+        self.assertGreaterEqual(source.count(post_cleanup_file_check), 2)
+        self.assertIn(boot_check, source)
+        self.assertLess(source.index(publish), source.index(boot_check))
 
     def test_builder_and_profile_are_installed_under_signed_live_contract(self) -> None:
         provision = PROVISION_CONTRACT.read_text(encoding="utf-8")
