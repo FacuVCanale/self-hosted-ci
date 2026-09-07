@@ -458,11 +458,14 @@ committed=true
             shutil.copytree(next_package, installed_next, symlinks=False)
         source_modules = component_root / "node_modules"
         target_modules = dependencies / f"{component}-node_modules"
-        shutil.copytree(source_modules, target_modules, symlinks=False)
-        if source_modules.is_symlink():
-            source_modules.unlink()
+        if component == "backend":
+            shutil.move(str(source_modules), target_modules)
         else:
-            shutil.rmtree(source_modules)
+            shutil.copytree(source_modules, target_modules, symlinks=False)
+            if source_modules.is_symlink():
+                source_modules.unlink()
+            else:
+                shutil.rmtree(source_modules)
     shutil.rmtree(next_package)
     # Frontend's postinstall recreates the exact backend dependency tree while
     # emitting the shared type bridge. Accept only that observed byproduct.
