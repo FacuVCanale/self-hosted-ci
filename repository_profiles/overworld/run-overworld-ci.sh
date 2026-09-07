@@ -29,7 +29,6 @@ readonly FRONTEND_PORT=3001
 readonly TESTED_MERGE_SHA="${PROFILE_TESTED_MERGE_SHA:?PROFILE_TESTED_MERGE_SHA is required}"
 export GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
-export UV_CACHE_DIR=/opt/self-hosted-ci/overworld-deps/uv-cache
 
 ACTIVE_PHASE=
 ACTIVE_SAMPLER_PID=
@@ -267,7 +266,7 @@ phase_backend() {
   export DATABASE_URL="postgresql://overworld@127.0.0.1:$BACKEND_PGPORT/overworld"
   export JWT_SECRET=ci-jwt-secret-not-a-real-key BETTER_AUTH_SECRET=ci-better-auth-secret-not-a-real-key
   export NODE_ENV=test WATERFALL_SOURCE_PATH="$WATERFALL_ROOT"
-  uv sync --frozen --offline --check --project "$WATERFALL_ROOT"
+  uv --no-config pip check --python "$WATERFALL_ROOT/.venv/bin/python"
   PYTHONPATH="$WATERFALL_ROOT:$WATERFALL_ROOT/src" "$WATERFALL_ROOT/.venv/bin/pyright" \
     backend/src/modules/methodology-obligations/waterfall-stage-push-contract.py
   (cd backend && bun run lint)

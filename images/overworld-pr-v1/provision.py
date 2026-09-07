@@ -492,36 +492,17 @@ committed=true
             shutil.rmtree(tree)
         elif tree.exists():
             tree.unlink()
-    # uv records a local editable differently once Git metadata is absent.
-    # Reconcile that final, publishable source shape while the build cache is
-    # still available, then prove below that the runner sees no further drift.
-    final_uv_environment = {
-        **uv_environment,
-        "HTTPS_PROXY": "http://127.0.0.1:9",
-        "HTTP_PROXY": "http://127.0.0.1:9",
-        "https_proxy": "http://127.0.0.1:9",
-        "http_proxy": "http://127.0.0.1:9",
-        "ALL_PROXY": "http://127.0.0.1:9",
-        "all_proxy": "http://127.0.0.1:9",
-        "NO_PROXY": "",
-        "no_proxy": "",
-    }
-    run("uv", "sync", "--frozen", "--offline", "--project", str(waterfall), env=final_uv_environment)
-    for path in dependencies.rglob("*"):
-        if path.is_dir():
-            path.chmod((path.stat().st_mode & ~0o022) | 0o055)
-        elif path.is_file():
-            path.chmod((path.stat().st_mode & ~0o022) | 0o044)
     run(
         "runuser", "-u", "runner", "--", "env",
-        "HOME=/home/runner", f"UV_CACHE_DIR={uv_cache}",
-        f"UV_PYTHON_INSTALL_DIR={uv_python}",
+        "HOME=/home/runner",
         "HTTPS_PROXY=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",
         "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
         "ALL_PROXY=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",
         "NO_PROXY=", "no_proxy=",
-        "uv", "sync", "--frozen", "--offline", "--check", "--project", str(waterfall),
+        "uv", "--no-config", "pip", "check", "--python", str(waterfall_python),
     )
+    shutil.rmtree(uv_cache)
+    uv_cache.mkdir(mode=0o755)
     for forbidden_git in dependencies.rglob(".git"):
         raise SystemExit(f"source-control metadata persisted: {forbidden_git}")
     retained_source = [path for path in waterfall.rglob("*") if waterfall / ".venv" not in path.parents]
