@@ -5,7 +5,9 @@ set -euo pipefail
 # indirection; the immutable Action selects it after every identity check.
 
 readonly EXPECTED_MEMORY_BYTES=4294967296
-readonly MEMORY_FIT_LIMIT_BYTES=3865470566
+# Incus/cgroup v2 stores memory.high at page granularity. This is the
+# page-aligned value observed for the configured 90% of the 4 GiB hard limit.
+readonly MEMORY_FIT_LIMIT_BYTES=3865468928
 readonly MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES=16777216
 readonly WATERFALL_REVISION=6df90210830b2ebe36eda6b96d91237914d000e4
 readonly WATERFALL_ROOT=/opt/self-hosted-ci/overworld-deps/waterfall
