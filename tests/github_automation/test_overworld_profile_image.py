@@ -99,6 +99,11 @@ class OverworldProfileImageTests(unittest.TestCase):
 
     def test_manifest_has_exact_profile_and_immutable_artifact_sources(self) -> None:
         manifest = json.loads((PROFILE / "manifest.json").read_text(encoding="utf-8"))
+        spec = importlib.util.spec_from_file_location("overworld_image_provision_manifest", PROFILE / "provision.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertIs(module.require_manifest(manifest), manifest)
         self.assertEqual(1, manifest["schema_version"])
         self.assertEqual("overworld-pr-v1", manifest["profile"])
         self.assertEqual("alethia-earth/Overworld", manifest["repository"])
