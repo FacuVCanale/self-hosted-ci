@@ -142,11 +142,25 @@ install_prebaked_node_modules() {
     bun install --frozen-lockfile --offline)
 }
 
+normalize_checkout_worktree_config() {
+  local worktree_config=.git/config.worktree runner_identity
+  if [[ ! -e "$worktree_config" && ! -L "$worktree_config" ]]; then return 0; fi
+  [[ -f "$worktree_config" && ! -L "$worktree_config" ]]
+  runner_identity="$(id -u):$(id -g)"
+  [[ $(stat -c %u:%g:%a:%s "$worktree_config") == "$runner_identity:644:83" ]]
+  [[ $(sha256sum "$worktree_config" | awk '{print $1}') == 443a5f645c23c3d0c0aa09f634b2ad111d46ef61946b598a2fb311678ab47454 ]]
+  unlink "$worktree_config"
+  [[ ! -e "$worktree_config" && ! -L "$worktree_config" ]]
+}
+
 prepare_workspace() {
   local phase=$1
   [[ "$TESTED_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]
   [[ -d .git && ! -L .git && -d .git/objects && ! -L .git/objects ]]
-  [[ ! -e .git/commondir && ! -e .git/config.worktree ]]
+  [[ ! -e .git/commondir ]]
+  # actions/checkout disables sparse checkout through a worktree-local config.
+  # Accept only that exact inert file, then remove it before replacing .git/config.
+  normalize_checkout_worktree_config
   [[ ! -e .git/info/attributes && ! -e .git/info/sparse-checkout && ! -e .git/modules ]]
   [[ -z $(/usr/bin/git for-each-ref --format='%(refname)' refs/replace) ]]
   [[ ! -e .git/objects/info/alternates && ! -e .git/info/grafts ]]
