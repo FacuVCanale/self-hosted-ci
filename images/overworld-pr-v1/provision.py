@@ -74,6 +74,21 @@ def tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def remove_exact_regenerated_modules(overworld: Path, dependencies: Path) -> None:
+    backend = overworld / "backend/node_modules"
+    backend_snapshot = dependencies / "backend-node_modules"
+    if backend.is_symlink() or not backend.is_dir():
+        raise SystemExit("expected exact regenerated backend dependency tree")
+    if tree_digest(backend) != tree_digest(backend_snapshot):
+        raise SystemExit("regenerated backend dependency tree drifted")
+    shutil.rmtree(backend)
+    if backend.exists() or backend.is_symlink():
+        raise SystemExit("regenerated backend dependency tree cleanup failed")
+    frontend = overworld / "frontend/node_modules"
+    if frontend.exists() or frontend.is_symlink():
+        raise SystemExit("unexpected regenerated frontend dependency tree")
+
+
 def require_profile(value: object, waterfall_commit: str) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != {
         "repository_command_profile_version", "profile_id", "repository", "image_marker",
@@ -428,6 +443,9 @@ committed=true
             raise SystemExit(f"{component} lockfile digest drifted")
         run("bun", "install", "--frozen-lockfile", cwd=component_root, env={**os.environ, "BUN_INSTALL_CACHE_DIR": str(bun_cache)})
         shutil.move(str(component_root / "node_modules"), dependencies / f"{component}-node_modules")
+    # Frontend's postinstall recreates the exact backend dependency tree while
+    # emitting the shared type bridge. Accept only that observed byproduct.
+    remove_exact_regenerated_modules(overworld, dependencies)
     for path in dependencies.rglob("*"):
         if path.is_dir():
             path.chmod((path.stat().st_mode & ~0o022) | 0o055)

@@ -20,6 +20,56 @@ LIVE_VERIFIER = ROOT / "scripts/host/verify-live-artifact-contract.py"
 
 
 class OverworldProfileImageTests(unittest.TestCase):
+    def test_regenerated_modules_cleanup_accepts_only_exact_backend_tree(self) -> None:
+        spec = importlib.util.spec_from_file_location("overworld_image_provision", PROFILE / "provision.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        def make_tree(root: Path, *, backend: object = "exact", frontend: object = None) -> tuple[Path, Path]:
+            overworld = root / "overworld"
+            dependencies = root / "dependencies"
+            snapshot = dependencies / "backend-node_modules"
+            snapshot.mkdir(parents=True)
+            (snapshot / "package.txt").write_text("exact", encoding="utf-8")
+            (overworld / "backend").mkdir(parents=True)
+            (overworld / "frontend").mkdir(parents=True)
+            if backend == "exact":
+                target = overworld / "backend/node_modules"
+                target.mkdir()
+                (target / "package.txt").write_text("exact", encoding="utf-8")
+            elif backend == "drift":
+                target = overworld / "backend/node_modules"
+                target.mkdir()
+                (target / "package.txt").write_text("drift", encoding="utf-8")
+            elif backend == "file":
+                (overworld / "backend/node_modules").write_text("not a tree", encoding="utf-8")
+            elif backend == "symlink":
+                (overworld / "backend/node_modules").symlink_to(snapshot, target_is_directory=True)
+            if frontend is not None:
+                target = overworld / "frontend/node_modules"
+                if frontend == "dir": target.mkdir()
+                elif frontend == "file": target.write_text("unexpected", encoding="utf-8")
+                elif frontend == "symlink": target.symlink_to(snapshot, target_is_directory=True)
+            return overworld, dependencies
+
+        with tempfile.TemporaryDirectory() as directory:
+            overworld, dependencies = make_tree(Path(directory))
+            module.remove_exact_regenerated_modules(overworld, dependencies)
+            self.assertFalse((overworld / "backend/node_modules").exists())
+
+        for backend in (None, "drift", "file", "symlink"):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory:
+                overworld, dependencies = make_tree(Path(directory), backend=backend)
+                with self.assertRaises(SystemExit):
+                    module.remove_exact_regenerated_modules(overworld, dependencies)
+
+        for frontend in ("dir", "file", "symlink"):
+            with self.subTest(frontend=frontend), tempfile.TemporaryDirectory() as directory:
+                overworld, dependencies = make_tree(Path(directory), frontend=frontend)
+                with self.assertRaisesRegex(SystemExit, "unexpected regenerated frontend"):
+                    module.remove_exact_regenerated_modules(overworld, dependencies)
+
     def test_image_verifier_enforces_runner_accessible_waterfall_python(self) -> None:
         spec = importlib.util.spec_from_file_location("overworld_image_verify", PROFILE / "verify.py")
         assert spec is not None and spec.loader is not None
@@ -216,10 +266,12 @@ class OverworldProfileImageTests(unittest.TestCase):
             'if tree_digest(modules) != before:',
         ):
             self.assertIn(offline_smoke_contract, source)
+        regenerated_cleanup = source.index('remove_exact_regenerated_modules(overworld, dependencies)', source.index("def main"))
         hardening = source.index('for path in dependencies.rglob("*")')
         copying = source.index('shutil.copytree(overworld, smoke_root')
         executing = source.index('"bun", "install", "--frozen-lockfile", "--offline"')
         cleanup = source.index('shutil.rmtree(smoke_root)', executing)
+        self.assertLess(regenerated_cleanup, hardening)
         self.assertLess(hardening, copying)
         self.assertLess(copying, executing)
         self.assertLess(executing, cleanup)
