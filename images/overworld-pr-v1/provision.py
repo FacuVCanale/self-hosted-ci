@@ -512,12 +512,9 @@ committed=true
             path.chmod((path.stat().st_mode & ~0o022) | 0o055)
         elif path.is_file():
             path.chmod((path.stat().st_mode & ~0o022) | 0o044)
-    uv_check_cache = Path("/var/tmp/waterfall-uv-check-cache")
-    uv_check_cache.mkdir(mode=0o700)
-    run("chown", "runner:runner", str(uv_check_cache))
     run(
         "runuser", "-u", "runner", "--", "env",
-        "HOME=/home/runner", f"UV_CACHE_DIR={uv_check_cache}",
+        "HOME=/home/runner", f"UV_CACHE_DIR={uv_cache}",
         f"UV_PYTHON_INSTALL_DIR={uv_python}",
         "HTTPS_PROXY=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",
         "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
@@ -525,9 +522,6 @@ committed=true
         "NO_PROXY=", "no_proxy=",
         "uv", "sync", "--frozen", "--offline", "--check", "--project", str(waterfall),
     )
-    shutil.rmtree(uv_check_cache)
-    shutil.rmtree(uv_cache)
-    uv_cache.mkdir(mode=0o755)
     for forbidden_git in dependencies.rglob(".git"):
         raise SystemExit(f"source-control metadata persisted: {forbidden_git}")
     retained_source = [path for path in waterfall.rglob("*") if waterfall / ".venv" not in path.parents]
