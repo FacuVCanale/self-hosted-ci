@@ -468,8 +468,11 @@ printf normalized > "$MOCK_CHMOD_MARKER"
         forced = 'incus stop "${builder}" --project "${PROJECT}" --force'
         stopped = 'incus list "${builder}" --project "${PROJECT}" --format csv -c s | grep -Fxq STOPPED'
         publish = 'incus publish "${builder}" --project "${PROJECT}" --alias "${candidate_alias}"'
+        flush = 'incus exec "${builder}" --project "${PROJECT}" -- /bin/sync'
+        self.assertEqual(1, source.count(flush))
         self.assertEqual(1, source.count(graceful))
         self.assertEqual(1, source.count(forced))
+        self.assertLess(source.index(flush), source.index(graceful))
         self.assertLess(source.index(graceful), source.index(forced))
         self.assertLess(source.index(forced), source.index(stopped))
         self.assertLess(source.index(stopped), source.index(publish))
