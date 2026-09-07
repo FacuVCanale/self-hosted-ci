@@ -120,6 +120,7 @@ require_image_contract() {
   [[ -r /sys/fs/cgroup/memory.swap.current && -r /sys/fs/cgroup/memory.swap.peak ]]
   [[ -r /sys/fs/cgroup/memory.events && -r /sys/fs/cgroup/pids.current ]]
   [[ $(cat /sys/fs/cgroup/memory.max) == "$EXPECTED_MEMORY_BYTES" ]]
+  [[ $(cat /sys/fs/cgroup/memory.high) == "$MEMORY_FIT_LIMIT_BYTES" ]]
   [[ $(bun --version) == 1.4.0 ]]
   [[ $(uv --version) == "uv 0.8.22" ]]
   [[ $(python3 --version) == "Python 3.12."* ]]
