@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
 import re
+import sys
 
 from jsonschema import Draft202012Validator
 
@@ -268,11 +270,71 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn("stop_postgres", text)
         self.assertIn("for-each-ref --format='%(refname)' refs/replace", text)
         self.assertIn("! -e .git/commondir", text)
-        self.assertIn("! -e .git/config.worktree", text)
+        self.assertIn("worktree_config=.git/config.worktree", text)
+        self.assertIn('runner_identity="$(id -u):$(id -g)"', text)
+        self.assertIn("$runner_identity:644:83", text)
+        self.assertIn(
+            "443a5f645c23c3d0c0aa09f634b2ad111d46ef61946b598a2fb311678ab47454",
+            text,
+        )
+        self.assertIn('unlink "$worktree_config"', text)
+        self.assertIn('[[ ! -e "$worktree_config" && ! -L "$worktree_config" ]]', text)
         self.assertIn("! -e .git/info/attributes", text)
         self.assertIn("! -e .git/info/sparse-checkout", text)
         self.assertIn("unlink .git/index", text)
         self.assertIn("HEAD^{tree}", text)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "GNU stat contract")
+    def test_checkout_worktree_config_is_exactly_normalized(self):
+        canonical = (
+            b"[core]\n\tsparseCheckout = false\n\tsparseCheckoutCone = false\n"
+            b"[index]\n\tsparse = false\n"
+        )
+        self.assertEqual(83, len(canonical))
+        self.assertEqual(
+            "443a5f645c23c3d0c0aa09f634b2ad111d46ef61946b598a2fb311678ab47454",
+            hashlib.sha256(canonical).hexdigest(),
+        )
+
+        def run(candidate: bytes | None, *, mode: int = 0o644, symlink: bool = False):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                git = root / ".git"
+                git.mkdir()
+                target = git / "config.worktree"
+                if candidate is not None:
+                    if symlink:
+                        backing = root / "backing"
+                        backing.write_bytes(candidate)
+                        target.symlink_to(backing)
+                    else:
+                        target.write_bytes(candidate)
+                        target.chmod(mode)
+                command = (
+                    f"source <(sed '/^prepare_workspace() {{$/,$d' {SCRIPT}); "
+                    "normalize_checkout_worktree_config"
+                )
+                result = subprocess.run(
+                    ["bash", "-c", command],
+                    cwd=root,
+                    env={**os.environ, "RUNNER_TEMP": str(root / "runner-temp"), "PROFILE_TESTED_MERGE_SHA": "0" * 40},
+                    capture_output=True,
+                    text=True,
+                )
+                return result, target.exists() or target.is_symlink()
+
+        for candidate, mode, symlink, succeeds in (
+            (None, 0o644, False, True),
+            (canonical, 0o644, False, True),
+            (canonical + b"x", 0o644, False, False),
+            (canonical.replace(b"false", b"true", 1), 0o644, False, False),
+            (canonical, 0o600, False, False),
+            (canonical, 0o644, True, False),
+        ):
+            with self.subTest(candidate=candidate, mode=oct(mode), symlink=symlink):
+                result, remains = run(candidate, mode=mode, symlink=symlink)
+                self.assertEqual(succeeds, result.returncode == 0, result.stderr)
+                self.assertEqual(not succeeds and candidate is not None, remains)
 
     def test_exact_reviewed_postgres_tests_are_all_and_only_listed(self):
         text = SCRIPT.read_text()

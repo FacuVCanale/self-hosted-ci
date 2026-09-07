@@ -19,7 +19,7 @@
     }
   },
   "runner_script": "repository_profiles/overworld/run-overworld-ci.sh",
-  "runner_script_sha256": "f286a813f5f85b35e9ed513d95ba8b320dec9d0a55cd12f13d9541f9d7cb2714",
+  "runner_script_sha256": "e517424d283bf06da3893aad69ba8c9517626069addda1a5dad91a5cfe0d0609",
   "phases": ["backend", "frontend", "e2e"],
   "toolchain": {
     "bun": "1.4.0",
