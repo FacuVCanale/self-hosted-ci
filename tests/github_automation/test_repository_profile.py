@@ -266,6 +266,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright", text)
         self.assertIn('[[ $(uv --version) == "uv 0.8.22" ]]', text)
         self.assertIn('uv --no-config pip check --python "$WATERFALL_ROOT/.venv/bin/python"', text)
+        self.assertIn("export UV_CACHE_DIR=/opt/self-hosted-ci/overworld-deps/uv-cache", text)
         self.assertNotIn("--runInBand", text)
         self.assertNotIn("bun run build)", text)
         self.assertIn("bun run dev)", text)
