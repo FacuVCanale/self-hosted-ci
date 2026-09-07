@@ -186,9 +186,12 @@ if ! incus exec "${builder}" --project "${PROJECT}" \
     'printf "builder memory.events:\n" >&2; cat /sys/fs/cgroup/memory.events >&2' || true
   die 'image provisioning failed'
 fi
-incus exec "${builder}" --project "${PROJECT}" -- /usr/bin/python3 /run/self-hosted-ci-profile-build/verify.py
-incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu 'rm -rf /run/self-hosted-ci-profile-build /root/.cache /root/.bun /tmp/* /var/tmp/*; test ! -e /root/.npmrc; test ! -e /root/.netrc; test ! -e /root/.config/gh/hosts.yml; test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js'
-incus exec "${builder}" --project "${PROJECT}" -- /bin/sync
+incus exec "${builder}" --project "${PROJECT}" -- /usr/bin/python3 /run/self-hosted-ci-profile-build/verify.py \
+  || die 'provisioned image verification failed'
+incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu 'rm -rf /run/self-hosted-ci-profile-build /root/.cache /root/.bun /tmp/* /var/tmp/*; test ! -e /root/.npmrc; test ! -e /root/.netrc; test ! -e /root/.config/gh/hosts.yml; test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js' \
+  || die 'provisioned image cleanup verification failed'
+incus exec "${builder}" --project "${PROJECT}" -- /bin/sync \
+  || die 'provisioned image sync failed'
 if ! incus stop "${builder}" --project "${PROJECT}" --timeout 60; then
   incus stop "${builder}" --project "${PROJECT}" --force
 fi
