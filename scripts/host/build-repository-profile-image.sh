@@ -179,6 +179,7 @@ incus exec "${builder}" --project "${PROJECT}" \
   -- /usr/bin/python3 /run/self-hosted-ci-profile-build/provision.py
 incus exec "${builder}" --project "${PROJECT}" -- /usr/bin/python3 /run/self-hosted-ci-profile-build/verify.py
 incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu 'rm -rf /run/self-hosted-ci-profile-build /root/.cache /root/.bun /tmp/* /var/tmp/*; test ! -e /root/.npmrc; test ! -e /root/.netrc; test ! -e /root/.config/gh/hosts.yml'
+incus exec "${builder}" --project "${PROJECT}" -- /bin/sync
 if ! incus stop "${builder}" --project "${PROJECT}" --timeout 60; then
   incus stop "${builder}" --project "${PROJECT}" --force
 fi
