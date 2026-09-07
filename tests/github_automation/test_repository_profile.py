@@ -258,6 +258,8 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertNotIn("${{", text)
         self.assertNotIn("find backend", text)
         self.assertEqual(1, text.count("bun install --frozen-lockfile --offline --ignore-scripts"))
+        self.assertIn('[[ "$component" == backend ]]', text)
+        self.assertIn("node-environment-extensions/console-file.js", text)
         self.assertIn('BUN_INSTALL_CACHE_DIR="$cache" TMPDIR="$temporary"', text)
         self.assertIn('cache="$STATE_ROOT/bun-cache-$component"', text)
         self.assertIn('temporary="$STATE_ROOT/bun-tmp-$component"', text)

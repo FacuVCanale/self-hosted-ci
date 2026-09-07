@@ -259,6 +259,8 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn('shutil.copytree(next_package, installed_next)', source)
         self.assertIn('browser-logs/file-logger.js', source)
         self.assertIn('node-environment-extensions/console-file.js', source)
+        self.assertEqual(1, source.count('"bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts"'))
+        self.assertIn('if component == "backend":', source)
         verifier_source = (PROFILE / "verify.py").read_text(encoding="utf-8")
         self.assertNotIn('dependencies / "uv-cache"', verifier_source)
         self.assertIn('if any(dependencies.rglob(".git")):', verifier_source)
