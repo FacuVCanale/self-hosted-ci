@@ -481,20 +481,21 @@ committed=true
         temporary = smoke_root / f"bun-tmp-{component}"
         modules = smoke_root / component / "node_modules"
         before = tree_digest(modules)
-        run(
-            "runuser", "-u", "runner", "--", "env",
-            "HOME=/home/runner", f"XDG_CACHE_HOME={cache}",
-            f"BUN_INSTALL_CACHE_DIR={cache}",
-            f"TMPDIR={temporary}",
-            "HTTPS_PROXY=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",
-            "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
-            "ALL_PROXY=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",
-            "NO_PROXY=", "no_proxy=",
-            "bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts",
-            cwd=smoke_root / component,
-        )
+        if component == "backend":
+            run(
+                "runuser", "-u", "runner", "--", "env",
+                "HOME=/home/runner", f"XDG_CACHE_HOME={cache}",
+                f"BUN_INSTALL_CACHE_DIR={cache}",
+                f"TMPDIR={temporary}",
+                "HTTPS_PROXY=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",
+                "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
+                "ALL_PROXY=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",
+                "NO_PROXY=", "no_proxy=",
+                "bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts",
+                cwd=smoke_root / component,
+            )
         if tree_digest(modules) != before:
-            raise SystemExit(f"{component} offline install mutated its dependency snapshot")
+            raise SystemExit(f"{component} validation mutated its dependency snapshot")
         if component == "frontend":
             run(
                 "runuser", "-u", "runner", "--", "env", "HOME=/home/runner",

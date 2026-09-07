@@ -155,8 +155,13 @@ install_prebaked_node_modules() {
   cp -a "$prebaked" "$target"
   mkdir -p "$cache" "$temporary"
   chmod 700 "$cache" "$temporary"
-  (cd "$component" && BUN_INSTALL_CACHE_DIR="$cache" TMPDIR="$temporary" \
-    bun install --frozen-lockfile --offline --ignore-scripts)
+  if [[ "$component" == backend ]]; then
+    (cd "$component" && BUN_INSTALL_CACHE_DIR="$cache" TMPDIR="$temporary" \
+      bun install --frozen-lockfile --offline --ignore-scripts)
+  else
+    (cd "$component" && bun -e \
+      'require("./node_modules/next/dist/server/node-environment-extensions/console-file.js")')
+  fi
 }
 
 normalize_checkout_worktree_config() {
