@@ -260,7 +260,7 @@ class OverworldProfileImageTests(unittest.TestCase):
             '"HTTPS_PROXY=http://127.0.0.1:9"',
             '"ALL_PROXY=http://127.0.0.1:9"',
             '"NO_PROXY="',
-            '"bun", "install", "--frozen-lockfile", "--offline"',
+            '"bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts"',
             'shutil.rmtree(smoke_root)',
             'before = tree_digest(modules)',
             'if tree_digest(modules) != before:',
@@ -269,7 +269,7 @@ class OverworldProfileImageTests(unittest.TestCase):
         regenerated_cleanup = source.index('remove_exact_regenerated_modules(overworld, dependencies)', source.index("def main"))
         hardening = source.index('for path in dependencies.rglob("*")')
         copying = source.index('shutil.copytree(overworld, smoke_root')
-        executing = source.index('"bun", "install", "--frozen-lockfile", "--offline"')
+        executing = source.index('"bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts"')
         cleanup = source.index('shutil.rmtree(smoke_root)', executing)
         self.assertLess(regenerated_cleanup, hardening)
         self.assertLess(hardening, copying)

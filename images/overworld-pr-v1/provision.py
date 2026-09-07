@@ -475,7 +475,7 @@ committed=true
             "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
             "ALL_PROXY=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",
             "NO_PROXY=", "no_proxy=",
-            "bun", "install", "--frozen-lockfile", "--offline",
+            "bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts",
             cwd=smoke_root / component,
         )
         if tree_digest(modules) != before:
