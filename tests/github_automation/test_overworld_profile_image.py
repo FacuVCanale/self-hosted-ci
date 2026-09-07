@@ -248,6 +248,13 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertNotIn('run("playwright", "install"', source)
         self.assertIn('"UV_PYTHON_INSTALL_DIR": str(uv_python)', source)
         self.assertIn('run("runuser", "-u", "runner", "--", "test", "-x", str(waterfall_python))', source)
+        marker = source.index('(waterfall / ".self-hosted-ci-commit").write_text')
+        initial_sync = source.index('run("uv", "sync", "--frozen", "--project"')
+        offline_check = source.index('"uv", "sync", "--frozen", "--offline", "--check"')
+        git_cleanup = source.index('for tree in (waterfall / ".git"')
+        self.assertLess(marker, initial_sync)
+        self.assertLess(git_cleanup, offline_check)
+        self.assertEqual(1, source.count('(waterfall / ".self-hosted-ci-commit").write_text'))
         for offline_smoke_contract in (
             'smoke_root = Path("/var/tmp/overworld-offline-smoke")',
             'cache = smoke_root / f"bun-cache-{component}"',
