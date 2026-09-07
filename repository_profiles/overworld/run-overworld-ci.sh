@@ -135,18 +135,22 @@ require_image_contract() {
 }
 
 install_prebaked_node_modules() {
-  local component expected_lock prebaked target permissions
+  local component expected_lock prebaked target cache temporary permissions
   component=$1
   expected_lock=$2
   prebaked=$3
   target="$component/node_modules"
+  cache="$STATE_ROOT/bun-cache-$component"
+  temporary="$STATE_ROOT/bun-tmp-$component"
   [[ $(sha256sum "$component/bun.lock" | awk '{print $1}') == "$expected_lock" ]]
   [[ -d "$prebaked" && ! -L "$prebaked" && ! -e "$target" && ! -L "$target" ]]
   [[ $(stat -c %u "$prebaked") == 0 ]]
   permissions=$(stat -c %A "$prebaked")
   [[ ${permissions:5:1} != w && ${permissions:8:1} != w ]]
   cp -a "$prebaked" "$target"
-  (cd "$component" && BUN_INSTALL_CACHE_DIR=/opt/self-hosted-ci/overworld-deps/bun-cache \
+  mkdir -p "$cache" "$temporary"
+  chmod 700 "$cache" "$temporary"
+  (cd "$component" && BUN_INSTALL_CACHE_DIR="$cache" TMPDIR="$temporary" \
     bun install --frozen-lockfile --offline)
 }
 

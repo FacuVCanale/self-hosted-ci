@@ -198,6 +198,31 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertNotIn('run("playwright", "install"', source)
         self.assertIn('"UV_PYTHON_INSTALL_DIR": str(uv_python)', source)
         self.assertIn('run("runuser", "-u", "runner", "--", "test", "-x", str(waterfall_python))', source)
+        for offline_smoke_contract in (
+            'smoke_root = Path("/var/tmp/overworld-offline-smoke")',
+            'cache = smoke_root / f"bun-cache-{component}"',
+            'temporary = smoke_root / f"bun-tmp-{component}"',
+            'run("chown", "-R", "runner:runner", str(smoke_root))',
+            '"runuser", "-u", "runner", "--", "env"',
+            'f"BUN_INSTALL_CACHE_DIR={cache}"',
+            'f"TMPDIR={temporary}"',
+            '"HOME=/home/runner", f"XDG_CACHE_HOME={cache}"',
+            '"HTTPS_PROXY=http://127.0.0.1:9"',
+            '"ALL_PROXY=http://127.0.0.1:9"',
+            '"NO_PROXY="',
+            '"bun", "install", "--frozen-lockfile", "--offline"',
+            'shutil.rmtree(smoke_root)',
+            'before = tree_digest(modules)',
+            'if tree_digest(modules) != before:',
+        ):
+            self.assertIn(offline_smoke_contract, source)
+        hardening = source.index('for path in dependencies.rglob("*")')
+        copying = source.index('shutil.copytree(overworld, smoke_root')
+        executing = source.index('"bun", "install", "--frozen-lockfile", "--offline"')
+        cleanup = source.index('shutil.rmtree(smoke_root)', executing)
+        self.assertLess(hardening, copying)
+        self.assertLess(copying, executing)
+        self.assertLess(executing, cleanup)
         self.assertIn('[[ $(id -nG runner) == runner ]]', source)
         self.assertIn('runuser -u runner -- test ! -x /usr/bin/sudo', source)
         self.assertIn('root:root:644|root:root:664', source)
