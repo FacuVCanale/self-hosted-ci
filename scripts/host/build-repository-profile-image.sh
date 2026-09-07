@@ -179,7 +179,11 @@ incus exec "${builder}" --project "${PROJECT}" \
   -- /usr/bin/python3 /run/self-hosted-ci-profile-build/provision.py
 incus exec "${builder}" --project "${PROJECT}" -- /usr/bin/python3 /run/self-hosted-ci-profile-build/verify.py
 incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu 'rm -rf /run/self-hosted-ci-profile-build /root/.cache /root/.bun /tmp/* /var/tmp/*; test ! -e /root/.npmrc; test ! -e /root/.netrc; test ! -e /root/.config/gh/hosts.yml'
-incus stop "${builder}" --project "${PROJECT}" --timeout 60
+if ! incus stop "${builder}" --project "${PROJECT}" --timeout 60; then
+  incus stop "${builder}" --project "${PROJECT}" --force
+fi
+incus list "${builder}" --project "${PROJECT}" --format csv -c s | grep -Fxq STOPPED \
+  || die 'builder did not reach the stopped state before publication'
 incus publish "${builder}" --project "${PROJECT}" --alias "${candidate_alias}" >/dev/null
 alias_published=true
 published_fingerprint="$(python3 - "${candidate_alias}" "$(incus image alias list --project "${PROJECT}" --format json)" <<'PY'

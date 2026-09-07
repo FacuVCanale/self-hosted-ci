@@ -462,6 +462,18 @@ printf normalized > "$MOCK_CHMOD_MARKER"
         )
         self.assertEqual(0, python.returncode, python.stderr)
 
+    def test_builder_forces_stop_only_after_bounded_graceful_shutdown(self) -> None:
+        source = BUILDER.read_text(encoding="utf-8")
+        graceful = 'if ! incus stop "${builder}" --project "${PROJECT}" --timeout 60; then'
+        forced = 'incus stop "${builder}" --project "${PROJECT}" --force'
+        stopped = 'incus list "${builder}" --project "${PROJECT}" --format csv -c s | grep -Fxq STOPPED'
+        publish = 'incus publish "${builder}" --project "${PROJECT}" --alias "${candidate_alias}"'
+        self.assertEqual(1, source.count(graceful))
+        self.assertEqual(1, source.count(forced))
+        self.assertLess(source.index(graceful), source.index(forced))
+        self.assertLess(source.index(forced), source.index(stopped))
+        self.assertLess(source.index(stopped), source.index(publish))
+
     def test_builder_and_profile_are_installed_under_signed_live_contract(self) -> None:
         provision = PROVISION_CONTRACT.read_text(encoding="utf-8")
         stager = STAGER.read_text(encoding="utf-8")
