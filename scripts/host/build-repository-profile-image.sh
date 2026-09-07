@@ -189,11 +189,19 @@ fi
 incus exec "${builder}" --project "${PROJECT}" -- /usr/bin/python3 /run/self-hosted-ci-profile-build/verify.py \
   || die 'provisioned image verification failed'
 incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu '
-  rm -rf /run/self-hosted-ci-profile-build /root/.cache /root/.bun /tmp/* /var/tmp/* || { echo "temporary artifact cleanup failed" >&2; exit 1; }
+  required=/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js
+  rm -rf /run/self-hosted-ci-profile-build || { echo "build staging cleanup failed" >&2; exit 1; }
+  test -f "$required" || { echo "required Next.js browser log module depended on build staging" >&2; exit 1; }
+  rm -rf /root/.cache /root/.bun || { echo "root cache cleanup failed" >&2; exit 1; }
+  test -f "$required" || { echo "required Next.js browser log module depended on root cache" >&2; exit 1; }
+  rm -rf /tmp/* || { echo "tmp cleanup failed" >&2; exit 1; }
+  test -f "$required" || { echo "required Next.js browser log module depended on tmp" >&2; exit 1; }
+  rm -rf /var/tmp/* || { echo "var-tmp cleanup failed" >&2; exit 1; }
+  test -f "$required" || { echo "required Next.js browser log module depended on var-tmp" >&2; exit 1; }
   test ! -e /root/.npmrc || { echo "npm credential file persisted" >&2; exit 1; }
   test ! -e /root/.netrc || { echo "netrc credential file persisted" >&2; exit 1; }
   test ! -e /root/.config/gh/hosts.yml || { echo "GitHub CLI credential file persisted" >&2; exit 1; }
-  test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js || { echo "required Next.js browser log module missing after cleanup" >&2; exit 1; }
+  test -f "$required" || { echo "required Next.js browser log module missing after cleanup" >&2; exit 1; }
 ' \
   || die 'provisioned image cleanup verification failed'
 incus exec "${builder}" --project "${PROJECT}" -- /bin/sync \

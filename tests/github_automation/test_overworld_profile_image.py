@@ -171,11 +171,14 @@ class OverworldProfileImageTests(unittest.TestCase):
             "die 'image provisioning failed'",
             "die 'provisioned image verification failed'",
             "die 'provisioned image cleanup verification failed'",
-            'temporary artifact cleanup failed',
             'npm credential file persisted',
             'netrc credential file persisted',
             'GitHub CLI credential file persisted',
             'required Next.js browser log module missing after cleanup',
+            'required Next.js browser log module depended on build staging',
+            'required Next.js browser log module depended on root cache',
+            'required Next.js browser log module depended on tmp',
+            'required Next.js browser log module depended on var-tmp',
             "die 'provisioned image sync failed'",
             'set(d)!={"eth0","root"}',
             'd["eth0"].get("network")!="ci-jit-isolated"',
@@ -487,9 +490,9 @@ printf normalized > "$MOCK_CHMOD_MARKER"
         self.assertLess(source.index(graceful), source.index(forced))
         self.assertLess(source.index(forced), source.index(stopped))
         self.assertLess(source.index(stopped), source.index(publish))
-        post_cleanup_file_check = "test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js"
+        post_cleanup_file_check = "required=/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js"
         boot_check = 'incus exec "${published_verifier}" --project "${PROJECT}" -- /bin/test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js'
-        self.assertGreaterEqual(source.count(post_cleanup_file_check), 2)
+        self.assertIn(post_cleanup_file_check, source)
         self.assertIn(boot_check, source)
         self.assertLess(source.index(publish), source.index(boot_check))
 
