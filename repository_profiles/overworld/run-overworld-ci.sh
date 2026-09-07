@@ -151,7 +151,7 @@ install_prebaked_node_modules() {
   mkdir -p "$cache" "$temporary"
   chmod 700 "$cache" "$temporary"
   (cd "$component" && BUN_INSTALL_CACHE_DIR="$cache" TMPDIR="$temporary" \
-    bun install --frozen-lockfile --offline)
+    bun install --frozen-lockfile --offline --ignore-scripts)
 }
 
 normalize_checkout_worktree_config() {
