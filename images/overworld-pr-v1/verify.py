@@ -108,7 +108,10 @@ def main() -> int:
     verify_runner_executable(waterfall_python)
     if (dependencies / "waterfall/.self-hosted-ci-commit").read_text(encoding="ascii").strip() != expected_toolchain["waterfall_revision"]:
         raise SystemExit("Waterfall offline source revision drifted")
-    if any(dependencies.rglob(".git")):
+    uv_cache_sentinel = dependencies / "uv-cache/sdists-v9/.git"
+    if not uv_cache_sentinel.is_file():
+        raise SystemExit("expected UV cache sentinel is absent or not a regular file")
+    if any(path != uv_cache_sentinel for path in dependencies.rglob(".git")):
         raise SystemExit("source-control metadata persisted in offline dependencies")
     for major, postgis in (("16", "3.4"), ("17", "3.5")):
         version = output(f"/usr/lib/postgresql/{major}/bin/psql", "--version")
