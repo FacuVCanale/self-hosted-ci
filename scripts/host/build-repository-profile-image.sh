@@ -156,6 +156,7 @@ if len(rows)!=1 or rows[0].get("type")!="container" or rows[0].get("architecture
 PY
 
 incus init "${base_fingerprint}" "${builder}" --project "${PROJECT}" --profile ci-jit
+incus config set "${builder}" --project "${PROJECT}" limits.memory=6GiB
 incus config set "${builder}" --project "${PROJECT}" security.privileged=false security.nesting=false security.idmap.isolated=true
 incus query "/1.0/instances/${builder}?project=${PROJECT}&recursion=1" >"${workdir}/builder.json"
 python3 - "${workdir}/builder.json" <<'PY' || die 'builder confinement contract failed'
@@ -178,10 +179,14 @@ import json,sys
 print(json.dumps(dict(zip(("overworld_commit","overworld_bundle_sha256","waterfall_commit","waterfall_bundle_sha256"),sys.argv[1:])),sort_keys=True,separators=(",",":")))
 PY
 incus file push "${workdir}/bundle-inputs.json" "${builder}/run/self-hosted-ci-profile-build/bundle-inputs.json" --project "${PROJECT}" --create-dirs --mode=0600
-incus exec "${builder}" --project "${PROJECT}" \
+if ! incus exec "${builder}" --project "${PROJECT}" \
   --env "HTTPS_PROXY=${https_proxy}" --env "HTTP_PROXY=${https_proxy}" --env "NO_PROXY=127.0.0.1,localhost" \
   --env "https_proxy=${https_proxy}" --env "http_proxy=${https_proxy}" --env "no_proxy=127.0.0.1,localhost" \
-  -- /usr/bin/python3 /run/self-hosted-ci-profile-build/provision.py
+  -- /usr/bin/python3 /run/self-hosted-ci-profile-build/provision.py; then
+  incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -c \
+    'printf "builder memory.events:\n" >&2; cat /sys/fs/cgroup/memory.events >&2' || true
+  die 'image provisioning failed'
+fi
 incus exec "${builder}" --project "${PROJECT}" -- /usr/bin/python3 /run/self-hosted-ci-profile-build/verify.py
 incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu 'rm -rf /run/self-hosted-ci-profile-build /root/.cache /root/.bun /tmp/* /var/tmp/*; test ! -e /root/.npmrc; test ! -e /root/.netrc; test ! -e /root/.config/gh/hosts.yml; test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js'
 incus exec "${builder}" --project "${PROJECT}" -- /bin/sync
