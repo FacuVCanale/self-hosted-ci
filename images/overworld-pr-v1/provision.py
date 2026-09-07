@@ -57,6 +57,23 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def tree_digest(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix()
+        mode = path.lstat().st_mode & 0o7777
+        if path.is_symlink():
+            payload = f"link\0{relative}\0{mode:o}\0{os.readlink(path)}\n".encode()
+        elif path.is_dir():
+            payload = f"dir\0{relative}\0{mode:o}\n".encode()
+        elif path.is_file():
+            payload = f"file\0{relative}\0{mode:o}\0{sha256_file(path)}\n".encode()
+        else:
+            raise SystemExit(f"unsupported dependency snapshot entry: {path}")
+        digest.update(payload)
+    return digest.hexdigest()
+
+
 def require_profile(value: object, waterfall_commit: str) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != {
         "repository_command_profile_version", "profile_id", "repository", "image_marker",
@@ -411,6 +428,41 @@ committed=true
             raise SystemExit(f"{component} lockfile digest drifted")
         run("bun", "install", "--frozen-lockfile", cwd=component_root, env={**os.environ, "BUN_INSTALL_CACHE_DIR": str(bun_cache)})
         shutil.move(str(component_root / "node_modules"), dependencies / f"{component}-node_modules")
+    for path in dependencies.rglob("*"):
+        if path.is_dir():
+            path.chmod((path.stat().st_mode & ~0o022) | 0o055)
+        elif path.is_file():
+            path.chmod((path.stat().st_mode & ~0o022) | 0o044)
+    smoke_root = Path("/var/tmp/overworld-offline-smoke")
+    shutil.copytree(overworld, smoke_root, symlinks=True)
+    for component in ("backend", "frontend"):
+        component_root = smoke_root / component
+        shutil.copytree(dependencies / f"{component}-node_modules", component_root / "node_modules", symlinks=True)
+        cache = smoke_root / f"bun-cache-{component}"
+        temporary = smoke_root / f"bun-tmp-{component}"
+        cache.mkdir(mode=0o700)
+        temporary.mkdir(mode=0o700)
+    run("chown", "-R", "runner:runner", str(smoke_root))
+    for component in ("backend", "frontend"):
+        cache = smoke_root / f"bun-cache-{component}"
+        temporary = smoke_root / f"bun-tmp-{component}"
+        modules = smoke_root / component / "node_modules"
+        before = tree_digest(modules)
+        run(
+            "runuser", "-u", "runner", "--", "env",
+            "HOME=/home/runner", f"XDG_CACHE_HOME={cache}",
+            f"BUN_INSTALL_CACHE_DIR={cache}",
+            f"TMPDIR={temporary}",
+            "HTTPS_PROXY=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",
+            "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
+            "ALL_PROXY=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",
+            "NO_PROXY=", "no_proxy=",
+            "bun", "install", "--frozen-lockfile", "--offline",
+            cwd=smoke_root / component,
+        )
+        if tree_digest(modules) != before:
+            raise SystemExit(f"{component} offline install mutated its dependency snapshot")
+    shutil.rmtree(smoke_root)
     pyright_target = overworld / "backend/src/modules/methodology-obligations/waterfall-stage-push-contract.py"
     run(
         str(pyright_wrapper), str(pyright_target),
@@ -424,11 +476,6 @@ committed=true
         elif tree.exists():
             tree.unlink()
     (waterfall / ".self-hosted-ci-commit").write_text(bundle_inputs["waterfall_commit"] + "\n", encoding="ascii")
-    for path in dependencies.rglob("*"):
-        if path.is_dir():
-            path.chmod((path.stat().st_mode & ~0o022) | 0o055)
-        elif path.is_file():
-            path.chmod((path.stat().st_mode & ~0o022) | 0o044)
     for forbidden_git in dependencies.rglob(".git"):
         raise SystemExit(f"source-control metadata persisted: {forbidden_git}")
     retained_source = [path for path in waterfall.rglob("*") if waterfall / ".venv" not in path.parents]
