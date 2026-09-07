@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -18,6 +20,33 @@ LIVE_VERIFIER = ROOT / "scripts/host/verify-live-artifact-contract.py"
 
 
 class OverworldProfileImageTests(unittest.TestCase):
+    def test_image_verifier_enforces_runner_accessible_waterfall_python(self) -> None:
+        spec = importlib.util.spec_from_file_location("overworld_image_verify", PROFILE / "verify.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        python = Path("/opt/self-hosted-ci/overworld-deps/waterfall/.venv/bin/python")
+
+        with mock.patch.object(Path, "resolve", return_value=Path("/root/.local/python3.11")):
+            with self.assertRaisesRegex(SystemExit, "root-private"):
+                module.verify_runner_executable(python)
+
+        inaccessible = subprocess.CompletedProcess([], 1)
+        with mock.patch.object(Path, "resolve", return_value=Path("/opt/self-hosted-ci/uv-python/python3.11")), mock.patch.object(
+            module.subprocess, "run", return_value=inaccessible
+        ) as run:
+            with self.assertRaisesRegex(SystemExit, "not executable by runner"):
+                module.verify_runner_executable(python)
+            run.assert_called_once_with(
+                ["runuser", "-u", "runner", "--", "test", "-x", str(python)], check=False
+            )
+
+        accessible = subprocess.CompletedProcess([], 0)
+        with mock.patch.object(Path, "resolve", return_value=Path("/opt/self-hosted-ci/uv-python/python3.11")), mock.patch.object(
+            module.subprocess, "run", return_value=accessible
+        ):
+            module.verify_runner_executable(python)
+
     def test_manifest_has_exact_profile_and_immutable_artifact_sources(self) -> None:
         manifest = json.loads((PROFILE / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(1, manifest["schema_version"])
@@ -167,6 +196,8 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn("shutil.rmtree(uv_cache)", source)
         self.assertIn("uv_cache.mkdir(mode=0o755)", source)
         self.assertNotIn('run("playwright", "install"', source)
+        self.assertIn('"UV_PYTHON_INSTALL_DIR": str(uv_python)', source)
+        self.assertIn('run("runuser", "-u", "runner", "--", "test", "-x", str(waterfall_python))', source)
         self.assertIn('[[ $(id -nG runner) == runner ]]', source)
         self.assertIn('runuser -u runner -- test ! -x /usr/bin/sudo', source)
         self.assertIn('root:root:644|root:root:664', source)
@@ -309,6 +340,8 @@ printf normalized > "$MOCK_CHMOD_MARKER"
             "default cluster persisted",
             "runner privilege boundary drifted",
             "runner finalizer ownership or mode drifted",
+            "Waterfall interpreter resolves through a root-private path",
+            "Waterfall interpreter is not executable by runner",
             'runner_groups != {"runner"}',
         ):
             self.assertIn(token, source)

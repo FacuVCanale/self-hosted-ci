@@ -379,7 +379,18 @@ committed=true
     if output_commit(waterfall) != bundle_inputs["waterfall_commit"]:
         raise SystemExit("Waterfall checkout drifted")
     uv_cache = dependencies / "uv-cache"
-    run("uv", "sync", "--frozen", "--project", str(waterfall), env={**os.environ, "UV_CACHE_DIR": str(uv_cache)})
+    uv_python = dependencies / "uv-python"
+    uv_python.mkdir(mode=0o755)
+    uv_environment = {
+        **os.environ,
+        "UV_CACHE_DIR": str(uv_cache),
+        "UV_PYTHON_INSTALL_DIR": str(uv_python),
+    }
+    run("uv", "sync", "--frozen", "--project", str(waterfall), env=uv_environment)
+    waterfall_python = waterfall / ".venv/bin/python"
+    if not waterfall_python.exists() or Path(waterfall_python.resolve()).is_relative_to("/root"):
+        raise SystemExit("Waterfall interpreter is not runner-accessible")
+    run("runuser", "-u", "runner", "--", "test", "-x", str(waterfall_python))
     pyright_wrapper = waterfall / ".venv/bin/pyright"
     pyright_wrapper.write_text("#!/bin/sh\nexec /usr/local/bin/pyright \"$@\"\n", encoding="utf-8")
     pyright_wrapper.chmod(0o755)

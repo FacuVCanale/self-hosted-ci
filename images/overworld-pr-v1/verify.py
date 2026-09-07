@@ -16,6 +16,16 @@ def output(*args: str) -> str:
     return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
 
 
+def verify_runner_executable(path: Path) -> None:
+    if Path(path.resolve()).is_relative_to("/root"):
+        raise SystemExit("Waterfall interpreter resolves through a root-private path")
+    if subprocess.run(
+        ["runuser", "-u", "runner", "--", "test", "-x", str(path)],
+        check=False,
+    ).returncode:
+        raise SystemExit("Waterfall interpreter is not executable by runner")
+
+
 def main() -> int:
     runner_uid = int(output("id", "-u", "runner"))
     runner_groups = set(output("id", "-nG", "runner").split())
@@ -94,6 +104,8 @@ def main() -> int:
     ):
         if not required.exists():
             raise SystemExit(f"offline dependency is absent: {required}")
+    waterfall_python = dependencies / "waterfall/.venv/bin/python"
+    verify_runner_executable(waterfall_python)
     if (dependencies / "waterfall/.self-hosted-ci-commit").read_text(encoding="ascii").strip() != expected_toolchain["waterfall_revision"]:
         raise SystemExit("Waterfall offline source revision drifted")
     if any(dependencies.rglob(".git")):
