@@ -228,7 +228,7 @@ class RepositoryProfileTests(unittest.TestCase):
         for evidence in (
             "memory.current", "memory.peak", "memory.events", "memory.swap.current",
             "memory.swap.peak", "pids.current", "memory.max", "memory.jsonl",
-            "MEMORY_FIT_LIMIT_BYTES=3865470566", "oom_kill_delta",
+            "MEMORY_FIT_LIMIT_BYTES=3865468928", "oom_kill_delta",
             "MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES=16777216",
             "! -w /sys/fs/cgroup/memory.peak", "sampler_status=0",
             "sampler_status=$?", "(( sampler_status == 0 ))",
