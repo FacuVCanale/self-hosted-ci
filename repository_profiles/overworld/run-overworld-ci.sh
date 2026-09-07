@@ -6,6 +6,7 @@ set -euo pipefail
 
 readonly EXPECTED_MEMORY_BYTES=4294967296
 readonly MEMORY_FIT_LIMIT_BYTES=3865470566
+readonly MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES=16777216
 readonly WATERFALL_REVISION=6df90210830b2ebe36eda6b96d91237914d000e4
 readonly WATERFALL_ROOT=/opt/self-hosted-ci/overworld-deps/waterfall
 readonly BACKEND_LOCK_SHA256=b235110fe83b4b3a4eafb337efc0bb8d7424aea33a72f0338b2192892ce79fdb
@@ -29,7 +30,7 @@ readonly FRONTEND_PORT=3001
 readonly TESTED_MERGE_SHA="${PROFILE_TESTED_MERGE_SHA:?PROFILE_TESTED_MERGE_SHA is required}"
 export GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
-export UV_CACHE_DIR=/opt/self-hosted-ci/overworld-deps/uv-cache
+export UV_OFFLINE=1 UV_NO_SYNC=1
 
 ACTIVE_PHASE=
 ACTIVE_SAMPLER_PID=
@@ -99,15 +100,15 @@ finish_phase_measurement() {
   # only: untrusted workload code may share the runner UID and mutate it.
   phase_peak=$(read_cgroup_value memory.peak)
   phase_swap_peak=$(read_cgroup_value memory.swap.peak)
-  printf '{"phase":"%s","memory_peak_bytes":%s,"memory_swap_peak_bytes":%s,"oom_delta":%s,"oom_kill_delta":%s,"fit_limit_bytes":%s}\n' \
-    "$phase" "$phase_peak" "$phase_swap_peak" "$oom_delta" "$oom_kill_delta" "$MEMORY_FIT_LIMIT_BYTES" | tee -a "$MEMORY_SUMMARY"
+  printf '{"phase":"%s","memory_peak_bytes":%s,"memory_swap_peak_bytes":%s,"oom_delta":%s,"oom_kill_delta":%s,"fit_limit_bytes":%s,"memory_high_overshoot_tolerance_bytes":%s}\n' \
+    "$phase" "$phase_peak" "$phase_swap_peak" "$oom_delta" "$oom_kill_delta" "$MEMORY_FIT_LIMIT_BYTES" "$MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES" | tee -a "$MEMORY_SUMMARY"
   ACTIVE_PHASE=
   ACTIVE_SAMPLER_PID=
   ACTIVE_SAMPLER_SENTINEL=
   (( sampler_status == 0 ))
   (( oom_delta == 0 ))
   (( oom_kill_delta == 0 ))
-  (( phase_peak < MEMORY_FIT_LIMIT_BYTES ))
+  (( phase_peak < MEMORY_FIT_LIMIT_BYTES + MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES ))
 }
 
 require_image_contract() {

@@ -452,10 +452,6 @@ committed=true
             path.chmod((path.stat().st_mode & ~0o022) | 0o055)
         elif path.is_file():
             path.chmod((path.stat().st_mode & ~0o022) | 0o044)
-    # This cache is copied into, and discarded with, each ephemeral runner.
-    # Repository tests invoke uv offline to build the retained local package.
-    run("chown", "-R", "runner:runner", str(uv_cache))
-    run("chmod", "-R", "u+rwX,go+rX", str(uv_cache))
     smoke_root = Path("/var/tmp/overworld-offline-smoke")
     shutil.copytree(overworld, smoke_root, symlinks=True)
     for component in ("backend", "frontend"):
@@ -505,12 +501,15 @@ committed=true
         "NO_PROXY=", "no_proxy=",
         "uv", "--no-config", "pip", "check", "--python", str(waterfall_python),
     )
-    uv_cache_sentinel = uv_cache / "sdists-v9/.git"
-    if not uv_cache_sentinel.is_file():
-        raise SystemExit("expected UV cache sentinel is absent or not a regular file")
+    run(
+        "runuser", "-u", "runner", "--", "env",
+        "HOME=/home/runner", "UV_OFFLINE=1", "UV_NO_SYNC=1",
+        "uv", "run", "--frozen", "--project", str(waterfall),
+        "python", "-c", "import waterfall",
+    )
+    shutil.rmtree(uv_cache)
     for forbidden_git in dependencies.rglob(".git"):
-        if forbidden_git != uv_cache_sentinel:
-            raise SystemExit(f"source-control metadata persisted: {forbidden_git}")
+        raise SystemExit(f"source-control metadata persisted: {forbidden_git}")
     retained_source = [path for path in waterfall.rglob("*") if waterfall / ".venv" not in path.parents]
     for forbidden_name in (".env", ".npmrc", ".netrc", "hosts.yml"):
         if any(path.is_file() and path.name == forbidden_name for path in retained_source):
