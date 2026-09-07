@@ -372,6 +372,13 @@ committed=true
         for package in ("pyright", "playwright", "playwright_core"):
             target_name = "playwright-core" if package == "playwright_core" else package
             extract_npm(downloaded[package], node_modules / target_name)
+        next_package = Path("/var/tmp/self-hosted-ci-next-package")
+        extract_npm(downloaded["next"], next_package)
+        next_metadata = json.loads((next_package / "package.json").read_text(encoding="utf-8"))
+        if next_metadata.get("name") != "next" or next_metadata.get("version") != "16.2.3":
+            raise SystemExit("pinned Next.js package identity drifted")
+        if not (next_package / "dist/server/dev/browser-logs/file-logger.js").is_file():
+            raise SystemExit("pinned Next.js package is incomplete")
         Path("/usr/local/bin/pyright").write_text(
             "#!/bin/sh\nexec /usr/local/bin/bun /opt/self-hosted-ci/node_modules/pyright/index.js \"$@\"\n",
             encoding="utf-8",
@@ -443,7 +450,14 @@ committed=true
         if sha256_file(lockfile) != snapshot["lock_sha256"]:
             raise SystemExit(f"{component} lockfile digest drifted")
         run("bun", "install", "--frozen-lockfile", cwd=component_root, env={**os.environ, "BUN_INSTALL_CACHE_DIR": str(bun_cache)})
+        if component == "frontend":
+            installed_next = component_root / "node_modules/next"
+            if installed_next.is_symlink() or not installed_next.is_dir():
+                raise SystemExit("Bun did not install the pinned Next.js package directory")
+            shutil.rmtree(installed_next)
+            shutil.copytree(next_package, installed_next)
         shutil.move(str(component_root / "node_modules"), dependencies / f"{component}-node_modules")
+    shutil.rmtree(next_package)
     # Frontend's postinstall recreates the exact backend dependency tree while
     # emitting the shared type bridge. Accept only that observed byproduct.
     remove_exact_regenerated_modules(overworld, dependencies)
@@ -481,6 +495,13 @@ committed=true
         )
         if tree_digest(modules) != before:
             raise SystemExit(f"{component} offline install mutated its dependency snapshot")
+        if component == "frontend":
+            run(
+                "runuser", "-u", "runner", "--", "env", "HOME=/home/runner",
+                "bun", "-e",
+                'require("./node_modules/next/dist/server/node-environment-extensions/console-file.js")',
+                cwd=component_root,
+            )
     shutil.rmtree(smoke_root)
     pyright_target = overworld / "backend/src/modules/methodology-obligations/waterfall-stage-push-contract.py"
     run(

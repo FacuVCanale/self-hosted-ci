@@ -37,6 +37,11 @@
       "url": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.59.1.tgz",
       "sha256": "22304c3d9106ed8372ff58656f645a93bc3a2b17df8567f1413079a730d8d6fa"
     },
+    "next": {
+      "version": "16.2.3",
+      "url": "https://registry.npmjs.org/next/-/next-16.2.3.tgz",
+      "sha256": "49d8ecd80f86c9600ab30226e6ecbfd926c3bdb987d602925ab93cb31852a295"
+    },
     "chromium": {
       "version": "147.0.7727.15",
       "revision": "1217",

@@ -103,12 +103,13 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertEqual("overworld-pr-v1", manifest["profile"])
         self.assertEqual("alethia-earth/Overworld", manifest["repository"])
         self.assertEqual(
-            {"bun", "uv", "pyright", "playwright", "playwright_core", "chromium", "chromium_headless_shell", "minio", "mc"},
+            {"bun", "uv", "pyright", "playwright", "playwright_core", "next", "chromium", "chromium_headless_shell", "minio", "mc"},
             set(manifest["artifacts"]),
         )
         self.assertEqual("1.4.0", manifest["artifacts"]["bun"]["version"])
         self.assertEqual("1.1.408", manifest["artifacts"]["pyright"]["version"])
         self.assertEqual("1.59.1", manifest["artifacts"]["playwright"]["version"])
+        self.assertEqual("16.2.3", manifest["artifacts"]["next"]["version"])
         self.assertEqual("1217", manifest["artifacts"]["chromium"]["revision"])
         self.assertEqual("1217", manifest["artifacts"]["chromium_headless_shell"]["revision"])
         for artifact in manifest["artifacts"].values():
@@ -248,9 +249,15 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertNotIn('run("chmod", "-R", "u+rwX,go+rX", str(uv_cache))', source)
         self.assertIn('"UV_OFFLINE=1", "UV_NO_SYNC=1"', source)
         self.assertIn('"python", "-c", "import waterfall"', source)
+        self.assertIn('downloaded["next"], next_package', source)
+        self.assertIn('next_metadata.get("version") != "16.2.3"', source)
+        self.assertIn('shutil.copytree(next_package, installed_next)', source)
+        self.assertIn('browser-logs/file-logger.js', source)
+        self.assertIn('node-environment-extensions/console-file.js', source)
         verifier_source = (PROFILE / "verify.py").read_text(encoding="utf-8")
         self.assertNotIn('dependencies / "uv-cache"', verifier_source)
         self.assertIn('if any(dependencies.rglob(".git")):', verifier_source)
+        self.assertIn('frontend-node_modules/next/dist/server/dev/browser-logs/file-logger.js', verifier_source)
         self.assertNotIn('run("playwright", "install"', source)
         self.assertIn('"UV_PYTHON_INSTALL_DIR": str(uv_python)', source)
         self.assertIn('run("runuser", "-u", "runner", "--", "test", "-x", str(waterfall_python))', source)
