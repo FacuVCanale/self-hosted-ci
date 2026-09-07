@@ -156,7 +156,6 @@ if len(rows)!=1 or rows[0].get("type")!="container" or rows[0].get("architecture
 PY
 
 incus init "${base_fingerprint}" "${builder}" --project "${PROJECT}" --profile ci-jit
-incus config set "${builder}" --project "${PROJECT}" limits.memory=6GiB
 incus config set "${builder}" --project "${PROJECT}" security.privileged=false security.nesting=false security.idmap.isolated=true
 incus query "/1.0/instances/${builder}?project=${PROJECT}&recursion=1" >"${workdir}/builder.json"
 python3 - "${workdir}/builder.json" <<'PY' || die 'builder confinement contract failed'

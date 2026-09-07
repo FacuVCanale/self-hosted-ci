@@ -167,7 +167,6 @@ class OverworldProfileImageTests(unittest.TestCase):
             'squid -N -f "${profile_dir}/squid-build.conf"',
             'systemctl stop "${BUILD_PROXY_UNIT}"',
             'security.privileged=false security.nesting=false security.idmap.isolated=true',
-            'incus config set "${builder}" --project "${PROJECT}" limits.memory=6GiB',
             'cat /sys/fs/cgroup/memory.events >&2',
             "die 'image provisioning failed'",
             'set(d)!={"eth0","root"}',
