@@ -86,10 +86,10 @@ start_phase_measurement() {
 }
 
 finish_phase_measurement() {
-  local phase=$1 oom_after oom_kill_after phase_peak phase_swap_peak oom_delta oom_kill_delta
+  local phase=$1 oom_after oom_kill_after phase_peak phase_swap_peak oom_delta oom_kill_delta sampler_status=0
   [[ "$ACTIVE_PHASE" == "$phase" ]]
   unlink "$ACTIVE_SAMPLER_SENTINEL" 2>/dev/null || true
-  wait "$ACTIVE_SAMPLER_PID" 2>/dev/null || true
+  wait "$ACTIVE_SAMPLER_PID" 2>/dev/null || sampler_status=$?
   oom_after=$(read_memory_event oom)
   oom_kill_after=$(read_memory_event oom_kill)
   oom_delta=$((oom_after - ACTIVE_OOM))
@@ -103,6 +103,7 @@ finish_phase_measurement() {
   ACTIVE_PHASE=
   ACTIVE_SAMPLER_PID=
   ACTIVE_SAMPLER_SENTINEL=
+  (( sampler_status == 0 ))
   (( oom_delta == 0 ))
   (( oom_kill_delta == 0 ))
   (( phase_peak < MEMORY_FIT_LIMIT_BYTES ))
@@ -113,6 +114,9 @@ require_image_contract() {
   (( EUID >= 1000 ))
   [[ $(stat -c %U:%G:%a "$privilege_helper") == root:root:750 && ! -x "$privilege_helper" ]]
   [[ ! -w /sys/fs/cgroup/memory.peak && ! -w /sys/fs/cgroup/memory.events ]]
+  [[ -r /sys/fs/cgroup/memory.current && -r /sys/fs/cgroup/memory.peak ]]
+  [[ -r /sys/fs/cgroup/memory.swap.current && -r /sys/fs/cgroup/memory.swap.peak ]]
+  [[ -r /sys/fs/cgroup/memory.events && -r /sys/fs/cgroup/pids.current ]]
   [[ $(cat /sys/fs/cgroup/memory.max) == "$EXPECTED_MEMORY_BYTES" ]]
   [[ $(bun --version) == 1.4.0 ]]
   [[ $(uv --version) == "uv 0.8.22" ]]
@@ -131,7 +135,11 @@ require_image_contract() {
 }
 
 install_prebaked_node_modules() {
-  local component=$1 expected_lock=$2 prebaked=$3 target="$component/node_modules" permissions
+  local component expected_lock prebaked target permissions
+  component=$1
+  expected_lock=$2
+  prebaked=$3
+  target="$component/node_modules"
   [[ $(sha256sum "$component/bun.lock" | awk '{print $1}') == "$expected_lock" ]]
   [[ -d "$prebaked" && ! -L "$prebaked" && ! -e "$target" && ! -L "$target" ]]
   [[ $(stat -c %u "$prebaked") == 0 ]]
