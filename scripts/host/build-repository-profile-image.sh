@@ -7,6 +7,7 @@ readonly BUILD_PROXY_UNIT=self-hosted-ci-profile-build-proxy.service
 readonly TRANSACTION_LIB=/usr/local/lib/self-hosted-ci/garm-jit-transaction-lib.sh
 readonly PUBLISH_SENTINELS=(
   /etc/self-hosted-ci/repository-profile-image-v1.json
+  /usr/local/bin/node
   /opt/self-hosted-ci/node_modules/pyright/package.json
   /opt/self-hosted-ci/overworld-deps/frontend-node_modules/react/package.json
   /opt/self-hosted-ci/overworld-deps/frontend-node_modules/next/package.json

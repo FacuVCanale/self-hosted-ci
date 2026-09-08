@@ -36,7 +36,7 @@ PROFILE_FIELDS = {
     "toolchain",
 }
 TOOLCHAIN_FIELDS = {
-    "bun", "garm", "minio", "playwright", "postgresql_backend", "postgis_backend",
+    "bun", "garm", "minio", "node", "playwright", "postgresql_backend", "postgis_backend",
     "postgresql_e2e", "postgis_e2e", "python", "uv",
     "waterfall_revision",
 }
@@ -92,6 +92,7 @@ def _exact_toolchain(value: object) -> Mapping[str, str]:
         "bun": "1.4.0",
         "garm": "0.2.1",
         "minio": "RELEASE.2025-07-23T15-54-02Z",
+        "node": "22.23.2",
         "playwright": "1.59.1",
         "postgresql_backend": "16",
         "postgis_backend": "3.4",

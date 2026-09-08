@@ -539,8 +539,17 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertEqual("overworld-pr-v1", manifest["profile"])
         self.assertEqual("alethia-earth/Overworld", manifest["repository"])
         self.assertEqual(
-            {"bun", "uv", "pyright", "playwright", "playwright_core", "next", "chromium", "chromium_headless_shell", "minio", "mc"},
+            {"node", "bun", "uv", "pyright", "playwright", "playwright_core", "next", "chromium", "chromium_headless_shell", "minio", "mc"},
             set(manifest["artifacts"]),
+        )
+        self.assertEqual("22.23.2", manifest["artifacts"]["node"]["version"])
+        self.assertEqual(
+            "https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.xz",
+            manifest["artifacts"]["node"]["url"],
+        )
+        self.assertEqual(
+            "d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307",
+            manifest["artifacts"]["node"]["sha256"],
         )
         self.assertEqual("1.4.0", manifest["artifacts"]["bun"]["version"])
         self.assertEqual("1.1.408", manifest["artifacts"]["pyright"]["version"])
@@ -688,6 +697,7 @@ class OverworldProfileImageTests(unittest.TestCase):
         ]
         sentinels = (
             "/etc/self-hosted-ci/repository-profile-image-v1.json",
+            "/usr/local/bin/node",
             "/opt/self-hosted-ci/node_modules/pyright/package.json",
             f"{frontend_modules}/react/package.json",
             f"{frontend_modules}/next/package.json",
@@ -853,6 +863,7 @@ class OverworldProfileImageTests(unittest.TestCase):
             "apt-archive.postgresql.org",
             "storage.googleapis.com",
             "www.postgresql.org",
+            "nodejs.org",
             "github.com",
             "release-assets.githubusercontent.com",
             "registry.npmjs.org",
@@ -877,6 +888,7 @@ class OverworldProfileImageTests(unittest.TestCase):
             "dpkg-query",
             "PLAYWRIGHT_BROWSERS_PATH",
             '"bun", "install", "--frozen-lockfile"',
+            'run("node", "--version") != "v22.23.2"',
             '"uv", "sync", "--frozen"',
             'downloaded["chromium"], Path("/opt/ms-playwright/chromium-1217")',
             'str(pyright_wrapper), str(pyright_target)',

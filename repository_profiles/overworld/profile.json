@@ -19,12 +19,13 @@
     }
   },
   "runner_script": "repository_profiles/overworld/run-overworld-ci.sh",
-  "runner_script_sha256": "7bf9391a512864e1473ab448df2a05d9b4e1f5bdf6e9778abb6827d9f515bcb7",
+  "runner_script_sha256": "033065f4de61a5363d43ad636f12c900066264c3d80c6a84e92c4ee392a56548",
   "phases": ["backend", "frontend", "e2e"],
   "toolchain": {
     "bun": "1.4.0",
     "garm": "0.2.1",
     "minio": "RELEASE.2025-07-23T15-54-02Z",
+    "node": "22.23.2",
     "playwright": "1.59.1",
     "postgresql_backend": "16",
     "postgis_backend": "3.4",

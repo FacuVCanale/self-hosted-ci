@@ -88,6 +88,7 @@ def main() -> int:
         raise SystemExit("image marker shape drifted")
     expected_toolchain = {
         "bun": "1.4.0", "garm": "0.2.1", "minio": "RELEASE.2025-07-23T15-54-02Z",
+        "node": "22.23.2",
         "playwright": "1.59.1", "postgresql_backend": "16", "postgis_backend": "3.4",
         "postgresql_e2e": "17", "postgis_e2e": "3.5", "python": "3.12", "uv": "0.8.22",
         "waterfall_revision": "6df90210830b2ebe36eda6b96d91237914d000e4",
@@ -120,6 +121,7 @@ def main() -> int:
     if inventory.get("repository_profile_digest") != marker["profile_digest"]:
         raise SystemExit("image inventory profile digest drifted")
     checks = {
+        "node": ("node", "--version", "v22.23.2"),
         "bun": ("bun", "--version", "1.4.0"),
         "uv": ("uv", "--version", "0.8.22"),
         "pyright": ("pyright", "--version", "1.1.408"),
