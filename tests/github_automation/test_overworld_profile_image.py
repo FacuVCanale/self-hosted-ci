@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -20,6 +22,76 @@ LIVE_VERIFIER = ROOT / "scripts/host/verify-live-artifact-contract.py"
 
 
 class OverworldProfileImageTests(unittest.TestCase):
+    def test_streaming_tar_scan_can_bound_tarinfo_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive_path = Path(directory) / "many-members.tar"
+            with tarfile.open(archive_path, mode="w") as archive:
+                for index in range(512):
+                    member = tarfile.TarInfo(f"rootfs/member-{index}")
+                    member.size = 1
+                    archive.addfile(member, io.BytesIO(b"x"))
+
+            maximum_cached = 0
+            with tarfile.open(archive_path, mode="r|*") as archive:
+                while True:
+                    member = archive.next()
+                    if member is None:
+                        break
+                    maximum_cached = max(maximum_cached, len(archive.members))
+                    archive.members.clear()
+
+        self.assertLessEqual(maximum_cached, 1)
+
+    def test_dependency_tree_ownership_normalization_includes_root_without_following_links(self) -> None:
+        spec = importlib.util.spec_from_file_location("overworld_image_provision_ownership", PROFILE / "provision.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "snapshot"
+            child = root / "directory"
+            child.mkdir(parents=True)
+            (child / "file.js").write_text("payload", encoding="utf-8")
+            outside = base / "outside"
+            outside.mkdir()
+            (outside / "must-not-be-traversed").write_text("external", encoding="utf-8")
+            (root / "link").symlink_to(outside, target_is_directory=True)
+            with mock.patch.object(module.os, "chown") as chown:
+                module.normalize_tree_ownership(root)
+
+        calls = {(Path(call.args[0]), *call.args[1:], call.kwargs["follow_symlinks"]) for call in chown.call_args_list}
+        self.assertEqual(
+            {
+                (root, 0, 0, False),
+                (child, 0, 0, False),
+                (child / "file.js", 0, 0, False),
+                (root / "link", 0, 0, False),
+            },
+            calls,
+        )
+        self.assertNotIn(outside / "must-not-be-traversed", {call[0] for call in calls})
+
+    def test_dependency_tree_ownership_normalization_fails_on_walk_error(self) -> None:
+        spec = importlib.util.spec_from_file_location("overworld_image_provision_ownership_error", PROFILE / "provision.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def fail_walk(_root: Path, *, followlinks: bool, onerror: object) -> object:
+                self.assertFalse(followlinks)
+                assert callable(onerror)
+                onerror(PermissionError("scandir denied"))
+                return iter(())
+
+            with mock.patch.object(module.os, "chown"), mock.patch.object(module.os, "walk", side_effect=fail_walk):
+                with self.assertRaisesRegex(PermissionError, "scandir denied"):
+                    module.normalize_tree_ownership(root)
+
     def test_regenerated_modules_cleanup_accepts_only_exact_backend_tree(self) -> None:
         spec = importlib.util.spec_from_file_location("overworld_image_provision", PROFILE / "provision.py")
         assert spec is not None and spec.loader is not None
@@ -248,6 +320,8 @@ class OverworldProfileImageTests(unittest.TestCase):
         ):
             self.assertIn(token, probe)
         self.assertEqual(2, probe.count('[ "${mount%% *}" != / ]'))
+        self.assertNotIn("2>/dev/null", probe)
+        self.assertNotIn("| sed", probe)
         self.assertIn("sentinel mount target is not rootfs", probe)
         self.assertIn("sentinel ancestor mount target is not rootfs", probe)
         self.assertNotRegex(probe, r"\b(?:cat|head|tail)\b")
@@ -263,8 +337,11 @@ class OverworldProfileImageTests(unittest.TestCase):
         initialized_pull = 'incus file pull "${published_verifier}${sentinel}" /dev/null --project "${PROJECT}" >/dev/null 2>&1'
         verifier_start = 'incus start "${published_verifier}" --project "${PROJECT}"'
         running_check = 'inspect_running_sentinels "${published_verifier}" published-verifier-post-start "${expected_sentinel_digests[@]}"'
+        export = 'incus image export "${published_fingerprint}" "${published_export_dir}/image" --project "${PROJECT}"'
+        tar_check = 'python3 - "${published_export_dir}" "${workdir}/publish-sentinels.sha256" "${PUBLISH_SENTINELS[@]}"'
+        device_check = 'inspect_running_device_contract "${published_verifier}"'
 
-        for check in (post_cleanup, digest_inventory, stopped_pull, initialized_pull, running_check):
+        for check in (post_cleanup, digest_inventory, stopped_pull, initialized_pull, export, tar_check, running_check, device_check):
             self.assertEqual(1, source.count(check))
         stopped_probe = source[source.index(stopped_pull):source.index(publish)]
         self.assertIn('|| die "stopped-builder rootfs is missing or cannot expose sentinel: ${sentinel}"', stopped_probe)
@@ -281,13 +358,50 @@ class OverworldProfileImageTests(unittest.TestCase):
             source.index(stopped),
             source.index(stopped_pull),
             publish_position,
+            source.index(export, publish_position),
+            source.index(tar_check, publish_position),
             source.index(builder_delete, publish_position),
             source.index(verifier_init),
             source.index(initialized_pull),
             source.index(verifier_start),
             source.index(running_check),
+            source.index(device_check),
         )
         self.assertTrue(all(left < right for left, right in zip(positions, positions[1:])))
+        tar_probe = source[source.index(tar_check):source.index(builder_delete, publish_position)]
+        for token in (
+            'tarfile.open(archives[0], mode="r|*")',
+            "member = archive.next()",
+            "archive.members.clear()",
+            'wanted = {f"rootfs/{sentinel.removeprefix(\'/\')}": sentinel for sentinel in sentinels}',
+            "if member.name in seen",
+            "member.isfile()",
+            "member.uid != 0",
+            "member.gid != 0",
+            "archive.extractfile(member)",
+            "with stream:",
+            "digest.update(chunk)",
+            "published image archive sentinel digest changed",
+            "missing = set(wanted) - seen",
+        ):
+            self.assertIn(token, tar_probe)
+        self.assertIn("if len(archives) != 1", tar_probe)
+        self.assertNotIn("members = {}", tar_probe)
+        self.assertNotIn("for member in archive", tar_probe)
+        self.assertNotRegex(tar_probe, r"\b(?:cat|head|tail)\b")
+
+        device_probe = source.split("inspect_running_device_contract(){", 1)[1].split("\n}\nusage(){", 1)[0]
+        for token in (
+            "[ -c /dev/null ]",
+            'mode=%a major=%t minor=%T',
+            'uid=0 gid=0 mode=666 major=1 minor=3',
+            'findmnt -rn -T /dev -o TARGET,SOURCE,FSTYPE',
+            '[ "${mount%% *}" = /dev ]',
+            "printf probe > /dev/null",
+        ):
+            self.assertIn(token, device_probe)
+        self.assertNotIn("2>/dev/null", device_probe)
+        self.assertNotIn("| sed", device_probe)
 
     def test_build_egress_is_exact_and_not_a_general_wildcard(self) -> None:
         policy = (PROFILE / "squid-build.conf").read_text(encoding="utf-8")
@@ -356,6 +470,7 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn('detach_regular_files(installed_next)', source)
         self.assertIn('shutil.copytree(target_modules, sealed_frontend, symlinks=False)', source)
         self.assertIn('detach_regular_files(sealed_frontend)', source)
+        self.assertIn('normalize_tree_ownership(sealed_frontend)', source)
         self.assertIn('os.replace(temporary, path)', source)
         self.assertNotIn('shutil.copytree(official_browser_logs, installed_browser_logs)', source)
         self.assertIn('run("cp", "-aL", f"{source_modules}/.", str(target_modules))', source)
