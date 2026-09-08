@@ -179,6 +179,28 @@ containers y no registra runners. Si falla, conserva diagnóstico sanitizado en
 `C:\ProgramData\self-hosted-ci\diagnostics\incus-boundary`; el reintento es
 idempotente y nunca reinicializa una base Incus existente.
 
+Ubuntu 24.04 fija Incus `6.0.0-1ubuntu0.3`, afectado por el bug upstream #815:
+las exclusiones tar de `/dev` no están ancladas y también eliminan directorios
+anidados llamados `dev` al inicializar una imagen. Antes de construir imágenes
+de repositorio, instalar el shim exacto y versionado:
+
+```bash
+scripts/host/install-incus-archive-exclude-compat.sh --plan
+scripts/host/install-incus-archive-exclude-compat.sh \
+  --apply \
+  --acknowledge-incus-service-mutation
+```
+
+Apply exige el distro, paquete Incus, servicios inertes y runtime vacío
+exactos; instala `TAR_OPTIONS=--anchored` sólo en `incus.service`, reinicia el
+daemon y ejecuta un canario real `image import` + `incus init`. El canario
+demuestra que `rootfs/opt/.../dev/sentinel` sobrevive y que `rootfs/dev/*`
+continúa excluido. El cleanup debe volver a cero instancias y eliminar la imagen
+reservada. Como última operación, apply escribe una attestación durable
+root-only; el builder rechaza el arranque si falta, si el drop-in no coincide,
+si no está cargado o si Incus deja de ser la versión objetivo. Toda la
+transacción mantiene el lock compartido y exige cero scale sets e instancias.
+
 ### Contrato y evidencia
 
 El provisionador es plan-only por defecto:

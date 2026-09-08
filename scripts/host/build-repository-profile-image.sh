@@ -213,6 +213,42 @@ inspect_running_device_contract(){
     printf probe > /dev/null || { printf "published-verifier /dev/null is not writable\n" >&2; exit 1; }
   '
 }
+assert_incus_archive_exclude_contract(){
+  local dropin='/etc/systemd/system/incus.service.d/ci-jit-archive-excludes.conf'
+  local marker='/etc/self-hosted-ci/incus-archive-exclude-compat.json'
+  local expected_marker='{"dropin_sha256":"022d29bc0b515c7e325fb95d62c5b3824d2bc1fa6504b9385ad68df0bcc6b8a8","incus_package":"6.0.0-1ubuntu0.3","nested_dev_canary_passed":true,"root_dev_exclusion_preserved":true,"schema_version":1}'
+  local package_version environment dropin_content marker_content
+  if package_version="$(dpkg-query -W -f='${Version}' incus)"; then
+    :
+  else
+    die 'Incus package version cannot be established'
+  fi
+  [[ "${package_version}" == '6.0.0-1ubuntu0.3' ]] \
+    || die 'Incus package is outside the anchored archive compatibility contract'
+  [[ -f "${dropin}" && ! -L "${dropin}" ]] \
+    || die 'Incus anchored archive drop-in is absent or unsafe'
+  [[ "$(stat -c '%u:%g:%a:%h' -- "${dropin}")" == '0:0:644:1' ]] \
+    || die 'Incus anchored archive drop-in metadata drifted'
+  dropin_content="$(<"${dropin}")" \
+    || die 'Incus anchored archive drop-in content cannot be read'
+  [[ "${dropin_content}" == $'[Service]\nEnvironment=TAR_OPTIONS=--anchored' ]] \
+    || die 'Incus anchored archive drop-in content drifted'
+  [[ -f "${marker}" && ! -L "${marker}" ]] \
+    || die 'Incus anchored archive compatibility marker is absent or unsafe'
+  [[ "$(stat -c '%u:%g:%a:%h' -- "${marker}")" == '0:0:600:1' ]] \
+    || die 'Incus anchored archive compatibility marker metadata drifted'
+  marker_content="$(<"${marker}")" \
+    || die 'Incus anchored archive compatibility marker cannot be read'
+  [[ "${marker_content}" == "${expected_marker}" ]] \
+    || die 'Incus anchored archive compatibility marker content drifted'
+  systemctl show incus.service --property=DropInPaths --value \
+    | tr ' ' '\n' | grep -Fxq -- "${dropin}" \
+    || die 'Incus anchored archive drop-in is not loaded'
+  environment="$(systemctl show incus.service --property=Environment --value)" \
+    || die 'Incus service environment cannot be established'
+  printf '%s\n' "${environment}" | tr ' ' '\n' | grep -Fxq 'TAR_OPTIONS=--anchored' \
+    || die 'Incus service does not expose anchored archive extraction'
+}
 assert_host_dev_null_contract(){
   local metadata
   [[ -c /dev/null && ! -L /dev/null ]]||die 'host /dev/null is not a safe character device'
@@ -283,6 +319,7 @@ done
 [[ "$(sha256sum "${profile_dir}/manifest.json"|cut -d' ' -f1)" == "${manifest_sha}" ]]||die 'manifest digest drifted'
 [[ -f "${TRANSACTION_LIB}" && ! -L "${TRANSACTION_LIB}" ]]||die 'GARM transaction library is absent'
 command -v incus >/dev/null; command -v squid >/dev/null; command -v python3 >/dev/null; command -v git >/dev/null
+assert_incus_archive_exclude_contract
 
 # Reuse the production transaction lock and its exact zero-scale-set checks.
 source "${TRANSACTION_LIB}"
