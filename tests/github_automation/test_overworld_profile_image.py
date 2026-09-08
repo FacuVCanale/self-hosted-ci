@@ -343,6 +343,43 @@ class OverworldProfileImageTests(unittest.TestCase):
             self.assertEqual(0, staged.returncode, staged.stderr)
             self.assertEqual("bare-sibling-ok", staged.stdout.strip())
 
+    def test_bun_direct_bypasses_node_shebang_for_runtime_launcher(self) -> None:
+        bun = shutil.which("bun")
+        if bun is None:
+            self.skipTest("bun is not installed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frontend = root / "frontend"
+            launcher = frontend / "node_modules/tool/bin/tool.js"
+            launcher.parent.mkdir(parents=True)
+            (frontend / "node_modules/.bin").mkdir()
+            launcher.write_text(
+                '#!/usr/bin/env node\nconsole.log("bun-direct-ok")\n',
+                encoding="utf-8",
+            )
+            launcher.chmod(0o755)
+            (frontend / "node_modules/.bin/tool").symlink_to("../tool/bin/tool.js")
+            no_node_path = root / "no-node-path"
+            no_node_path.mkdir()
+            shebang = subprocess.run(
+                [str(frontend / "node_modules/.bin/tool")],
+                cwd=frontend,
+                env={**os.environ, "PATH": str(no_node_path)},
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(0, shebang.returncode)
+            direct = subprocess.run(
+                [bun, str(frontend / "node_modules/.bin/tool")],
+                cwd=frontend,
+                env={**os.environ, "PATH": str(no_node_path)},
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(0, direct.returncode, direct.stderr)
+            self.assertEqual("bun-direct-ok", direct.stdout.strip())
+
     def test_dependency_tree_copy_rejects_unsafe_symlinks(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "overworld_image_provision_unsafe_dependency_links",
@@ -942,7 +979,7 @@ class OverworldProfileImageTests(unittest.TestCase):
             '"ALL_PROXY=http://127.0.0.1:9"',
             '"NO_PROXY="',
             '"bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts"',
-            '"bun", "run", "lint", "--", "--version"',
+            '"bun", str(modules / ".bin/eslint"), "--version"',
             'shutil.rmtree(smoke_root)',
             'before = tree_digest(modules)',
             'if tree_digest(modules) != before:',
@@ -952,7 +989,8 @@ class OverworldProfileImageTests(unittest.TestCase):
         hardening = source.index('for path in dependencies.rglob("*")')
         copying = source.index('shutil.copytree(overworld, smoke_root')
         executing = source.index('"bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts"')
-        frontend_lint = source.index('"bun", "run", "lint", "--", "--version"')
+        self.assertNotIn('"bun", "run", "lint"', source)
+        frontend_lint = source.index('"bun", str(modules / ".bin/eslint"), "--version"')
         frontend_next = source.index(
             'require("./node_modules/next/dist/server/node-environment-extensions/console-file.js")'
         )
@@ -992,7 +1030,8 @@ class OverworldProfileImageTests(unittest.TestCase):
             and ast.unparse(statement.test) == "tree_digest(modules) != before"
         )
         frontend_body = "\n".join(ast.unparse(node) for node in frontend_branch.body)
-        self.assertIn("bun', 'run', 'lint', '--', '--version", frontend_body)
+        self.assertIn("bun', str(modules / '.bin/eslint'), '--version", frontend_body)
+        self.assertNotIn("bun', 'run', 'lint", frontend_body)
         self.assertIn("node-environment-extensions/console-file.js", frontend_body)
         self.assertLess(smoke_loop.body.index(frontend_branch), smoke_loop.body.index(digest_guard))
         self.assertFalse(
