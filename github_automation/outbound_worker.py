@@ -459,6 +459,26 @@ class PilotWorker:
         if receipt != {"allocation_id": allocation_id, "state": "absent"}:
             raise WorkerError("pilot allocation recovery proof is not exact")
 
+    def _package(
+        self, request: Mapping[str, Any], progress: Mapping[str, Any]
+    ) -> JitPilotPackageV1:
+        package_value = request["pilot_package"]
+        now = self.source.clock()
+        if progress.get("run_id") is not None:
+            # A durable dispatch receipt is the no-return boundary. After it,
+            # the package remains the authenticated identity of the active
+            # assignment even when its admission TTL has elapsed.
+            issued_at = package_value.get("issued_at")
+            if not isinstance(issued_at, str):
+                raise JitPilotError("issued_at must be canonical UTC")
+            try:
+                now = datetime.fromisoformat(
+                    issued_at.removesuffix("Z") + "+00:00"
+                )
+            except ValueError as exc:
+                raise JitPilotError("issued_at must be canonical UTC") from exc
+        return JitPilotPackageV1.from_mapping(package_value, now=now)
+
     @staticmethod
     def _recovery_allocation_id(request: Mapping[str, Any]) -> str:
         """Authenticate the static allocation binding without accepting its expiry."""
@@ -560,9 +580,7 @@ class PilotWorker:
         self.state_request = request
         reservation = request["reservation"]
         try:
-            package = JitPilotPackageV1.from_mapping(
-                request["pilot_package"], now=self.source.clock()
-            )
+            package = self._package(request, progress)
         except JitPilotError as exc:
             return self._terminal_reconcile(
                 key, request, progress, type(exc).__name__
