@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -130,6 +131,39 @@ class OutboundWorkerRuntimeInstallerTests(unittest.TestCase):
             if os.geteuid()
             else "both explicit acknowledgements",
             apply.stderr,
+        )
+
+    def test_apply_writer_uses_common_nonblocking_transaction_lock(self) -> None:
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = root / "run/self-hosted-ci-garm-jit.lock"
+            lock.parent.mkdir(parents=True)
+            descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaisesRegex(
+                    installer.InstallError, "another GARM JIT transaction is active"
+                ):
+                    with installer._transaction_lock(root):
+                        self.fail("competing writer unexpectedly acquired the lock")
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
+
+    def test_verify_does_not_take_writer_transaction_lock(self) -> None:
+        source = INSTALLER.read_text(encoding="utf-8")
+        verify_branch = source.split("if args.verify:", 1)[1].split(
+            'plan = {', 1
+        )[0]
+        self.assertIn("verify_runtime()", verify_branch)
+        self.assertNotIn("_transaction_lock", verify_branch)
+        install_wrapper = source.split("def install_runtime(", 1)[1].split(
+            "\n\ndef main", 1
+        )[0]
+        self.assertIn("with _transaction_lock(prefix):", install_wrapper)
+        self.assertIn(
+            'PurePosixPath("/run/self-hosted-ci-garm-jit.lock")', source
         )
 
     def test_exact_config_rejects_unknown_fields_and_unsafe_paths(self) -> None:

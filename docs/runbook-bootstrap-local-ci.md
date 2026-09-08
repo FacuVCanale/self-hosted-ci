@@ -461,6 +461,7 @@ sudo /usr/local/lib/self-hosted-ci/configure-garm-jit.sh --apply \
   --default-branch <default-branch> \
   --image-alias <local-pinned-alias> \
   --image-fingerprint <64-hex-sha256> \
+  --expected-previous-image-fingerprint <current-live-64-hex-sha256> \
   --allocation-authority-public-key /etc/self-hosted-ci/allocation-authority-public-key.pem \
   --live-job-verifier /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py \
   --acknowledge-root-secret-installation \
@@ -488,6 +489,23 @@ declarado, pero por sí solo no prueba la selección efectiva en GitHub.
 
 El bootstrap no amplía esa selección, no
 crea runners persistentes y no crea ningún scale set durante esta fase.
+La misma transacción rota el fingerprint de imagen en los contratos canónicos
+del outbound worker, broker y health. El valor
+`--expected-previous-image-fingerprint` funciona como compare-and-swap contra
+el fingerprint live del outbound worker: bloquea un cambio concurrente, pero
+acepta una reaplicación idempotente si el outbound ya apunta al fingerprint
+nuevo. Antes de cualquier inventario toma el lock transaccional común; exige
+GARM, broker y outbound worker disabled/inactivos, ambos sentinels de activación
+y red ausentes, e inventario runtime cero. El instalador canónico
+`install-outbound-worker-runtime.py --verify` valida el outbound antes y después
+de los reemplazos atómicos. Cualquier error restaura los tres contratos; una
+divergencia previa entre broker y health se reconcilia desde los argumentos y
+el binding live del outbound, sin impedir esa recuperación.
+Los snapshots de `garm.db` y `blob-garm.db` usan la API de backup de SQLite para
+incluir páginas comprometidas que todavía estén en WAL. El rollback reemplaza y
+sincroniza cada archivo y su directorio, y verifica contenido y metadata antes
+de terminar. Todo `--apply` del instalador outbound toma el mismo lock
+transaccional; `--verify` permanece read-only y no intenta tomarlo.
 Para este modo, la App `garm-runner-manager` usa permisos de organización
 `Self-hosted runners: Read and write` más `Metadata: Read-only`; el contrato
 personal conserva `Administration: Read and write`, `Actions: Read-only` y

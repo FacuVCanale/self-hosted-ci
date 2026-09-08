@@ -7,11 +7,13 @@ while [[ $# -gt 0 ]]; do case "$1" in --plan) mode=plan;shift;; --apply) mode=ap
 if [[ "$mode" == plan ]]; then printf '%s\n' '{"mode":"plan","external_calls":"not_performed","host_changes":false,"sequence":["restore policy and GARM","stop broker admission","recover disable-drain-delete allocations","prove all target scale-set inventories and Incus empty","stop GARM and policy"]}'; exit 0; fi
 [[ "$ack_external" == true && "$ack_deactivation" == true ]]||die "--apply requires both explicit acknowledgements"
 [[ "$incus_project" == ci-jit && "$garm_cli_home" == "$GARM_RUNTIME_HOME" ]]||die "exact Incus project and garm-cli home are required"
-require_exact_distro; acquire_transaction_lock; require_command_contracts; require_real_policy_units; require_base_health; require_health_configuration
+require_exact_distro; acquire_transaction_lock
+systemctl disable --now "$OUTBOUND_WORKER_SERVICE" "$BROKER_SERVICE"
+for unit in "$OUTBOUND_WORKER_SERVICE" "$BROKER_SERVICE"; do systemctl is-active --quiet "$unit"&&die "$unit admission remains active"; done
+require_deactivation_command_contracts; require_real_policy_units; require_base_health
 require_root_regular_file "$ACTIVATION_SENTINEL" 0600
 systemctl start "$POLICY_SERVICE" "$PROXY_SERVICE"; [[ -e "$NETWORK_SENTINEL" ]]||create_network_sentinel
 systemctl start "$GARM_SERVICE"; systemctl is-active --quiet "$GARM_SERVICE"||die "GARM recovery unavailable"; wait_for_garm_cli||die "GARM recovery API did not become ready"
-systemctl stop "$OUTBOUND_WORKER_SERVICE" "$BROKER_SERVICE"; systemctl is-active --quiet "$OUTBOUND_WORKER_SERVICE"&&die "outbound worker remains active"; systemctl is-active --quiet "$BROKER_SERVICE"&&die "broker admission remains active"
 GARM_SESSION_FAILURE_QUARANTINE=true; export GARM_SESSION_FAILURE_QUARANTINE
 recover_allocations||die "allocation recovery failed; GARM and policy remain active"
 zero_runtime_state||die "zero scale-set/Incus proof failed; GARM and policy remain active"

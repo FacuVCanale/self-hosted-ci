@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -79,13 +81,91 @@ class GarmConfigurationTests(unittest.TestCase):
             configurator,
         )
         self.assertIn(
-            'cp -a "${transaction_dir}/blob-garm.db" "${GARM_BLOB_DATABASE}"',
+            'restore_or_remove "${had_blob_database}" "${transaction_dir}/blob-garm.db" "${GARM_BLOB_DATABASE}"',
             configurator,
         )
         self.assertIn(
             '"${GARM_BLOB_DATABASE}-wal" "${GARM_BLOB_DATABASE}-shm"',
             configurator,
         )
+
+    @staticmethod
+    def _embedded_two_path_python(function_name: str) -> str:
+        source = INSTALLER.read_text(encoding="utf-8")
+        marker = f'{function_name}() {{\n  python3 - "$1" "$2" <<\'PY\'\n'
+        return source.split(marker, 1)[1].split("\nPY\n}", 1)[0]
+
+    def test_both_sqlite_snapshots_include_committed_wal_pages(self) -> None:
+        body = self._embedded_two_path_python("snapshot_sqlite_database")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for database_name in ("garm.db", "blob-garm.db"):
+                with self.subTest(database=database_name):
+                    source = root / database_name
+                    snapshot = root / f"{database_name}.snapshot"
+                    connection = sqlite3.connect(source)
+                    try:
+                        self.assertEqual(
+                            "wal",
+                            connection.execute("PRAGMA journal_mode=WAL").fetchone()[0],
+                        )
+                        connection.execute("PRAGMA wal_autocheckpoint=0")
+                        connection.execute("CREATE TABLE evidence(value TEXT NOT NULL)")
+                        connection.commit()
+                        connection.execute(
+                            "INSERT INTO evidence VALUES ('committed-in-wal')"
+                        )
+                        connection.commit()
+                        self.assertTrue(Path(f"{source}-wal").exists())
+                        result = subprocess.run(
+                            [sys.executable, "-c", body, str(source), str(snapshot)],
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertEqual(0, result.returncode, result.stderr)
+                    finally:
+                        connection.close()
+                    with sqlite3.connect(snapshot) as restored:
+                        self.assertEqual(
+                            [("committed-in-wal",)],
+                            restored.execute("SELECT value FROM evidence").fetchall(),
+                        )
+
+    def test_durable_copy_atomically_restores_content_and_metadata(self) -> None:
+        body = self._embedded_two_path_python("copy_file_durably")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "snapshot"
+            destination = root / "live"
+            source.write_bytes(b"known-good\n")
+            source.chmod(0o640)
+            destination.write_bytes(b"drifted\n")
+            result = subprocess.run(
+                [sys.executable, "-c", body, str(source), str(destination)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(source.read_bytes(), destination.read_bytes())
+            self.assertEqual(0o640, os.stat(destination).st_mode & 0o777)
+            self.assertEqual(os.stat(source).st_uid, os.stat(destination).st_uid)
+            self.assertFalse(destination.is_symlink())
+
+    def test_durable_copy_syncs_after_content_and_metadata_changes(self) -> None:
+        body = self._embedded_two_path_python("copy_file_durably")
+        final_write = body.index("outgoing.write(block)")
+        chmod = body.index("os.fchmod(outgoing.fileno()")
+        chown = body.index("os.fchown(outgoing.fileno()")
+        file_sync = body.index("os.fsync(outgoing.fileno())")
+        replace = body.index("os.replace(temporary, destination)")
+        directory_sync = body.index("os.fsync(directory_fd)")
+        self.assertLess(final_write, file_sync)
+        self.assertLess(chmod, file_sync)
+        self.assertLess(chown, file_sync)
+        self.assertLess(file_sync, replace)
+        self.assertLess(replace, directory_sync)
 
     def test_admin_username_matches_upstream_alphanumeric_contract(self):
         configurator = (ROOT / "scripts/host/configure-garm-jit.sh").read_text()
@@ -100,9 +180,105 @@ class GarmConfigurationTests(unittest.TestCase):
     def test_canary_inputs_are_written_root_only(self):
         configurator = (ROOT / "scripts/host/configure-garm-jit.sh").read_text()
         self.assertIn(
-            "for path,value,mode in ((broker_path,broker,0o600),(health_path,state,0o600)):",
+            "for path,value,mode in ((outbound_path,outbound,0o600),(broker_path,broker,0o600),(health_path,state,0o600)):",
             configurator,
         )
+
+    def test_runtime_image_rotation_is_locked_cas_guarded_and_rollback_capable(self):
+        source = INSTALLER.read_text(encoding="utf-8")
+        lock = source.index("acquire_transaction_lock")
+        service_inventory = source.index('systemctl is-enabled "${unit}"')
+        runtime_inventory = source.index("zero_runtime_state")
+        first_mutation = source.index("install -d -o root -g garm-manager")
+        self.assertLess(lock, service_inventory)
+        self.assertLess(lock, runtime_inventory)
+        self.assertLess(runtime_inventory, first_mutation)
+        for token in (
+            'source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/garm-jit-transaction-lib.sh"',
+            "--expected-previous-image-fingerprint",
+            'observed not in {previous,new}',
+            '"${OUTBOUND_RUNTIME_INSTALLER}" --verify',
+            'value.get("repository")!=repository',
+            'value.get("default_branch")!=branch',
+            'value.get("authority_kind")!=authority',
+            'value.get("runner_group")!=expected_group',
+            'copy_file_durably "${OUTBOUND_CONFIG}" "${transaction_dir}/outbound-worker.json"',
+            'restore_or_remove "${had_outbound_config}" "${transaction_dir}/outbound-worker.json" "${OUTBOUND_CONFIG}"',
+            'outbound["image_fingerprint"]=fingerprint',
+            'outbound.get("image_fingerprint") not in {previous_fingerprint,fingerprint}',
+            "require_health_configuration",
+            '"runtime_image_contract_consistent":true',
+        ):
+            self.assertIn(token, source)
+        self.assertGreaterEqual(
+            source.count('"${OUTBOUND_RUNTIME_INSTALLER}" --verify'), 2
+        )
+        write = source.index(
+            "for path,value,mode in ((outbound_path,outbound,0o600),(broker_path,broker,0o600),(health_path,state,0o600)):"
+        )
+        verify_after = source.index(
+            '"${OUTBOUND_RUNTIME_INSTALLER}" --verify', write
+        )
+        cross_check = source.index("require_health_configuration", verify_after)
+        success = source.index("transaction_succeeded=true")
+        self.assertLess(write, verify_after)
+        self.assertLess(verify_after, cross_check)
+        self.assertLess(cross_check, success)
+        final_cas = source.index(
+            'outbound.get("image_fingerprint") not in {previous_fingerprint,fingerprint}'
+        )
+        final_write = source.index('outbound["image_fingerprint"]=fingerprint', final_cas)
+        self.assertLess(source.index("acquire_transaction_lock"), final_cas)
+        self.assertLess(final_cas, final_write)
+
+    def test_outbound_image_compare_and_swap_accepts_new_idempotently(self) -> None:
+        source = INSTALLER.read_text(encoding="utf-8")
+        marker = (
+            'python3 - "${OUTBOUND_CONFIG}" "${repository}" "${repository_id}" '
+            '"${default_branch}" "${authority_kind}" "${runner_group}" '
+            '"${expected_previous_image_fingerprint}" "${image_fingerprint}" <<\'PY\'\n'
+        )
+        body = source.split(marker, 1)[1].split("\nPY\n", 1)[0]
+        previous = "a" * 64
+        new = "b" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "outbound.json"
+            value = {
+                "repository": "owner/repo",
+                "repository_id": 42,
+                "default_branch": "main",
+                "authority_kind": "organization-runner-group",
+                "runner_group": "ci",
+                "image_fingerprint": previous,
+            }
+            config.write_text(json.dumps(value), encoding="utf-8")
+            args = [
+                sys.executable,
+                "-c",
+                body,
+                str(config),
+                "owner/repo",
+                "42",
+                "main",
+                "organization-runner-group",
+                "ci",
+                previous,
+                new,
+            ]
+            self.assertEqual(
+                0, subprocess.run(args, check=False, capture_output=True).returncode
+            )
+            value["image_fingerprint"] = new
+            config.write_text(json.dumps(value), encoding="utf-8")
+            args[-2] = "c" * 64
+            self.assertEqual(
+                0, subprocess.run(args, check=False, capture_output=True).returncode
+            )
+            value["image_fingerprint"] = "d" * 64
+            config.write_text(json.dumps(value), encoding="utf-8")
+            self.assertNotEqual(
+                0, subprocess.run(args, check=False, capture_output=True).returncode
+            )
 
     def test_plan_is_machine_readable_and_inert(self) -> None:
         result = subprocess.run(
@@ -143,13 +319,14 @@ class GarmConfigurationTests(unittest.TestCase):
             "--private-key-path",
             "--random-webhook-secret",
             "derived_entity_id",
-            'cp -a "${transaction_dir}/garm.db"',
+            'snapshot_sqlite_database "${GARM_DATABASE}" "${transaction_dir}/garm.db"',
+            'snapshot_sqlite_database "${GARM_BLOB_DATABASE}" "${transaction_dir}/blob-garm.db"',
         ):
             self.assertIn(token, source)
         self.assertNotIn('--jwt-secret "', source)
         self.assertNotIn('--database-passphrase "', source)
-        self.assertIn('cp -a "${transaction_dir}/config.toml"', source)
-        self.assertIn('cp -a "${transaction_dir}/health-state.json"', source)
+        self.assertIn('restore_or_remove "${had_config}" "${transaction_dir}/config.toml"', source)
+        self.assertIn('restore_or_remove "${had_health}" "${transaction_dir}/health-state.json"', source)
         self.assertIn('"${SESSION_HELPER}" run -- --format json', source)
         self.assertNotIn("/usr/local/bin/garm-cli --password", source)
         self.assertNotIn("--password-file", source)

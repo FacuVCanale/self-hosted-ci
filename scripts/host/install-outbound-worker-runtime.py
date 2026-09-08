@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 import re
@@ -24,6 +26,7 @@ PACKAGE_TARGET = PurePosixPath("/usr/local/lib/self-hosted-ci")
 SECRET_ROOT = PurePosixPath("/etc/self-hosted-ci/secrets")
 STATE_ROOT = PurePosixPath("/var/lib/self-hosted-ci/outbound-worker")
 BROKER_TARGET = "/usr/local/lib/self-hosted-ci/garm-allocation-broker.py"
+TRANSACTION_LOCK_TARGET = PurePosixPath("/run/self-hosted-ci-garm-jit.lock")
 REQUIRED_FIELDS = {
     "schema_version",
     "mode",
@@ -238,6 +241,22 @@ def _atomic_install(
         temporary.unlink(missing_ok=True)
 
 
+@contextmanager
+def _transaction_lock(prefix: Path):
+    lock_path = _physical(prefix, TRANSACTION_LOCK_TARGET)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise InstallError("another GARM JIT transaction is active") from exc
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def _isolated_import_smoke(prefix: Path) -> None:
     package_root = _physical(prefix, PACKAGE_TARGET)
     code = """
@@ -319,7 +338,7 @@ def verify_runtime(
     }
 
 
-def install_runtime(
+def _install_runtime_locked(
     config_source: Path,
     github_key_source: Path,
     allocation_key_source: Path,
@@ -396,6 +415,24 @@ def install_runtime(
     _secure_file(ready_target, expected_uid=expected_uid)
     verify_runtime(prefix=prefix, expected_uid=expected_uid, require_ready=True)
     return {"status": "installed", **sentinel, "runtime_ready": True}
+
+
+def install_runtime(
+    config_source: Path,
+    github_key_source: Path,
+    allocation_key_source: Path,
+    *,
+    prefix: Path = Path("/"),
+    expected_uid: int = 0,
+) -> dict[str, Any]:
+    with _transaction_lock(prefix):
+        return _install_runtime_locked(
+            config_source,
+            github_key_source,
+            allocation_key_source,
+            prefix=prefix,
+            expected_uid=expected_uid,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
