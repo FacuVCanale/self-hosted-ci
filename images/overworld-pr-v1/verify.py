@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -24,6 +25,44 @@ def verify_runner_executable(path: Path) -> None:
         check=False,
     ).returncode:
         raise SystemExit("Waterfall interpreter is not executable by runner")
+
+
+def verify_frontend_eslint_link(frontend_modules: Path) -> None:
+    if frontend_modules.is_symlink() or not frontend_modules.is_dir():
+        raise SystemExit("frontend dependency root is unsafe")
+    canonical_root = frontend_modules.resolve(strict=True)
+    link = frontend_modules / ".bin/eslint"
+    if not link.is_symlink():
+        raise SystemExit("frontend eslint launcher is not a symlink")
+    raw_target = Path(os.readlink(link))
+    if raw_target.is_absolute():
+        raise SystemExit("frontend eslint launcher is absolute")
+    try:
+        resolved_target = (link.parent / raw_target).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise SystemExit("frontend eslint launcher is broken") from exc
+    expected_target = canonical_root / "eslint/bin/eslint.js"
+    if (
+        not resolved_target.is_relative_to(canonical_root)
+        or resolved_target != expected_target
+        or not resolved_target.is_file()
+    ):
+        raise SystemExit("frontend eslint launcher target is not exact and confined")
+    package = canonical_root / "eslint/package.json"
+    if (
+        package.is_symlink()
+        or not package.is_file()
+        or package.resolve(strict=True).parent != canonical_root / "eslint"
+    ):
+        raise SystemExit("frontend eslint package metadata is absent or unsafe")
+    try:
+        package_metadata = json.loads(package.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit("frontend eslint package metadata is invalid") from exc
+    if package_metadata.get("name") != "eslint" or not isinstance(
+        package_metadata.get("version"), str
+    ):
+        raise SystemExit("frontend eslint package identity drifted")
 
 
 def main() -> int:
@@ -106,6 +145,7 @@ def main() -> int:
             raise SystemExit(f"offline dependency is absent: {required}")
     waterfall_python = dependencies / "waterfall/.venv/bin/python"
     verify_runner_executable(waterfall_python)
+    verify_frontend_eslint_link(dependencies / "frontend-node-modules")
     if (dependencies / "waterfall/.self-hosted-ci-commit").read_text(encoding="ascii").strip() != expected_toolchain["waterfall_revision"]:
         raise SystemExit("Waterfall offline source revision drifted")
     if any(dependencies.rglob(".git")):
