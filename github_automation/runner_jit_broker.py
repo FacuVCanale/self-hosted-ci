@@ -27,6 +27,8 @@ from .runner_jit import RunnerJitError, SqliteAllocationLedger
 RUNNER_INSTALL_TEMPLATE = Path(
     "/usr/local/share/self-hosted-ci/runner-install-offline.sh.tmpl"
 )
+RUNNER_CLAIM_ASSERT_ATTEMPTS = 3
+RUNNER_CLAIM_ASSERT_RETRY_SECONDS = 1
 
 
 @dataclass(frozen=True)
@@ -134,6 +136,27 @@ class AllocationBroker:
         self.pinned_fingerprint = pinned_fingerprint
         self.live_job_verifier = live_job_verifier
 
+    def _assert_runner_claim(
+        self,
+        scale_set_id: str,
+        scale_set_name: str,
+        runner_name: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        """Bound eventual GARM reads before any durable job transition."""
+
+        for attempt in range(RUNNER_CLAIM_ASSERT_ATTEMPTS):
+            try:
+                self.driver.assert_runner_claim(
+                    scale_set_id, scale_set_name, runner_name, payload
+                )
+                return
+            except RunnerJitError:
+                if attempt + 1 == RUNNER_CLAIM_ASSERT_ATTEMPTS:
+                    raise
+                time.sleep(RUNNER_CLAIM_ASSERT_RETRY_SECONDS)
+        raise AssertionError("unreachable runner claim retry state")
+
     def reserve(
         self, reservation: Mapping[str, Any], *, now: datetime
     ) -> Mapping[str, str]:
@@ -208,7 +231,7 @@ class AllocationBroker:
                 "job-started context crossed the signed allocation binding"
             )
         scale_set_name, scale_set_id = self.ledger.scale_set_binding(allocation_id)
-        self.driver.assert_runner_claim(
+        self._assert_runner_claim(
             scale_set_id, scale_set_name, context.runner_name, payload
         )
         self.live_job_verifier.verify(payload, context)

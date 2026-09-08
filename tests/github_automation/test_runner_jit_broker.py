@@ -26,6 +26,8 @@ from github_automation.runner_jit_broker import (
     GARM_RECOVERY_END_TO_END_SECONDS,
     GarmCliAllocationDriver,
     JobStartedContext,
+    RUNNER_CLAIM_ASSERT_ATTEMPTS,
+    RUNNER_CLAIM_ASSERT_RETRY_SECONDS,
 )
 from tests.github_automation.test_runner_jit import payload, reservation
 
@@ -496,7 +498,9 @@ class AllocationBrokerTests(unittest.TestCase):
 
     def test_live_job_verifier_budget_fits_inside_runner_hook_deadline(self):
         self.assertLess(
-            ExternalLiveWorkflowJobVerifier.MAX_ATTEMPTS * 15
+            (RUNNER_CLAIM_ASSERT_ATTEMPTS - 1)
+            * RUNNER_CLAIM_ASSERT_RETRY_SECONDS
+            + ExternalLiveWorkflowJobVerifier.MAX_ATTEMPTS * 15
             + (ExternalLiveWorkflowJobVerifier.MAX_ATTEMPTS - 1)
             * ExternalLiveWorkflowJobVerifier.RETRY_DELAY_SECONDS,
             60,
@@ -579,6 +583,94 @@ class AllocationBrokerTests(unittest.TestCase):
             )
         self.assertEqual("issued", self.ledger.get(self.payload["allocation_id"]).state)
         self.assertTrue(self.driver.scales[self.payload["scale_set_name"]]["enabled"])
+
+    def test_job_started_retries_only_transient_pre_transition_claim_assertion(self):
+        class TransientClaimGarm(FakeGarm):
+            def __init__(self):
+                super().__init__()
+                self.claim_attempts = 0
+
+            def assert_runner_claim(self, scale_id, name, runner_name, payload):
+                self.events.append("claim")
+                self.claim_attempts += 1
+                if self.claim_attempts == 1:
+                    raise RunnerJitError("GARM claim is not visible yet")
+                if runner_name != self.runner_name or not self.scales[name]["enabled"]:
+                    raise AssertionError
+
+        driver = TransientClaimGarm()
+        broker = AllocationBroker(
+            self.ledger,
+            driver,
+            self.private.public_key(),
+            spki_fingerprint(self.private.public_key()),
+            self.live,
+        )
+        broker.reserve(self.reservation, now=NOW)
+        broker.finalize(self.envelope, now=NOW)
+        context = self.context(runner_name=driver.runner_name)
+
+        with (
+            mock.patch(
+                "github_automation.runner_jit_broker.time.sleep"
+            ) as sleep,
+            mock.patch.object(
+                self.ledger, "transition", wraps=self.ledger.transition
+            ) as transition,
+        ):
+            broker.job_started(self.payload["allocation_id"], context, now=NOW)
+
+        self.assertEqual(2, driver.claim_attempts)
+        sleep.assert_called_once_with(RUNNER_CLAIM_ASSERT_RETRY_SECONDS)
+        self.assertEqual(1, len(self.live.calls))
+        transitions = [call.args[1] for call in transition.call_args_list]
+        self.assertEqual(1, transitions.count("claim"))
+        self.assertEqual(1, transitions.count("start"))
+        self.assertEqual(1, driver.events.count("disable"))
+        record = self.ledger.get(self.payload["allocation_id"])
+        self.assertEqual("running", record.state)
+        self.assertEqual(1, record.jobs_started)
+
+    def test_persistent_runner_claim_failure_stays_pre_transition_and_fail_closed(self):
+        class MissingClaimGarm(FakeGarm):
+            def __init__(self):
+                super().__init__()
+                self.claim_attempts = 0
+
+            def assert_runner_claim(self, scale_id, name, runner_name, payload):
+                self.events.append("claim")
+                self.claim_attempts += 1
+                raise RunnerJitError("GARM claim remains absent")
+
+        driver = MissingClaimGarm()
+        broker = AllocationBroker(
+            self.ledger,
+            driver,
+            self.private.public_key(),
+            spki_fingerprint(self.private.public_key()),
+            self.live,
+        )
+        broker.reserve(self.reservation, now=NOW)
+        broker.finalize(self.envelope, now=NOW)
+        context = self.context(runner_name=driver.runner_name)
+
+        with (
+            mock.patch("github_automation.runner_jit_broker.time.sleep") as sleep,
+            mock.patch.object(
+                self.ledger, "transition", wraps=self.ledger.transition
+            ) as transition,
+            self.assertRaisesRegex(RunnerJitError, "remains absent"),
+        ):
+            broker.job_started(self.payload["allocation_id"], context, now=NOW)
+
+        self.assertEqual(RUNNER_CLAIM_ASSERT_ATTEMPTS, driver.claim_attempts)
+        self.assertEqual(RUNNER_CLAIM_ASSERT_ATTEMPTS - 1, sleep.call_count)
+        self.assertEqual([], self.live.calls)
+        self.assertEqual([], transition.call_args_list)
+        self.assertNotIn("disable", driver.events)
+        record = self.ledger.get(self.payload["allocation_id"])
+        self.assertEqual("issued", record.state)
+        self.assertEqual(0, record.jobs_started)
 
     def test_reboot_recovery_disables_drains_deletes_and_is_idempotent(self):
         self.broker.reserve(self.reservation, now=NOW)
