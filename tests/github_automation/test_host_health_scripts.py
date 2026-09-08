@@ -1052,6 +1052,110 @@ class HostHealthScriptTests(unittest.TestCase):
         ):
             self.assertIn(token, source)
 
+    def test_uninstaller_owns_partial_reconciliation_with_a_durable_marker(self) -> None:
+        source = UNINSTALLER.read_text(encoding="utf-8")
+        marker_create = source.index(
+            "if (-not $markerPresent) { New-UninstallMarker; $markerPresent = $true }"
+        )
+        first_mutations = (
+            source.index("Stop-ScheduledTask", marker_create),
+            source.index("Unregister-ScheduledTask", marker_create),
+            source.index("Set-LocalUser -Name $account.Name -Password $password", marker_create),
+            source.index("Disable-LocalUser -Name $ReaderAccount", marker_create),
+            source.index("Remove-ManagedSftpConfiguration $sftpState", marker_create),
+            source.index("Remove-Item -LiteralPath $path", marker_create),
+        )
+        self.assertTrue(all(marker_create < mutation for mutation in first_mutations))
+        self.assertIn("[IO.FileOptions]::WriteThrough", source)
+        self.assertIn("$stream.Flush($true)", source)
+        self.assertIn('Join-Path $env:ProgramFiles "self-hosted-ci\\transactions"', source)
+        self.assertLess(source.index("Assert-TransactionRoot $true"), source.index("$markerPresent ="))
+        self.assertIn("SetAccessRuleProtection($true, $false)", source)
+        self.assertIn("Ensure-TransactionRoot", source)
+        self.assertIn("Set-Acl -LiteralPath $temporary -AclObject (Get-MarkerAcl)", source)
+        self.assertIn("Assert-UninstallMarker", source)
+        self.assertIn("$raw -cne $canonical", source)
+
+        marker_remove = source.rindex("Remove-Item -LiteralPath $MarkerPath")
+        for postcondition in (
+            "task reappeared after removal",
+            "health reader re-enabled during uninstall",
+            "managed SFTP configuration remains after uninstall",
+            "health artifact root remains after uninstall",
+            "Assert-UninstallMarker",
+        ):
+            self.assertLess(source.rindex(postcondition), marker_remove)
+        self.assertGreater(
+            source.index("reconciliation_marker_removed = $true"), marker_remove
+        )
+        self.assertEqual(1, source.count("Remove-Item -LiteralPath $MarkerPath"))
+
+    def test_uninstaller_accepts_only_marker_authorized_partial_states(self) -> None:
+        source = UNINSTALLER.read_text(encoding="utf-8")
+        plan = source.index('[ordered]@{ mode = "plan"')
+        self.assertLess(source.index("if ($markerPresent) { Assert-UninstallMarker }"), plan)
+        self.assertIn("reconciliation_marker_present = [bool]$markerPresent", source)
+        self.assertIn("reconciliation_mode = [bool]$markerPresent", source)
+        self.assertIn(
+            'if ($null -eq $task -and -not $markerPresent) { throw "expected health supervisor task is absent without owning reconciliation marker" }',
+            source,
+        )
+        self.assertIn(
+            'if (-not $reader.Enabled -and -not $markerPresent) { throw "health reader is disabled without owning reconciliation marker" }',
+            source,
+        )
+        self.assertIn(
+            'if ($sftpState -eq "absent" -and -not $markerPresent) { throw "managed SFTP configuration is absent without owning reconciliation marker" }',
+            source,
+        )
+        self.assertIn(
+            "Assert-SafeArtifactTree $ControlRoot @($InstalledSupervisor, $SshdBackup) $markerPresent (-not $markerPresent)",
+            source,
+        )
+        self.assertIn(
+            "Assert-SafeArtifactTree $HealthRoot @($SnapshotPath) $markerPresent (-not $markerPresent)",
+            source,
+        )
+        self.assertIn(
+            'if ($beginCount -eq 0 -and $endCount -eq 0) { return "absent" }',
+            source,
+        )
+        self.assertIn(
+            'if ($beginCount -ne 1 -or $endCount -ne 1 -or -not $content.EndsWith($expectedBlock + "`r`n", [StringComparison]::Ordinal))',
+            source,
+        )
+
+    def test_uninstaller_validates_candidate_sshd_config_before_replacement(self) -> None:
+        source = UNINSTALLER.read_text(encoding="utf-8")
+        function_start = source.index("function Remove-ManagedSftpConfiguration")
+        candidate_write = source.index("[IO.File]::WriteAllText($temporary", function_start)
+        candidate_acl = source.index("Set-Acl -LiteralPath $temporary", candidate_write)
+        candidate_validate = source.index("& $sshd -t -f $temporary", candidate_acl)
+        replacement = source.index(
+            "Move-Item -LiteralPath $temporary -Destination $SshdConfig -Force",
+            candidate_validate,
+        )
+        restart = source.index("Restart-Service -Name sshd", replacement)
+        self.assertLess(candidate_write, candidate_acl)
+        self.assertLess(candidate_acl, candidate_validate)
+        self.assertLess(candidate_validate, replacement)
+        self.assertLess(replacement, restart)
+        self.assertIn(
+            "sshd rejected candidate configuration before managed block removal", source
+        )
+        self.assertIn("sshd rejected rollback configuration", source)
+        self.assertIn('operation="remove-managed-sftp"', source)
+
+    def test_installer_refuses_an_owning_uninstall_transaction(self) -> None:
+        source = INSTALLER.read_text(encoding="utf-8")
+        guard = source.index("if (Test-Path -LiteralPath $UninstallMarkerPath)")
+        first_health_mutation = source.index("New-Item -ItemType Directory", guard)
+        self.assertLess(guard, first_health_mutation)
+        self.assertIn(
+            "health supervisor installation is blocked by an owning uninstall transaction",
+            source,
+        )
+
     def test_heartbeat_is_atomic_and_systemd_sandboxed(self) -> None:
         writer = (HOST / "update-health-heartbeat.py").read_text(encoding="utf-8")
         collector = (HOST / "collect-health-snapshot.py").read_text(encoding="utf-8")
