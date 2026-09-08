@@ -5,8 +5,81 @@ readonly PROJECT=ci-jit
 readonly FENCED_SERVICES=(self-hosted-ci-garm.service self-hosted-ci-allocation-broker.service self-hosted-ci-outbound-worker.service)
 readonly BUILD_PROXY_UNIT=self-hosted-ci-profile-build-proxy.service
 readonly TRANSACTION_LIB=/usr/local/lib/self-hosted-ci/garm-jit-transaction-lib.sh
+readonly PUBLISH_SENTINELS=(
+  /etc/self-hosted-ci/repository-profile-image-v1.json
+  /opt/self-hosted-ci/node_modules/pyright/package.json
+  /opt/self-hosted-ci/overworld-deps/frontend-node-modules/react/package.json
+  /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/package.json
+  /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/receive-logs.js
+  /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js
+)
 
 die(){ printf 'repository-profile image build blocked: %s\n' "$*" >&2; exit 1; }
+inspect_running_sentinels(){
+  local instance=$1 phase=$2
+  shift 2
+  incus exec "${instance}" --project "${PROJECT}" -- /bin/sh -ceu '
+    phase=$1
+    shift
+    failed=0
+    ancestors=""
+    for path do
+      case "$path" in *=*) continue ;; esac
+      case "$path" in
+        /opt/*)
+          directory=${path%/*}
+          while :; do
+            case " $ancestors " in *" $directory "*) ;; *) ancestors="$ancestors $directory" ;; esac
+            [ "$directory" = /opt ] && break
+            directory=${directory%/*}
+          done
+          ;;
+      esac
+      if [ ! -f "$path" ] || [ -L "$path" ]; then
+        printf "%s sentinel missing or unsafe: %s\n" "$phase" "$path" >&2
+        failed=1
+        continue
+      fi
+      metadata=$(stat -c "uid=%u gid=%g mode=%a links=%h size=%s device=%d" -- "$path")
+      printf "%s sentinel metadata: path=%s %s\n" "$phase" "$path" "$metadata"
+      case "$metadata" in uid=0\ gid=0\ *) ;; *) printf "%s sentinel ownership is not root:root: %s\n" "$phase" "$path" >&2; failed=1 ;; esac
+      mount=$(findmnt -rn -T "$path" -o TARGET,SOURCE,FSTYPE 2>/dev/null | sed -n "1p")
+      if [ -n "$mount" ]; then
+        printf "%s sentinel mount: path=%s %s\n" "$phase" "$path" "$mount"
+        if [ "${mount%% *}" != / ]; then printf "%s sentinel mount target is not rootfs: %s\n" "$phase" "$path" >&2; failed=1; fi
+      else
+        printf "%s sentinel mount lookup failed: %s\n" "$phase" "$path" >&2
+        failed=1
+      fi
+      expected=""
+      for candidate do case "$candidate" in "$path="*) expected=${candidate#*=} ;; esac; done
+      if [ -n "$expected" ]; then
+        actual=$(sha256sum -- "$path" | awk "{print \$1}")
+        printf "%s sentinel sha256: path=%s sha256=%s\n" "$phase" "$path" "$actual"
+        if [ "$actual" != "$expected" ]; then printf "%s sentinel digest changed: %s\n" "$phase" "$path" >&2; failed=1; fi
+      fi
+    done
+    for directory in $ancestors; do
+      if [ ! -d "$directory" ] || [ -L "$directory" ]; then
+        printf "%s sentinel ancestor missing or unsafe: %s\n" "$phase" "$directory" >&2
+        failed=1
+        continue
+      fi
+      metadata=$(stat -c "uid=%u gid=%g mode=%a links=%h size=%s device=%d" -- "$directory")
+      printf "%s sentinel ancestor metadata: path=%s %s\n" "$phase" "$directory" "$metadata"
+      case "$metadata" in uid=0\ gid=0\ *) ;; *) printf "%s sentinel ancestor ownership is not root:root: %s\n" "$phase" "$directory" >&2; failed=1 ;; esac
+      mount=$(findmnt -rn -T "$directory" -o TARGET,SOURCE,FSTYPE 2>/dev/null | sed -n "1p")
+      if [ -n "$mount" ]; then
+        printf "%s sentinel ancestor mount: path=%s %s\n" "$phase" "$directory" "$mount"
+        if [ "${mount%% *}" != / ]; then printf "%s sentinel ancestor mount target is not rootfs: %s\n" "$phase" "$directory" >&2; failed=1; fi
+      else
+        printf "%s sentinel ancestor mount lookup failed: %s\n" "$phase" "$directory" >&2
+        failed=1
+      fi
+    done
+    exit "$failed"
+  ' sentinel-check "${phase}" "${PUBLISH_SENTINELS[@]}" "$@"
+}
 usage(){
   printf 'usage: %s [--plan] | --apply --profile-directory DIR --repository-profile FILE --expected-profile-digest SHA256 --base-fingerprint SHA256 --expected-manifest-sha256 SHA256 --candidate-alias ALIAS --overworld-bundle FILE --overworld-bundle-sha256 SHA256 --expected-overworld-commit SHA --waterfall-bundle FILE --waterfall-bundle-sha256 SHA256 --expected-waterfall-commit SHA --https-proxy http://10.254.0.1:8079 --acknowledge-temporary-build-egress --acknowledge-new-image-publication\n' "$0" >&2
   exit 2
@@ -208,6 +281,11 @@ incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu '
   test -f "$required" || { echo "required Next.js browser log module missing after cleanup" >&2; exit 1; }
 ' \
   || die 'provisioned image cleanup verification failed'
+inspect_running_sentinels "${builder}" builder-post-cleanup \
+  || die 'builder post-cleanup sentinel verification failed'
+incus exec "${builder}" --project "${PROJECT}" -- sha256sum -- "${PUBLISH_SENTINELS[@]}" \
+  | tee "${workdir}/publish-sentinels.sha256" \
+  || die 'builder sentinel digest inventory failed'
 incus exec "${builder}" --project "${PROJECT}" -- /bin/sync \
   || die 'provisioned image sync failed'
 if ! incus stop "${builder}" --project "${PROJECT}" --timeout 60; then
@@ -215,8 +293,10 @@ if ! incus stop "${builder}" --project "${PROJECT}" --timeout 60; then
 fi
 incus list "${builder}" --project "${PROJECT}" --format csv -c s | grep -Fxq STOPPED \
   || die 'builder did not reach the stopped state before publication'
-incus file pull "${builder}/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js" /dev/null --project "${PROJECT}" \
-  || die 'stopped-builder rootfs is missing the required Next.js browser log module'
+for sentinel in "${PUBLISH_SENTINELS[@]}"; do
+  incus file pull "${builder}${sentinel}" /dev/null --project "${PROJECT}" \
+    || die "stopped-builder rootfs is missing or cannot expose sentinel: ${sentinel}"
+done
 incus publish "${builder}" --project "${PROJECT}" --alias "${candidate_alias}" >/dev/null
 alias_published=true
 published_fingerprint="$(python3 - "${candidate_alias}" "$(incus image alias list --project "${PROJECT}" --format json)" <<'PY'
@@ -235,11 +315,22 @@ if len(rows)!=1 or rows[0].get("type")!="container" or rows[0].get("architecture
 PY
 incus delete "${builder}" --project "${PROJECT}"
 incus init "${published_fingerprint}" "${published_verifier}" --project "${PROJECT}" --profile ci-jit
-incus file pull "${published_verifier}/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js" /dev/null --project "${PROJECT}" \
-  || die 'initialized-verifier rootfs is missing the required Next.js browser log module'
+for sentinel in "${PUBLISH_SENTINELS[@]}"; do
+  if incus file pull "${published_verifier}${sentinel}" /dev/null --project "${PROJECT}" >/dev/null 2>&1; then
+    printf 'initialized-verifier pre-start sentinel present: %s\n' "${sentinel}"
+  else
+    printf 'initialized-verifier pre-start sentinel absent or inaccessible (diagnostic only): %s\n' "${sentinel}" >&2
+  fi
+done
 incus start "${published_verifier}" --project "${PROJECT}"
-incus exec "${published_verifier}" --project "${PROJECT}" -- /bin/test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js \
-  || die 'published image boot verification failed'
+expected_sentinel_digests=()
+while read -r digest sentinel; do
+  expected_sentinel_digests+=("${sentinel}=${digest}")
+done <"${workdir}/publish-sentinels.sha256"
+[[ "${#expected_sentinel_digests[@]}" -eq "${#PUBLISH_SENTINELS[@]}" ]] \
+  || die 'builder sentinel digest inventory is incomplete'
+inspect_running_sentinels "${published_verifier}" published-verifier-post-start "${expected_sentinel_digests[@]}" \
+  || die 'published image boot sentinel verification failed'
 incus delete "${published_verifier}" --project "${PROJECT}" --force
 if incus list "${published_verifier}" --project "${PROJECT}" --format csv -c n | grep -Fxq "${published_verifier}"; then
   die 'published image verifier cleanup failed'

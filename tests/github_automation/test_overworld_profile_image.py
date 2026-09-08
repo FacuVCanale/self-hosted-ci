@@ -222,30 +222,70 @@ class OverworldProfileImageTests(unittest.TestCase):
 
     def test_builder_discriminates_rootfs_persistence_across_publication(self) -> None:
         source = BUILDER.read_text(encoding="utf-8")
-        lines = source.splitlines()
-        required = "/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js"
+        sentinels = (
+            "/etc/self-hosted-ci/repository-profile-image-v1.json",
+            "/opt/self-hosted-ci/node_modules/pyright/package.json",
+            "/opt/self-hosted-ci/overworld-deps/frontend-node-modules/react/package.json",
+            "/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/package.json",
+            "/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/receive-logs.js",
+            "/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js",
+        )
+        sentinel_block = source.split("readonly PUBLISH_SENTINELS=(", 1)[1].split(")", 1)[0]
+        self.assertEqual(sentinels, tuple(line.strip() for line in sentinel_block.splitlines() if line.strip()))
+
+        probe = source.split("inspect_running_sentinels(){", 1)[1].split("\n}\nusage(){", 1)[0]
+        for token in (
+            '[ ! -f "$path" ] || [ -L "$path" ]',
+            '[ ! -d "$directory" ] || [ -L "$directory" ]',
+            'uid=%u gid=%g mode=%a links=%h size=%s device=%d',
+            'uid=0\\ gid=0\\ *',
+            'findmnt -rn -T "$path" -o TARGET,SOURCE,FSTYPE',
+            'findmnt -rn -T "$directory" -o TARGET,SOURCE,FSTYPE',
+            '[ "$directory" = /opt ] && break',
+            'sha256sum -- "$path"',
+            'sentinel digest changed',
+            'exit "$failed"',
+        ):
+            self.assertIn(token, probe)
+        self.assertEqual(2, probe.count('[ "${mount%% *}" != / ]'))
+        self.assertIn("sentinel mount target is not rootfs", probe)
+        self.assertIn("sentinel ancestor mount target is not rootfs", probe)
+        self.assertNotRegex(probe, r"\b(?:cat|head|tail)\b")
+
+        post_cleanup = 'inspect_running_sentinels "${builder}" builder-post-cleanup'
+        digest_inventory = 'incus exec "${builder}" --project "${PROJECT}" -- sha256sum -- "${PUBLISH_SENTINELS[@]}"'
+        sync = 'incus exec "${builder}" --project "${PROJECT}" -- /bin/sync'
         stopped = 'incus list "${builder}" --project "${PROJECT}" --format csv -c s | grep -Fxq STOPPED'
-        stopped_pull = f'incus file pull "${{builder}}{required}" /dev/null --project "${{PROJECT}}"'
+        stopped_pull = 'incus file pull "${builder}${sentinel}" /dev/null --project "${PROJECT}"'
         publish = 'incus publish "${builder}" --project "${PROJECT}" --alias "${candidate_alias}" >/dev/null'
         builder_delete = 'incus delete "${builder}" --project "${PROJECT}"'
         verifier_init = 'incus init "${published_fingerprint}" "${published_verifier}" --project "${PROJECT}" --profile ci-jit'
-        initialized_pull = f'incus file pull "${{published_verifier}}{required}" /dev/null --project "${{PROJECT}}"'
+        initialized_pull = 'incus file pull "${published_verifier}${sentinel}" /dev/null --project "${PROJECT}" >/dev/null 2>&1'
         verifier_start = 'incus start "${published_verifier}" --project "${PROJECT}"'
-        running_check = f'incus exec "${{published_verifier}}" --project "${{PROJECT}}" -- /bin/test -f {required}'
+        running_check = 'inspect_running_sentinels "${published_verifier}" published-verifier-post-start "${expected_sentinel_digests[@]}"'
 
-        for probe in (stopped_pull, initialized_pull, running_check):
-            self.assertEqual(1, source.count(probe))
-        self.assertIn("die 'stopped-builder rootfs is missing the required Next.js browser log module'", source)
-        self.assertIn("die 'initialized-verifier rootfs is missing the required Next.js browser log module'", source)
+        for check in (post_cleanup, digest_inventory, stopped_pull, initialized_pull, running_check):
+            self.assertEqual(1, source.count(check))
+        stopped_probe = source[source.index(stopped_pull):source.index(publish)]
+        self.assertIn('|| die "stopped-builder rootfs is missing or cannot expose sentinel: ${sentinel}"', stopped_probe)
+        initialized_probe = source[source.index(initialized_pull):source.index(verifier_start)]
+        self.assertIn("diagnostic only", initialized_probe)
+        self.assertNotIn("die ", initialized_probe)
+        self.assertIn("builder sentinel digest inventory is incomplete", source)
+        self.assertIn("published image boot sentinel verification failed", source)
+        publish_position = source.index(publish)
         positions = (
-            next(i for i, line in enumerate(lines) if line.startswith(stopped)),
-            next(i for i, line in enumerate(lines) if line.startswith(stopped_pull)),
-            lines.index(publish),
-            lines.index(builder_delete),
-            lines.index(verifier_init),
-            next(i for i, line in enumerate(lines) if line.startswith(initialized_pull)),
-            lines.index(verifier_start),
-            next(i for i, line in enumerate(lines) if line.startswith(running_check)),
+            source.index(post_cleanup),
+            source.index(digest_inventory),
+            source.index(sync),
+            source.index(stopped),
+            source.index(stopped_pull),
+            publish_position,
+            source.index(builder_delete, publish_position),
+            source.index(verifier_init),
+            source.index(initialized_pull),
+            source.index(verifier_start),
+            source.index(running_check),
         )
         self.assertTrue(all(left < right for left, right in zip(positions, positions[1:])))
 
@@ -543,7 +583,7 @@ printf normalized > "$MOCK_CHMOD_MARKER"
         self.assertLess(source.index(forced), source.index(stopped))
         self.assertLess(source.index(stopped), source.index(publish))
         post_cleanup_file_check = "required=/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js"
-        boot_check = 'incus exec "${published_verifier}" --project "${PROJECT}" -- /bin/test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js'
+        boot_check = 'inspect_running_sentinels "${published_verifier}" published-verifier-post-start "${expected_sentinel_digests[@]}"'
         self.assertIn(post_cleanup_file_check, source)
         self.assertIn(boot_check, source)
         self.assertLess(source.index(publish), source.index(boot_check))
