@@ -15,6 +15,114 @@ readonly PUBLISH_SENTINELS=(
 )
 
 die(){ printf 'repository-profile image build blocked: %s\n' "$*" >&2; exit 1; }
+cloud_init_status_decision(){
+  local phase=$1 status_json=$2
+  python3 - "${phase}" "${status_json}" <<'PY'
+import json
+import re
+import sys
+
+phase, status_path = sys.argv[1:]
+if phase not in {"preflight", "wait"}:
+    print("cloud-init readiness parser received an invalid phase", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    with open(status_path, encoding="utf-8") as stream:
+        value = json.load(stream)
+except (OSError, UnicodeError, json.JSONDecodeError):
+    print(f"cloud-init {phase} returned invalid JSON", file=sys.stderr)
+    raise SystemExit(1)
+
+if not isinstance(value, dict):
+    print(f"cloud-init {phase} JSON root is not an object", file=sys.stderr)
+    raise SystemExit(1)
+
+status = value.get("status")
+extended_status = value.get("extended_status")
+boot_status_code = value.get("boot_status_code")
+errors = value.get("errors")
+recoverable_errors = value.get("recoverable_errors")
+
+safe_state = re.compile(r"^[a-z][a-z -]{0,31}$")
+safe_boot_codes = {"enabled-by-generator", "disabled-by-generator"}
+if not isinstance(status, str) or not safe_state.fullmatch(status):
+    status = "<invalid>"
+if not isinstance(extended_status, str) or not safe_state.fullmatch(extended_status):
+    extended_status = "<invalid>"
+if not isinstance(boot_status_code, str) or boot_status_code not in safe_boot_codes:
+    boot_status_code = "<invalid>"
+if not isinstance(errors, list) or not isinstance(recoverable_errors, dict):
+    print(
+        f"cloud-init {phase} status schema is invalid: "
+        f"status={status} extended_status={extended_status} boot_status_code={boot_status_code}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+if errors or recoverable_errors:
+    print(
+        f"cloud-init {phase} reported errors: "
+        f"status={status} extended_status={extended_status} boot_status_code={boot_status_code} "
+        f"errors_count={len(errors)} recoverable_error_groups={len(recoverable_errors)}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+enabled = boot_status_code == "enabled-by-generator"
+if status == "done" and extended_status == "done" and enabled:
+    print("terminal")
+elif status == "disabled" and extended_status == "disabled" and boot_status_code == "disabled-by-generator":
+    # cloud-init handle_status_args historically returns rc=0 for this clean
+    # terminal state; accepting it preserves that contract without invoking
+    # the blocking query_systemctl(wait=True) path.
+    print("terminal")
+elif phase == "preflight" and status == extended_status and status in {"running", "not started"} and enabled:
+    print("wait")
+else:
+    print(
+        f"cloud-init {phase} status is not accepted: "
+        f"status={status} extended_status={extended_status} boot_status_code={boot_status_code}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+}
+wait_for_cloud_init_readiness(){
+  local instance=$1 decision rc
+  local preflight_json="${workdir}/cloud-init-preflight.json"
+  local preflight_stderr="${workdir}/cloud-init-preflight.stderr"
+  local waited_json="${workdir}/cloud-init-wait.json"
+  local waited_stderr="${workdir}/cloud-init-wait.stderr"
+
+  if incus exec "${instance}" --project "${PROJECT}" -- \
+    /usr/bin/timeout -k 10s 15s /usr/bin/cloud-init status --format=json \
+    >"${preflight_json}" 2>"${preflight_stderr}"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [[ "${rc}" -ne 0 ]]; then
+    printf 'cloud-init preflight command failed: rc=%s\n' "${rc}" >&2
+    return 1
+  fi
+  decision="$(cloud_init_status_decision preflight "${preflight_json}")" || return 1
+  [[ "${decision}" == terminal ]] && return 0
+  [[ "${decision}" == wait ]] || { printf 'cloud-init preflight parser returned an invalid decision\n' >&2; return 1; }
+
+  if incus exec "${instance}" --project "${PROJECT}" -- \
+    /usr/bin/timeout -k 10s 180s /usr/bin/cloud-init status --wait --format=json \
+    >"${waited_json}" 2>"${waited_stderr}"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [[ "${rc}" -ne 0 ]]; then
+    printf 'cloud-init wait command failed: rc=%s\n' "${rc}" >&2
+    return 1
+  fi
+  decision="$(cloud_init_status_decision wait "${waited_json}")" || return 1
+  [[ "${decision}" == terminal ]] || { printf 'cloud-init wait parser returned an invalid decision\n' >&2; return 1; }
+}
 inspect_running_sentinels(){
   local instance=$1 phase=$2
   shift 2
@@ -264,7 +372,7 @@ if set(d)!={"eth0","root"} or d["eth0"].get("network")!="ci-jit-isolated" or d["
 if any(x.get("type") in {"proxy","unix-char","unix-block"} for x in d.values()): raise SystemExit(1)
 PY
 incus start "${builder}" --project "${PROJECT}"
-incus exec "${builder}" --project "${PROJECT}" -- /usr/bin/timeout 180 /usr/bin/cloud-init status --wait >/dev/null
+wait_for_cloud_init_readiness "${builder}" || die 'builder cloud-init readiness guard failed'
 for file in manifest.json provision.py verify.py; do
   incus file push "${profile_dir}/${file}" "${builder}/run/self-hosted-ci-profile-build/${file}" --project "${PROJECT}" --create-dirs --mode=0700
 done

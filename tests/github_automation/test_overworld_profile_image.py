@@ -22,6 +22,154 @@ LIVE_VERIFIER = ROOT / "scripts/host/verify-live-artifact-contract.py"
 
 
 class OverworldProfileImageTests(unittest.TestCase):
+    def test_cloud_init_status_parser_accepts_only_clean_supported_transitions(self) -> None:
+        source = BUILDER.read_text(encoding="utf-8")
+        parser = source.split("  python3 - \"${phase}\" \"${status_json}\" <<'PY'\n", 1)[1].split("\nPY\n}", 1)[0]
+
+        def decide(payload: object, phase: str = "preflight") -> subprocess.CompletedProcess[str]:
+            with tempfile.TemporaryDirectory() as directory:
+                parser_path = Path(directory) / "cloud-init-status.py"
+                status_path = Path(directory) / "status.json"
+                parser_path.write_text(parser, encoding="utf-8")
+                status_path.write_text(json.dumps(payload), encoding="utf-8")
+                return subprocess.run(
+                    ["python3", str(parser_path), phase, str(status_path)],
+                    text=True,
+                    capture_output=True,
+                )
+
+        clean = {"errors": [], "recoverable_errors": {}}
+        accepted = (
+            ({**clean, "status": "done", "extended_status": "done", "boot_status_code": "enabled-by-generator"}, "preflight", "terminal"),
+            ({**clean, "status": "done", "extended_status": "done", "boot_status_code": "enabled-by-generator"}, "wait", "terminal"),
+            ({**clean, "status": "disabled", "extended_status": "disabled", "boot_status_code": "disabled-by-generator"}, "preflight", "terminal"),
+            ({**clean, "status": "disabled", "extended_status": "disabled", "boot_status_code": "disabled-by-generator"}, "wait", "terminal"),
+            ({**clean, "status": "running", "extended_status": "running", "boot_status_code": "enabled-by-generator"}, "preflight", "wait"),
+            ({**clean, "status": "not started", "extended_status": "not started", "boot_status_code": "enabled-by-generator"}, "preflight", "wait"),
+        )
+        for payload, phase, decision in accepted:
+            with self.subTest(payload=payload, phase=phase):
+                result = decide(payload, phase)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(decision, result.stdout.strip())
+
+        rejected = (
+            ({**clean, "status": "done", "extended_status": "done", "boot_status_code": "disabled-by-generator"}, "preflight"),
+            ({**clean, "status": "disabled", "extended_status": "disabled", "boot_status_code": "enabled-by-generator"}, "preflight"),
+            ({**clean, "status": "running", "extended_status": "running", "boot_status_code": "enabled-by-generator"}, "wait"),
+            ({**clean, "status": "unknown", "extended_status": "unknown", "boot_status_code": "enabled-by-generator"}, "preflight"),
+            ({**clean, "status": "running", "extended_status": "done", "boot_status_code": "enabled-by-generator"}, "preflight"),
+            ({**clean, "status": "done", "extended_status": "done", "boot_status_code": "enabled"}, "preflight"),
+            ({**clean, "status": "done", "extended_status": "done", "boot_status_code": "enabled-by-systemd-generator"}, "preflight"),
+            ({**clean, "status": "done", "extended_status": "done", "boot_status_code": "enabled-by-generator", "errors": ["secret value"]}, "preflight"),
+            ({**clean, "status": "done", "extended_status": "done", "boot_status_code": "enabled-by-generator", "recoverable_errors": {"WARNING": ["secret value"]}}, "preflight"),
+            ({"status": "done", "extended_status": "done", "boot_status_code": "enabled-by-generator"}, "preflight"),
+        )
+        for payload, phase in rejected:
+            with self.subTest(payload=payload, phase=phase):
+                result = decide(payload, phase)
+                self.assertNotEqual(0, result.returncode)
+                self.assertNotIn("secret value", result.stderr)
+
+        with tempfile.TemporaryDirectory() as directory:
+            parser_path = Path(directory) / "cloud-init-status.py"
+            status_path = Path(directory) / "status.json"
+            parser_path.write_text(parser, encoding="utf-8")
+            status_path.write_text("not JSON: secret value", encoding="utf-8")
+            result = subprocess.run(
+                ["python3", str(parser_path), "preflight", str(status_path)],
+                text=True,
+                capture_output=True,
+            )
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual("cloud-init preflight returned invalid JSON", result.stderr.strip())
+
+    def test_cloud_init_readiness_wrapper_preserves_terminal_disabled_and_bounds_wait(self) -> None:
+        source = BUILDER.read_text(encoding="utf-8")
+        functions = source[
+            source.index("cloud_init_status_decision(){") : source.index("inspect_running_sentinels(){")
+        ]
+
+        def run_guard(
+            preflight: object,
+            *,
+            waited: object | None = None,
+            preflight_rc: int = 0,
+            waited_rc: int = 0,
+        ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                script = root / "guard.sh"
+                calls = root / "calls"
+                preflight_path = root / "preflight.json"
+                waited_path = root / "waited.json"
+                preflight_path.write_text(json.dumps(preflight), encoding="utf-8")
+                waited_path.write_text(json.dumps(waited), encoding="utf-8")
+                script.write_text(
+                    "set -Eeuo pipefail\n"
+                    "readonly PROJECT=ci-jit\n"
+                    f"workdir={str(root)!r}\n"
+                    f"calls_file={str(calls)!r}\n"
+                    f"preflight_path={str(preflight_path)!r}\n"
+                    f"waited_path={str(waited_path)!r}\n"
+                    f"preflight_rc={preflight_rc}\n"
+                    f"waited_rc={waited_rc}\n"
+                    "incus(){\n"
+                    "  case \" $* \" in\n"
+                    "    *\" status --wait \"*) printf 'wait\\n' >>\"${calls_file}\"; printf 'untrusted wait secret stderr\\n' >&2; "
+                    "       if [[ \"${waited_rc}\" -ne 0 ]]; then return \"${waited_rc}\"; fi; command cat \"${waited_path}\" ;;\n"
+                    "    *) printf 'preflight\\n' >>\"${calls_file}\"; printf 'untrusted secret stderr\\n' >&2; "
+                    "       if [[ \"${preflight_rc}\" -ne 0 ]]; then return \"${preflight_rc}\"; fi; command cat \"${preflight_path}\" ;;\n"
+                    "  esac\n"
+                    "}\n"
+                    f"{functions}\n"
+                    "wait_for_cloud_init_readiness builder\n",
+                    encoding="utf-8",
+                )
+                result = subprocess.run(["bash", str(script)], text=True, capture_output=True)
+                recorded_calls = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+            return result, recorded_calls
+
+        clean = {"errors": [], "recoverable_errors": {}}
+        disabled = {**clean, "status": "disabled", "extended_status": "disabled", "boot_status_code": "disabled-by-generator"}
+        result, calls = run_guard(disabled)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(["preflight"], calls)
+
+        running = {**clean, "status": "running", "extended_status": "running", "boot_status_code": "enabled-by-generator"}
+        done = {**clean, "status": "done", "extended_status": "done", "boot_status_code": "enabled-by-generator"}
+        result, calls = run_guard(running, waited=done)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(["preflight", "wait"], calls)
+
+        for rc in (1, 2, 124):
+            with self.subTest(rc=rc):
+                result, calls = run_guard(done, preflight_rc=rc)
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual(["preflight"], calls)
+                self.assertIn(f"cloud-init preflight command failed: rc={rc}", result.stderr)
+                self.assertNotIn("untrusted secret stderr", result.stderr)
+
+        for rc in (1, 2, 124):
+            with self.subTest(waited_rc=rc):
+                result, calls = run_guard(running, waited=done, waited_rc=rc)
+                self.assertNotEqual(0, result.returncode)
+                self.assertEqual(["preflight", "wait"], calls)
+                self.assertIn(f"cloud-init wait command failed: rc={rc}", result.stderr)
+                self.assertNotIn("untrusted wait secret stderr", result.stderr)
+
+    def test_cloud_init_readiness_guard_is_bounded_and_machine_readable(self) -> None:
+        source = BUILDER.read_text(encoding="utf-8")
+        guard = source.split("wait_for_cloud_init_readiness(){", 1)[1].split("\n}\ninspect_running_sentinels(){", 1)[0]
+        self.assertIn('/usr/bin/timeout -k 10s 15s /usr/bin/cloud-init status --format=json', guard)
+        self.assertIn('/usr/bin/timeout -k 10s 180s /usr/bin/cloud-init status --wait --format=json', guard)
+        self.assertEqual(1, guard.count("status --wait"))
+        self.assertIn('cloud_init_status_decision preflight "${preflight_json}"', guard)
+        self.assertIn('cloud_init_status_decision wait "${waited_json}"', guard)
+        self.assertNotIn("cat ", guard)
+        self.assertNotIn('preflight_stderr}" >&2', guard)
+        self.assertNotIn('waited_stderr}" >&2', guard)
+
     def test_streaming_tar_scan_can_bound_tarinfo_cache(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             archive_path = Path(directory) / "many-members.tar"
@@ -229,7 +377,7 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertNotIn('incus config show "${builder}"', source)
         self.assertIn('--env "https_proxy=${https_proxy}"', source)
         self.assertIn('--env "http_proxy=${https_proxy}"', source)
-        self.assertIn("cloud-init status --wait", source)
+        self.assertIn('wait_for_cloud_init_readiness "${builder}"', source)
         required = (
             "acquire_transaction_lock",
             "zero_runtime_state",
