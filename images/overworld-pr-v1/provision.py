@@ -461,11 +461,20 @@ committed=true
         if component == "backend":
             shutil.move(str(source_modules), target_modules)
         else:
-            shutil.copytree(source_modules, target_modules, symlinks=False)
+            target_modules.mkdir()
+            run("cp", "-aL", f"{source_modules}/.", str(target_modules))
             if source_modules.is_symlink():
                 source_modules.unlink()
             else:
                 shutil.rmtree(source_modules)
+            required_next = target_modules / "next/dist/server/dev/browser-logs/file-logger.js"
+            if not required_next.is_file() or required_next.resolve() != required_next:
+                raise SystemExit("frontend dependency snapshot retained a staging-backed path")
+            current = required_next.parent
+            while current != target_modules:
+                if current.is_symlink():
+                    raise SystemExit("frontend dependency snapshot retained a symlink ancestor")
+                current = current.parent
     shutil.rmtree(next_package)
     # Frontend's postinstall recreates the exact backend dependency tree while
     # emitting the shared type bridge. Accept only that observed byproduct.
