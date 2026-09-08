@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory = $true)][string]$ExpectedServiceAccountSid,
     [string]$ReaderAccount = "selfhosted-ci-health",
     [switch]$Apply,
-    [switch]$AcknowledgeProtectedRootAcl
+    [switch]$AcknowledgeProtectedRootAcl,
+    [switch]$AclRoundTripPreflight
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,22 +47,18 @@ function Assert-NonAdmin([object]$Account, [object]$Administrators) {
     if (Test-GroupContainsSid $Administrators $Account.SID.Value $visited) { throw "account must be effectively non-admin: $($Account.Name)" }
 }
 
-function New-RootAcl([Security.Principal.SecurityIdentifier]$ServiceSid, [Security.Principal.SecurityIdentifier]$ReaderSid) {
+function New-ExactDirectoryAcl(
+    [Security.Principal.SecurityIdentifier]$OwnerSid,
+    [Collections.IDictionary]$ExpectedRights
+) {
     $acl = [Security.AccessControl.DirectorySecurity]::new()
     $acl.SetAccessRuleProtection($true, $false)
-    $owner = [Security.Principal.SecurityIdentifier]::new($AdministratorsSid)
-    $acl.SetOwner($owner)
-    $fullControl = [Security.AccessControl.FileSystemRights]::FullControl
-    $readOnly = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize
+    $acl.SetOwner($OwnerSid)
     $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
-    foreach ($entry in @(
-        @([Security.Principal.SecurityIdentifier]::new($SystemSid), $fullControl),
-        @($owner, $fullControl),
-        @($ServiceSid, $readOnly),
-        @($ReaderSid, $readOnly)
-    )) {
+    foreach ($sid in $ExpectedRights.Keys) {
         [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-            $entry[0], $entry[1],
+            [Security.Principal.SecurityIdentifier]::new([string]$sid),
+            [Security.AccessControl.FileSystemRights]$ExpectedRights[$sid],
             $inheritance,
             [Security.AccessControl.PropagationFlags]::None,
             [Security.AccessControl.AccessControlType]::Allow))
@@ -69,43 +66,101 @@ function New-RootAcl([Security.Principal.SecurityIdentifier]$ServiceSid, [Securi
     return $acl
 }
 
-function Assert-ExactRootAcl(
-    [Security.Principal.SecurityIdentifier]$ServiceSid,
-    [Security.Principal.SecurityIdentifier]$ReaderSid
+function Assert-ExactDirectoryAcl(
+    [string]$LiteralPath,
+    [Security.Principal.SecurityIdentifier]$ExpectedOwnerSid,
+    [Collections.IDictionary]$ExpectedRights
 ) {
-    $actual = Get-Acl -LiteralPath $Root
-    if (-not $actual.AreAccessRulesProtected) { throw "Windows root DACL is not protected" }
-    if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $AdministratorsSid) { throw "Windows root owner is not Administrators" }
-    $fullControl = [Security.AccessControl.FileSystemRights]::FullControl
-    $readOnly = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize
+    $actual = Get-Acl -LiteralPath $LiteralPath
+    if (-not $actual.AreAccessRulesProtected) { throw "Windows directory DACL is not protected" }
+    if (-not $actual.AreAccessRulesCanonical) { throw "Windows directory DACL is not canonical" }
+    if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $ExpectedOwnerSid.Value) { throw "Windows directory owner is not exact" }
     $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
-    $expected = @{}
-    $expected[$SystemSid] = $fullControl
-    $expected[$AdministratorsSid] = $fullControl
-    $expected[$ServiceSid.Value] = $readOnly
-    $expected[$ReaderSid.Value] = $readOnly
     $rules = @($actual.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-    if ($rules.Count -ne $expected.Count) { throw "Windows root DACL rule count is not exact" }
+    if ($rules.Count -ne $ExpectedRights.Count) { throw "Windows directory DACL rule count is not exact" }
     $observed = @{}
     foreach ($rule in $rules) {
         $sid = $rule.IdentityReference.Value
-        if ($observed.ContainsKey($sid) -or -not $expected.ContainsKey($sid)) { throw "Windows root DACL contains a duplicate or unknown SID" }
+        if ($observed.ContainsKey($sid) -or -not $ExpectedRights.Contains($sid)) { throw "Windows directory DACL contains a duplicate or unknown SID" }
         if ($rule.IsInherited -or $rule.AccessControlType -ne "Allow" -or
             $rule.InheritanceFlags -ne $inheritance -or
             $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None -or
-            $rule.FileSystemRights -ne $expected[$sid]) {
-            throw "Windows root DACL ACE is not semantically exact: $sid"
+            $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]$ExpectedRights[$sid]) {
+            throw "Windows directory DACL ACE is not semantically exact: $sid"
         }
         $observed[$sid] = $true
     }
-    $expectedAcl = New-RootAcl $ServiceSid $ReaderSid
+
+    $binary = $actual.GetSecurityDescriptorBinaryForm()
+    $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($binary, 0)
+    $requiredFlags = [int]([Security.AccessControl.ControlFlags]::DiscretionaryAclPresent -bor
+        [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected -bor
+        [Security.AccessControl.ControlFlags]::SelfRelative)
+    $allowedFlags = $requiredFlags -bor [int][Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited
+    if (([int]$descriptor.ControlFlags -band $requiredFlags) -ne $requiredFlags -or
+        ([int]$descriptor.ControlFlags -band (-bnot $allowedFlags)) -ne 0) {
+        throw "Windows directory DACL control flags are not semantically exact"
+    }
+    if ($null -eq $descriptor.DiscretionaryAcl -or $descriptor.DiscretionaryAcl.Count -ne $ExpectedRights.Count) {
+        throw "Windows directory raw DACL rule count is not exact"
+    }
+    $expectedAceFlags = [Security.AccessControl.AceFlags]([int][Security.AccessControl.AceFlags]::ContainerInherit -bor
+        [int][Security.AccessControl.AceFlags]::ObjectInherit)
+    $rawObserved = @{}
+    foreach ($ace in $descriptor.DiscretionaryAcl) {
+        if ($ace -isnot [Security.AccessControl.CommonAce] -or $ace.IsCallback -or $ace.OpaqueLength -ne 0 -or
+            $ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed -or
+            $ace.AceFlags -ne $expectedAceFlags) {
+            throw "Windows directory raw DACL ACE type or flags are not exact"
+        }
+        $sid = $ace.SecurityIdentifier.Value
+        if ($rawObserved.ContainsKey($sid) -or -not $ExpectedRights.Contains($sid) -or
+            $ace.AccessMask -ne [int][Security.AccessControl.FileSystemRights]$ExpectedRights[$sid]) {
+            throw "Windows directory raw DACL ACE SID or mask is not exact: $sid"
+        }
+        $rawObserved[$sid] = $true
+    }
+
     $actualSddl = $actual.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
-    $expectedSddl = $expectedAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
-    if ($actualSddl -cne $expectedSddl) { throw "Windows root DACL SDDL is not semantically exact" }
     return $actualSddl
 }
 
-if ($env:OS -ne "Windows_NT" -or -not (Test-IsAdministrator)) { throw "Windows root protection requires an elevated Windows console" }
+if ($env:OS -ne "Windows_NT") { throw "Windows root protection requires Windows" }
+if ($AclRoundTripPreflight) {
+    if ($Apply -or $AcknowledgeProtectedRootAcl) { throw "ACL round-trip preflight cannot request root mutation" }
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $fullControl = [Security.AccessControl.FileSystemRights]::FullControl
+    $preflightRights = [ordered]@{}
+    $preflightRights[$SystemSid] = $fullControl
+    $preflightRights[$currentSid.Value] = $fullControl
+    $preflightAcl = New-ExactDirectoryAcl $currentSid $preflightRights
+    $expectedSddl = $preflightAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+    $fixture = [IO.Path]::Combine([IO.Path]::GetTempPath(), "self-hosted-ci-acl-preflight-$([Guid]::NewGuid().ToString('N'))")
+    $fixtureRemoved = $false
+    try {
+        [void][IO.Directory]::CreateDirectory($fixture)
+        Set-Acl -LiteralPath $fixture -AclObject $preflightAcl
+        $observedSddl = Assert-ExactDirectoryAcl $fixture $currentSid $preflightRights
+    }
+    finally {
+        if ([IO.Directory]::Exists($fixture)) { [IO.Directory]::Delete($fixture, $true) }
+        $fixtureRemoved = -not [IO.Directory]::Exists($fixture)
+    }
+    if (-not $fixtureRemoved) { throw "ACL round-trip preflight fixture cleanup failed" }
+    $observedDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new($observedSddl)
+    [ordered]@{
+        status = "verified"
+        operation = "windows-root-acl-roundtrip-preflight"
+        expected_dacl_sddl = $expectedSddl
+        observed_dacl_sddl = $observedSddl
+        auto_inherited_metadata_observed = [bool]($observedDescriptor.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited)
+        root_mutated = $false
+        temporary_fixture_removed = $true
+    } | ConvertTo-Json -Compress
+    return
+}
+
+if (-not (Test-IsAdministrator)) { throw "Windows root protection requires an elevated Windows console" }
 if ($ServiceAccount -cne "selfhosted-ci-svc" -or $ReaderAccount -cne "selfhosted-ci-health") { throw "Windows root identities are pinned" }
 if ($ExpectedServiceAccountSid -notmatch '^S-1-5-21-(?:[0-9]+-){3}[0-9]+$') { throw "expected service-account SID is invalid" }
 $service = Get-PinnedLocalAccount $ServiceAccount $true
@@ -120,7 +175,14 @@ $rootItem = Get-Item -LiteralPath $Root -Force
 if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Windows self-hosted-ci root must not be a reparse point" }
 $serviceSid = [Security.Principal.SecurityIdentifier]::new($service.SID.Value)
 $readerSid = [Security.Principal.SecurityIdentifier]::new($reader.SID.Value)
-$targetAcl = New-RootAcl $serviceSid $readerSid
+$fullControl = [Security.AccessControl.FileSystemRights]::FullControl
+$readOnly = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize
+$rootRights = [ordered]@{}
+$rootRights[$SystemSid] = $fullControl
+$rootRights[$AdministratorsSid] = $fullControl
+$rootRights[$serviceSid.Value] = $readOnly
+$rootRights[$readerSid.Value] = $readOnly
+$targetAcl = New-ExactDirectoryAcl ([Security.Principal.SecurityIdentifier]::new($AdministratorsSid)) $rootRights
 $targetSddl = $targetAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
 [ordered]@{
     mode = "plan"
@@ -143,7 +205,7 @@ if (-not $AcknowledgeProtectedRootAcl) { throw "Apply requires acknowledgement o
 $originalAcl = Get-Acl -LiteralPath $Root
 try {
     Set-Acl -LiteralPath $Root -AclObject $targetAcl
-    $verifiedSddl = Assert-ExactRootAcl $serviceSid $readerSid
+    $verifiedSddl = Assert-ExactDirectoryAcl $Root ([Security.Principal.SecurityIdentifier]::new($AdministratorsSid)) $rootRights
 }
 catch {
     $original = $_.Exception.Message
