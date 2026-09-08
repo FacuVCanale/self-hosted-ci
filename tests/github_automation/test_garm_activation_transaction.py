@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
+import sys
+import tempfile
 import unittest
 
 
@@ -35,7 +37,6 @@ class GarmActivationTransactionTests(unittest.TestCase):
                 "--garm-cli-home",
                 "--acknowledge-external-github-mutation",
                 '"$incus_project" == ci-jit',
-                "require_command_contracts",
                 "acquire_transaction_lock",
             ):
                 self.assertIn(token, source)
@@ -43,6 +44,8 @@ class GarmActivationTransactionTests(unittest.TestCase):
             self.assertNotIn("--scale-set-name", source)
         self.assertIn("--acknowledge-local-ci-activation", activate)
         self.assertIn("--acknowledge-local-ci-deactivation", deactivate)
+        self.assertIn("require_command_contracts", activate)
+        self.assertIn("require_deactivation_command_contracts", deactivate)
         for script in (ACTIVATE, DEACTIVATE):
             result = subprocess.run(
                 ["bash", str(script), "--apply"], text=True, capture_output=True
@@ -98,7 +101,7 @@ class GarmActivationTransactionTests(unittest.TestCase):
         library = LIBRARY.read_text(encoding="utf-8")
         deactivate = DEACTIVATE.read_text(encoding="utf-8")
         disable = deactivate.index(
-            'systemctl stop "$OUTBOUND_WORKER_SERVICE" "$BROKER_SERVICE"'
+            'systemctl disable --now "$OUTBOUND_WORKER_SERVICE" "$BROKER_SERVICE"'
         )
         drain = deactivate.index("recover_allocations")
         stop = deactivate.index("stop_after_zero")
@@ -107,8 +110,8 @@ class GarmActivationTransactionTests(unittest.TestCase):
         self.assertIn("GARM and policy remain active", deactivate)
         self.assertIn('systemctl start "$POLICY_SERVICE" "$PROXY_SERVICE"', deactivate)
         self.assertLess(
-            deactivate.index('systemctl start "$POLICY_SERVICE" "$PROXY_SERVICE"'),
             disable,
+            deactivate.index('systemctl start "$POLICY_SERVICE" "$PROXY_SERVICE"'),
         )
         self.assertIn(
             "run deactivation to reconcile it", ACTIVATE.read_text(encoding="utf-8")
@@ -138,6 +141,27 @@ class GarmActivationTransactionTests(unittest.TestCase):
         self.assertIn("GARM_SESSION_FAILURE_QUARANTINE=true", deactivate)
         self.assertIn('"$NETWORK_POLICY_SCRIPT" quarantine', library)
         self.assertIn('"$GARM_SESSION_HELPER" run -- --format json', library)
+
+    def test_deactivation_closes_admission_before_optional_runtime_contract_checks(self) -> None:
+        deactivate = DEACTIVATE.read_text(encoding="utf-8")
+        library = LIBRARY.read_text(encoding="utf-8")
+        disable = deactivate.index(
+            'systemctl disable --now "$OUTBOUND_WORKER_SERVICE" "$BROKER_SERVICE"'
+        )
+        prerequisites = deactivate.index("require_deactivation_command_contracts")
+        recovery = deactivate.index("recover_allocations")
+        self.assertLess(disable, prerequisites)
+        self.assertLess(prerequisites, recovery)
+        self.assertNotIn("require_health_configuration", deactivate)
+        deactivation_contract = library.split(
+            "require_deactivation_command_contracts(){", 1
+        )[1].split("\nrequire_command_contracts()", 1)[0]
+        self.assertNotIn("$OUTBOUND_CONFIG", deactivation_contract)
+        self.assertNotIn("$HEALTH_STATE", deactivation_contract)
+        self.assertIn(
+            'require_root_regular_file "$OUTBOUND_CONFIG" 0600',
+            library.split("require_command_contracts(){", 1)[1].split("\n", 1)[0],
+        )
 
     def test_zero_runtime_can_be_proved_after_canonical_deactivation(self) -> None:
         library = LIBRARY.read_text(encoding="utf-8")
@@ -186,6 +210,78 @@ class GarmActivationTransactionTests(unittest.TestCase):
         source = LIBRARY.read_text(encoding="utf-8")
         self.assertNotIn("assert ", source)
         self.assertIn("raise SystemExit", source)
+
+    def test_activation_cross_checks_outbound_broker_and_health_contracts(self) -> None:
+        source = LIBRARY.read_text(encoding="utf-8")
+        for token in (
+            'readonly OUTBOUND_CONFIG=/etc/self-hosted-ci/outbound-worker.json',
+            'require_root_regular_file "$OUTBOUND_CONFIG" 0600',
+            'b=json.load(open(sys.argv[2])); o=json.load(open(sys.argv[3]))',
+            'repository_id=str(o.get("repository_id"))',
+            'target.get("authority_kind")!=o.get("authority_kind")',
+            'target.get("runner_group")!=o.get("runner_group")',
+            'o.get("image_fingerprint")!=b.get("image_fingerprint")',
+        ):
+            self.assertIn(token, source)
+
+    def test_health_cross_check_rejects_outbound_image_or_authority_drift(self) -> None:
+        source = LIBRARY.read_text(encoding="utf-8")
+        marker = "import json,sys\n"
+        body = marker + source.split(marker, 1)[1].split("\nPY\n", 1)[0]
+        fingerprint = "a" * 64
+        target = {
+            "authority_kind": "organization-runner-group",
+            "entity_flag": "--org",
+            "entity_id": "11111111-1111-1111-1111-111111111111",
+            "entity_name": "owner",
+            "runner_group": "ci",
+        }
+        broker = {
+            "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+            "provider_name": "incus_ci_jit",
+            "image_alias": "image-v1",
+            "image_fingerprint": fingerprint,
+            "live_job_verifier": "/verifier",
+            "targets": {"42": target},
+        }
+        health = {
+            "schema_version": 3,
+            "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+            "manager_configured": True,
+            "provider_configured": True,
+            "image_configured": True,
+            "broker_configured": True,
+            "zero_scale_sets": True,
+            "image": {"alias": "image-v1", "fingerprint": fingerprint},
+            "targets": {"42": target},
+        }
+        outbound = {
+            "repository": "owner/repo",
+            "repository_id": 42,
+            "default_branch": "main",
+            "authority_kind": "organization-runner-group",
+            "runner_group": "ci",
+            "image_fingerprint": fingerprint,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory) / name for name in ("health", "broker", "outbound")]
+
+            def run() -> subprocess.CompletedProcess[str]:
+                for path, value in zip(paths, (health, broker, outbound), strict=True):
+                    path.write_text(json.dumps(value), encoding="utf-8")
+                return subprocess.run(
+                    [sys.executable, "-c", body, *map(str, paths), "/verifier"],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+            self.assertEqual(0, run().returncode)
+            outbound["image_fingerprint"] = "b" * 64
+            self.assertNotEqual(0, run().returncode)
+            outbound["image_fingerprint"] = fingerprint
+            outbound["runner_group"] = "other"
+            self.assertNotEqual(0, run().returncode)
 
     def test_scripts_parse_as_bash(self) -> None:
         for script in (ACTIVATE, DEACTIVATE, LIBRARY):

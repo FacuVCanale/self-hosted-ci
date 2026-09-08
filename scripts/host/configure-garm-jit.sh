@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly GARM_CONFIG=/etc/self-hosted-ci/garm/config.toml
-readonly PROVIDER_CONFIG=/etc/self-hosted-ci/garm/garm-provider-incus.toml
-readonly HEALTH_STATE=/etc/self-hosted-ci/garm/health-state.json
-readonly BROKER_CONFIG=/etc/self-hosted-ci/garm/allocation-broker.json
-readonly BROKER_PUBLIC_KEY=/etc/self-hosted-ci/garm/allocation-authority-public-key.pem
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/garm-jit-transaction-lib.sh"
+
 readonly ADMIN_USERNAME=/etc/self-hosted-ci/garm/admin-username
 readonly ADMIN_PASSWORD=/etc/self-hosted-ci/garm/admin-password
 readonly JWT_SECRET=/etc/self-hosted-ci/garm/jwt-secret
-readonly GARM_DATABASE=/var/lib/self-hosted-ci/garm/garm.db
 readonly GARM_BLOB_DATABASE=/var/lib/self-hosted-ci/garm/blob-garm.db
 readonly LIVE_VERIFIER_CONFIG=/etc/self-hosted-ci/github-live-job-verifier.json
+readonly OUTBOUND_RUNTIME_INSTALLER=/usr/local/lib/self-hosted-ci/install-outbound-worker-runtime.py
 readonly SESSION_HELPER=/usr/local/lib/self-hosted-ci/garm-cli-session.py
 readonly RUNTIME_CLI_HOME=/run/self-hosted-ci/garm-cli
 readonly TRANSIENT_UNIT=self-hosted-ci-garm-configure.service
@@ -20,12 +17,12 @@ readonly METADATA_URL=http://10.254.0.1:8080/api/v1/metadata
 
 die() { printf 'garm-jit configuration blocked: %s\n' "$*" >&2; exit 1; }
 usage() {
-  printf 'usage: %s [--plan] | --apply --config-template FILE --jwt-secret-file FILE --database-passphrase-file FILE --garm-admin-username-file FILE --garm-admin-password-file FILE --runner-manager-app-config-file FILE --dispatcher-app-config-file FILE --live-job-verifier-app-config-file FILE --garm-cli-home /run/self-hosted-ci/garm-cli --authority-kind personal-repository|organization-runner-group --repository OWNER/REPO --repository-id ID --default-branch BRANCH [--entity-id UUID] --entity-name OWNER/REPO|ORGANIZATION [--runner-group GROUP] --image-alias ALIAS --image-fingerprint SHA256 --allocation-authority-public-key FILE --live-job-verifier /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py --acknowledge-root-secret-installation --acknowledge-garm-database-mutation --acknowledge-external-github-configuration\n' "$0" >&2
+  printf 'usage: %s [--plan] | --apply --config-template FILE --jwt-secret-file FILE --database-passphrase-file FILE --garm-admin-username-file FILE --garm-admin-password-file FILE --runner-manager-app-config-file FILE --dispatcher-app-config-file FILE --live-job-verifier-app-config-file FILE --garm-cli-home /run/self-hosted-ci/garm-cli --authority-kind personal-repository|organization-runner-group --repository OWNER/REPO --repository-id ID --default-branch BRANCH [--entity-id UUID] --entity-name OWNER/REPO|ORGANIZATION [--runner-group GROUP] --image-alias ALIAS --image-fingerprint SHA256 --expected-previous-image-fingerprint SHA256 --allocation-authority-public-key FILE --live-job-verifier /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py --acknowledge-root-secret-installation --acknowledge-garm-database-mutation --acknowledge-external-github-configuration\n' "$0" >&2
   exit 2
 }
 
 mode=plan; template=""; jwt_file=""; passphrase_file=""; admin_username_file=""; admin_password_file=""; runner_manager_app_config_file=""; dispatcher_app_config_file=""; live_job_verifier_app_config_file=""; cli_home=""; authority_kind=""
-repository=""; repository_id=""; default_branch=""; entity_id=""; entity_name=""; runner_group=""; image_alias=""; image_fingerprint=""; allocation_public_key=""; live_job_verifier=""
+repository=""; repository_id=""; default_branch=""; entity_id=""; entity_name=""; runner_group=""; image_alias=""; image_fingerprint=""; expected_previous_image_fingerprint=""; allocation_public_key=""; live_job_verifier=""
 ack_secrets=false; ack_database=false; ack_github=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --runner-group) [[ $# -ge 2 ]] || usage; runner_group="$2"; shift 2 ;;
     --image-alias) [[ $# -ge 2 ]] || usage; image_alias="$2"; shift 2 ;;
     --image-fingerprint) [[ $# -ge 2 ]] || usage; image_fingerprint="$2"; shift 2 ;;
+    --expected-previous-image-fingerprint) [[ $# -ge 2 ]] || usage; expected_previous_image_fingerprint="$2"; shift 2 ;;
     --allocation-authority-public-key) [[ $# -ge 2 ]] || usage; allocation_public_key="$2"; shift 2 ;;
     --live-job-verifier) [[ $# -ge 2 ]] || usage; live_job_verifier="$2"; shift 2 ;;
     --acknowledge-root-secret-installation) ack_secrets=true; shift ;;
@@ -59,7 +57,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${mode}" == plan ]]; then
-  printf '{"mode":"plan","host_changes":false,"external_calls":"not_performed","garm_enabled":false,"runner_registration":"not_performed","sequence":["render manager/provider config and install login credentials from root-only files","initialize the controller through loopback without exposing the password","reconcile a repository-bound GitHub App credential and exact repo or organization entity","derive the entity UUID from live GARM state","verify exact local Incus image fingerprint and selected target authority","temporarily start GARM without enabling its service","set runner-reachable callback and metadata URLs","require zero scale sets and zero runtime instances","install root-owned broker target/public-key/live-verifier contract","derive atomic manager health state","stop transient GARM"]}\n'
+  printf '{"mode":"plan","host_changes":false,"external_calls":"not_performed","garm_enabled":false,"runner_registration":"not_performed","sequence":["acquire the common GARM JIT transaction lock","require persistent GARM, broker, and outbound worker disabled and inactive with activation and network sentinels absent","prove zero scale sets and zero runtime instances","verify the canonical outbound worker runtime and compare-and-swap image fingerprint","render manager/provider config and install login credentials from root-only files","initialize the controller through loopback without exposing the password","reconcile a repository-bound GitHub App credential and exact repo or organization entity","derive the entity UUID from live GARM state","verify exact local Incus image fingerprint and selected target authority","temporarily start GARM without enabling its service","set runner-reachable callback and metadata URLs","atomically reconcile outbound worker, broker, and health image contracts with rollback","verify the canonical outbound worker runtime","stop transient GARM"]}\n'
   exit 0
 fi
 
@@ -67,6 +65,7 @@ fi
 [[ "${WSL_DISTRO_NAME:-}" == Ubuntu-24.04-CI ]] || die 'WSL_DISTRO_NAME must be Ubuntu-24.04-CI'
 grep -qi wsl2 /proc/sys/kernel/osrelease || die 'host must be WSL2'
 [[ "${ack_secrets}" == true && "${ack_database}" == true && "${ack_github}" == true ]] || die '--apply requires all three explicit acknowledgements'
+acquire_transaction_lock
 [[ "${authority_kind}" == personal-repository || "${authority_kind}" == organization-runner-group ]] || die 'authority kind must be personal-repository or organization-runner-group'
 validate_uuid() {
   python3 - "$1" <<'PY'
@@ -88,6 +87,7 @@ GITHUB_CREDENTIAL_DESCRIPTION="Self-hosted CI runner manager for repository ${re
 [[ "${entity_name}" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?$ ]] || die 'entity name is invalid'
 [[ "${image_alias}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{2,127}$ && "${image_alias}" != *:* ]] || die 'image must be a local immutable alias without a remote prefix'
 [[ "${image_fingerprint}" =~ ^[0-9a-f]{64}$ ]] || die 'image fingerprint must be lowercase SHA-256'
+[[ "${expected_previous_image_fingerprint}" =~ ^[0-9a-f]{64}$ ]] || die 'expected previous image fingerprint must be lowercase SHA-256'
 [[ -f "${allocation_public_key}" && ! -L "${allocation_public_key}" ]] || die 'allocation authority public key must be a regular file'
 [[ "${live_job_verifier}" == /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py ]] || die 'live workflow-job verifier path is not exact'
 [[ -f "${live_job_verifier}" && ! -L "${live_job_verifier}" && -x "${live_job_verifier}" ]] || die 'live workflow-job verifier must be an executable regular file'
@@ -107,6 +107,32 @@ if not value or value!=value.strip() or len(value)>100 or "*" in value or "\r" i
 PY
   entity_flag=--org
 fi
+
+for unit in "${GARM_SERVICE}" "${BROKER_SERVICE}" "${OUTBOUND_WORKER_SERVICE}"; do
+  if enabled_state="$(systemctl is-enabled "${unit}" 2>&1)"; then
+    die "${unit} must remain disabled during configuration"
+  fi
+  [[ "${enabled_state}" == disabled ]] || die "${unit} disabled state cannot be proved"
+  if active_state="$(systemctl is-active "${unit}" 2>&1)"; then
+    die "${unit} must be inactive during configuration"
+  fi
+  [[ "${active_state}" == inactive ]] || die "${unit} inactive state cannot be proved"
+done
+[[ ! -e "${ACTIVATION_SENTINEL}" ]] || die 'activation sentinel must be absent during configuration'
+[[ ! -e "${NETWORK_SENTINEL}" ]] || die 'network sentinel must be absent during configuration'
+zero_runtime_state || die 'configuration requires zero scale sets and zero Incus instances'
+[[ -x "${OUTBOUND_RUNTIME_INSTALLER}" && ! -L "${OUTBOUND_RUNTIME_INSTALLER}" ]] || die 'canonical outbound worker installer is absent or unsafe'
+"${OUTBOUND_RUNTIME_INSTALLER}" --verify >/dev/null || die 'canonical outbound worker runtime failed pre-rotation verification'
+python3 - "${OUTBOUND_CONFIG}" "${repository}" "${repository_id}" "${default_branch}" "${authority_kind}" "${runner_group}" "${expected_previous_image_fingerprint}" "${image_fingerprint}" <<'PY'
+import json,pathlib,sys
+path=pathlib.Path(sys.argv[1]); repository,repository_id,branch,authority,runner_group,previous,new=sys.argv[2:]
+value=json.loads(path.read_text(encoding="utf-8"))
+expected_group=runner_group or None
+if value.get("repository")!=repository or str(value.get("repository_id"))!=repository_id: raise SystemExit("outbound repository binding drifted")
+if value.get("default_branch")!=branch or value.get("authority_kind")!=authority or value.get("runner_group")!=expected_group: raise SystemExit("outbound branch or authority binding drifted")
+observed=value.get("image_fingerprint")
+if observed not in {previous,new}: raise SystemExit("outbound image fingerprint compare-and-swap failed")
+PY
 
 require_root_secret() {
   local path="$1" mode_value
@@ -180,9 +206,6 @@ grep -Fqx 'skip_verify = false' "${PROVIDER_CONFIG}" || die 'provider image remo
 command -v python3 >/dev/null; command -v incus >/dev/null; command -v systemd-run >/dev/null
 [[ -x /usr/local/bin/garm && -x /usr/local/bin/garm-cli && -x /usr/local/libexec/garm/garm-provider-incus ]] || die 'pinned GARM binaries are incomplete'
 id garm-manager >/dev/null 2>&1 || die 'garm-manager is absent'
-systemctl is-enabled --quiet self-hosted-ci-garm.service && die 'persistent GARM service must remain disabled during configuration'
-systemctl is-active --quiet self-hosted-ci-garm.service && die 'persistent GARM service must be inactive during configuration'
-[[ ! -e /etc/self-hosted-ci/ACTIVATION_APPROVED ]] || die 'activation sentinel must be absent during configuration'
 
 install -d -o root -g garm-manager -m 0751 /etc/self-hosted-ci
 install -d -o root -g garm-manager -m 0750 /etc/self-hosted-ci/garm
@@ -192,19 +215,74 @@ install -d -o garm-manager -g garm-manager -m 0700 /var/lib/self-hosted-ci/garm
 [[ ! -e "${HEALTH_STATE}" || ( -f "${HEALTH_STATE}" && ! -L "${HEALTH_STATE}" ) ]] || die 'existing health state is not a regular file'
 transaction_dir="$(mktemp -d /etc/self-hosted-ci/garm/.configure-rollback.XXXXXX)"
 chmod 0700 "${transaction_dir}"
-had_config=false; had_health=false; had_broker_config=false; had_broker_key=false; had_admin_username=false; had_admin_password=false; had_jwt_secret=false; had_database=false; had_blob_database=false; had_live_verifier_config=false
+copy_file_durably() {
+  python3 - "$1" "$2" <<'PY'
+import hashlib, os, pathlib, stat, sys, tempfile
+source, destination = map(pathlib.Path, sys.argv[1:])
+source_stat = source.lstat()
+if not stat.S_ISREG(source_stat.st_mode) or source.is_symlink(): raise SystemExit("snapshot source is not a regular file")
+destination.parent.mkdir(parents=True, exist_ok=True)
+fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+try:
+    digest = hashlib.sha256()
+    with source.open("rb") as incoming, os.fdopen(fd, "wb") as outgoing:
+        while block := incoming.read(1024 * 1024):
+            digest.update(block); outgoing.write(block)
+        os.fchmod(outgoing.fileno(), stat.S_IMODE(source_stat.st_mode)); os.fchown(outgoing.fileno(), source_stat.st_uid, source_stat.st_gid)
+        outgoing.flush(); os.fsync(outgoing.fileno())
+    os.replace(temporary, destination)
+    directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(directory_fd)
+    finally: os.close(directory_fd)
+except BaseException:
+    try: os.unlink(temporary)
+    except FileNotFoundError: pass
+    raise
+restored_stat = destination.lstat()
+if not stat.S_ISREG(restored_stat.st_mode) or destination.is_symlink(): raise SystemExit("durable copy destination is unsafe")
+if (stat.S_IMODE(restored_stat.st_mode), restored_stat.st_uid, restored_stat.st_gid) != (stat.S_IMODE(source_stat.st_mode), source_stat.st_uid, source_stat.st_gid): raise SystemExit("durable copy metadata verification failed")
+if hashlib.sha256(destination.read_bytes()).digest() != digest.digest(): raise SystemExit("durable copy content verification failed")
+PY
+}
+snapshot_sqlite_database() {
+  python3 - "$1" "$2" <<'PY'
+import os, pathlib, sqlite3, stat, sys, urllib.parse
+source, destination = map(pathlib.Path, sys.argv[1:])
+source_stat = source.lstat()
+if not stat.S_ISREG(source_stat.st_mode) or source.is_symlink(): raise SystemExit("SQLite snapshot source is not a regular file")
+uri = "file:" + urllib.parse.quote(str(source), safe="/") + "?mode=ro"
+incoming = sqlite3.connect(uri, uri=True)
+outgoing = sqlite3.connect(destination)
+try:
+    incoming.backup(outgoing)
+    if outgoing.execute("PRAGMA quick_check").fetchone() != ("ok",): raise SystemExit("SQLite snapshot quick_check failed")
+finally:
+    outgoing.close(); incoming.close()
+fd = os.open(destination, os.O_RDONLY)
+try: os.fchmod(fd, stat.S_IMODE(source_stat.st_mode)); os.fchown(fd, source_stat.st_uid, source_stat.st_gid); os.fsync(fd)
+finally: os.close(fd)
+directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+try: os.fsync(directory_fd)
+finally: os.close(directory_fd)
+PY
+}
+restore_or_remove() {
+  local existed="$1" snapshot="$2" destination="$3"
+  if [[ "${existed}" == true ]]; then copy_file_durably "${snapshot}" "${destination}"; else remove_durable_file "${destination}"; fi
+}
+had_config=false; had_health=false; had_broker_config=false; had_broker_key=false; had_admin_username=false; had_admin_password=false; had_jwt_secret=false; had_database=false; had_blob_database=false; had_live_verifier_config=false; had_outbound_config=false
 if [[ -e "${GARM_CONFIG}" ]]; then
-  cp -a "${GARM_CONFIG}" "${transaction_dir}/config.toml"; had_config=true
+  copy_file_durably "${GARM_CONFIG}" "${transaction_dir}/config.toml"; had_config=true
 fi
 if [[ -e "${HEALTH_STATE}" ]]; then
-  cp -a "${HEALTH_STATE}" "${transaction_dir}/health-state.json"; had_health=true
+  copy_file_durably "${HEALTH_STATE}" "${transaction_dir}/health-state.json"; had_health=true
 fi
-if [[ -e "${BROKER_CONFIG}" ]]; then cp -a "${BROKER_CONFIG}" "${transaction_dir}/allocation-broker.json"; had_broker_config=true; fi
-if [[ -e "${BROKER_PUBLIC_KEY}" ]]; then cp -a "${BROKER_PUBLIC_KEY}" "${transaction_dir}/allocation-authority-public-key.pem"; had_broker_key=true; fi
+if [[ -e "${BROKER_CONFIG}" ]]; then copy_file_durably "${BROKER_CONFIG}" "${transaction_dir}/allocation-broker.json"; had_broker_config=true; fi
+if [[ -e "${BROKER_PUBLIC_KEY}" ]]; then copy_file_durably "${BROKER_PUBLIC_KEY}" "${transaction_dir}/allocation-authority-public-key.pem"; had_broker_key=true; fi
 for secret_name in admin-username admin-password jwt-secret; do
   secret_path="/etc/self-hosted-ci/garm/${secret_name}"
   if [[ -e "${secret_path}" ]]; then
-    cp -a "${secret_path}" "${transaction_dir}/${secret_name}"
+    copy_file_durably "${secret_path}" "${transaction_dir}/${secret_name}"
     case "${secret_name}" in
       admin-username) had_admin_username=true ;;
       admin-password) had_admin_password=true ;;
@@ -212,9 +290,10 @@ for secret_name in admin-username admin-password jwt-secret; do
     esac
   fi
 done
-if [[ -e "${GARM_DATABASE}" ]]; then cp -a "${GARM_DATABASE}" "${transaction_dir}/garm.db"; had_database=true; fi
-if [[ -e "${GARM_BLOB_DATABASE}" ]]; then cp -a "${GARM_BLOB_DATABASE}" "${transaction_dir}/blob-garm.db"; had_blob_database=true; fi
-if [[ -e "${LIVE_VERIFIER_CONFIG}" ]]; then cp -a "${LIVE_VERIFIER_CONFIG}" "${transaction_dir}/github-live-job-verifier.json"; had_live_verifier_config=true; fi
+if [[ -e "${GARM_DATABASE}" ]]; then snapshot_sqlite_database "${GARM_DATABASE}" "${transaction_dir}/garm.db"; had_database=true; fi
+if [[ -e "${GARM_BLOB_DATABASE}" ]]; then snapshot_sqlite_database "${GARM_BLOB_DATABASE}" "${transaction_dir}/blob-garm.db"; had_blob_database=true; fi
+if [[ -e "${LIVE_VERIFIER_CONFIG}" ]]; then copy_file_durably "${LIVE_VERIFIER_CONFIG}" "${transaction_dir}/github-live-job-verifier.json"; had_live_verifier_config=true; fi
+if [[ -e "${OUTBOUND_CONFIG}" ]]; then copy_file_durably "${OUTBOUND_CONFIG}" "${transaction_dir}/outbound-worker.json"; had_outbound_config=true; fi
 candidate="$(mktemp /etc/self-hosted-ci/garm/.config.toml.XXXXXX)"
 transaction_succeeded=false
 created_entity_id=""; created_entity_kind=""; created_credential_id=""
@@ -227,17 +306,18 @@ cleanup() {
   systemctl stop "${TRANSIENT_UNIT}" >/dev/null 2>&1 || true
   systemctl reset-failed "${TRANSIENT_UNIT}" >/dev/null 2>&1 || true
   if [[ "${transaction_succeeded}" != true ]]; then
-    rm -f "${GARM_DATABASE}-wal" "${GARM_DATABASE}-shm" "${GARM_BLOB_DATABASE}-wal" "${GARM_BLOB_DATABASE}-shm"
-    if [[ "${had_database}" == true ]]; then cp -a "${transaction_dir}/garm.db" "${GARM_DATABASE}"; else rm -f "${GARM_DATABASE}"; fi
-    if [[ "${had_blob_database}" == true ]]; then cp -a "${transaction_dir}/blob-garm.db" "${GARM_BLOB_DATABASE}"; else rm -f "${GARM_BLOB_DATABASE}"; fi
-    if [[ "${had_config}" == true ]]; then cp -a "${transaction_dir}/config.toml" "${GARM_CONFIG}"; else rm -f "${GARM_CONFIG}"; fi
-    if [[ "${had_health}" == true ]]; then cp -a "${transaction_dir}/health-state.json" "${HEALTH_STATE}"; else rm -f "${HEALTH_STATE}"; fi
-    if [[ "${had_broker_config}" == true ]]; then cp -a "${transaction_dir}/allocation-broker.json" "${BROKER_CONFIG}"; else rm -f "${BROKER_CONFIG}"; fi
-    if [[ "${had_broker_key}" == true ]]; then cp -a "${transaction_dir}/allocation-authority-public-key.pem" "${BROKER_PUBLIC_KEY}"; else rm -f "${BROKER_PUBLIC_KEY}"; fi
-    if [[ "${had_admin_username}" == true ]]; then cp -a "${transaction_dir}/admin-username" "${ADMIN_USERNAME}"; else rm -f "${ADMIN_USERNAME}"; fi
-    if [[ "${had_admin_password}" == true ]]; then cp -a "${transaction_dir}/admin-password" "${ADMIN_PASSWORD}"; else rm -f "${ADMIN_PASSWORD}"; fi
-    if [[ "${had_jwt_secret}" == true ]]; then cp -a "${transaction_dir}/jwt-secret" "${JWT_SECRET}"; else rm -f "${JWT_SECRET}"; fi
-    if [[ "${had_live_verifier_config}" == true ]]; then cp -a "${transaction_dir}/github-live-job-verifier.json" "${LIVE_VERIFIER_CONFIG}"; else rm -f "${LIVE_VERIFIER_CONFIG}"; fi
+    for database_sidecar in "${GARM_DATABASE}-wal" "${GARM_DATABASE}-shm" "${GARM_BLOB_DATABASE}-wal" "${GARM_BLOB_DATABASE}-shm"; do remove_durable_file "${database_sidecar}"; done
+    restore_or_remove "${had_database}" "${transaction_dir}/garm.db" "${GARM_DATABASE}"
+    restore_or_remove "${had_blob_database}" "${transaction_dir}/blob-garm.db" "${GARM_BLOB_DATABASE}"
+    restore_or_remove "${had_config}" "${transaction_dir}/config.toml" "${GARM_CONFIG}"
+    restore_or_remove "${had_health}" "${transaction_dir}/health-state.json" "${HEALTH_STATE}"
+    restore_or_remove "${had_broker_config}" "${transaction_dir}/allocation-broker.json" "${BROKER_CONFIG}"
+    restore_or_remove "${had_broker_key}" "${transaction_dir}/allocation-authority-public-key.pem" "${BROKER_PUBLIC_KEY}"
+    restore_or_remove "${had_admin_username}" "${transaction_dir}/admin-username" "${ADMIN_USERNAME}"
+    restore_or_remove "${had_admin_password}" "${transaction_dir}/admin-password" "${ADMIN_PASSWORD}"
+    restore_or_remove "${had_jwt_secret}" "${transaction_dir}/jwt-secret" "${JWT_SECRET}"
+    restore_or_remove "${had_live_verifier_config}" "${transaction_dir}/github-live-job-verifier.json" "${LIVE_VERIFIER_CONFIG}"
+    restore_or_remove "${had_outbound_config}" "${transaction_dir}/outbound-worker.json" "${OUTBOUND_CONFIG}"
   fi
   rm -rf --one-file-system "${transaction_dir}"
 }
@@ -449,19 +529,24 @@ if not isinstance(scale_sets,list) or scale_sets: raise SystemExit("configuratio
 if not isinstance(instances,list) or instances: raise SystemExit("configuration requires zero Incus instances")
 PY
 install -o root -g root -m 0640 "${allocation_public_key}" "${BROKER_PUBLIC_KEY}"
-python3 - "${HEALTH_STATE}" "${BROKER_CONFIG}" "${BROKER_PUBLIC_KEY}" "${cli_home}" "${repository_id}" "${authority_kind}" "${entity_id}" "${entity_name}" "${runner_group}" "${image_alias}" "${image_fingerprint}" "${live_job_verifier}" <<'PY'
+python3 - "${HEALTH_STATE}" "${BROKER_CONFIG}" "${OUTBOUND_CONFIG}" "${BROKER_PUBLIC_KEY}" "${cli_home}" "${repository}" "${repository_id}" "${default_branch}" "${authority_kind}" "${entity_id}" "${entity_name}" "${runner_group}" "${image_alias}" "${image_fingerprint}" "${expected_previous_image_fingerprint}" "${live_job_verifier}" <<'PY'
 import hashlib, json, os, pathlib, sys, tempfile
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
-health_path, broker_path, key_path = map(pathlib.Path, sys.argv[1:4])
-cli_home, repository_id, authority, entity_id, entity_name, runner_group, image, fingerprint, verifier = sys.argv[4:]
+health_path, broker_path, outbound_path, key_path = map(pathlib.Path, sys.argv[1:5])
+cli_home, repository, repository_id, default_branch, authority, entity_id, entity_name, runner_group, image, fingerprint, previous_fingerprint, verifier = sys.argv[5:]
 key=serialization.load_pem_public_key(key_path.read_bytes())
 if not isinstance(key,ed25519.Ed25519PublicKey): raise SystemExit("allocation authority key must be Ed25519")
 target={"authority_kind":authority,"entity_flag":"--repo" if authority=="personal-repository" else "--org","entity_id":entity_id,"entity_name":entity_name,"runner_group":runner_group or None}
 der=key.public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo)
 broker={"allocation_signer_fingerprint":hashlib.sha256(der).hexdigest(),"garm_cli_home":cli_home,"provider_name":"incus_ci_jit","image_alias":image,"image_fingerprint":fingerprint,"live_job_verifier":verifier,"targets":{repository_id:target}}
 state={"schema_version":3,"garm_cli_home":cli_home,"manager_configured":True,"provider_configured":True,"image_configured":True,"broker_configured":True,"zero_scale_sets":True,"image":{"alias":image,"fingerprint":fingerprint},"targets":{repository_id:target}}
-for path,value,mode in ((broker_path,broker,0o600),(health_path,state,0o600)):
+outbound=json.loads(outbound_path.read_text(encoding="utf-8"))
+if outbound.get("repository")!=repository or str(outbound.get("repository_id"))!=repository_id or outbound.get("default_branch")!=default_branch: raise SystemExit("outbound repository binding changed during configuration")
+if outbound.get("authority_kind")!=authority or outbound.get("runner_group")!=(runner_group or None): raise SystemExit("outbound authority binding changed during configuration")
+if outbound.get("image_fingerprint") not in {previous_fingerprint,fingerprint}: raise SystemExit("outbound image fingerprint compare-and-swap changed before commit")
+outbound["image_fingerprint"]=fingerprint
+for path,value,mode in ((outbound_path,outbound,0o600),(broker_path,broker,0o600),(health_path,state,0o600)):
     path.parent.mkdir(mode=0o750,parents=True,exist_ok=True)
     fd,tmp=tempfile.mkstemp(prefix=f".{path.name}.",dir=path.parent)
     try:
@@ -474,8 +559,10 @@ for path,value,mode in ((broker_path,broker,0o600),(health_path,state,0o600)):
         except FileNotFoundError: pass
         raise
 PY
+"${OUTBOUND_RUNTIME_INSTALLER}" --verify >/dev/null || die 'canonical outbound worker runtime failed post-rotation verification'
+require_health_configuration
 systemctl stop "${TRANSIENT_UNIT}" >/dev/null
 systemctl is-active --quiet self-hosted-ci-garm.service && die 'persistent GARM became active'
 systemctl is-enabled --quiet self-hosted-ci-garm.service && die 'persistent GARM became enabled'
 transaction_succeeded=true
-printf '{"status":"configured","broker_configured":true,"zero_scale_sets":true,"runner_registration_performed":false,"garm_enabled":false,"health_state_derived_from_live_api":true}\n'
+printf '{"status":"configured","broker_configured":true,"outbound_worker_configured":true,"image_compare_and_swap":"satisfied","runtime_image_contract_consistent":true,"zero_scale_sets":true,"runner_registration_performed":false,"garm_enabled":false,"health_state_derived_from_live_api":true}\n'
