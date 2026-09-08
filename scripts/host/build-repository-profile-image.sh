@@ -189,11 +189,7 @@ fi
 incus exec "${builder}" --project "${PROJECT}" -- /usr/bin/python3 /run/self-hosted-ci-profile-build/verify.py \
   || die 'provisioned image verification failed'
 incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu '
-  source=/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs
   sealed=/opt/self-hosted-ci/.next-browser-logs-sealed
-  test -f "$source/file-logger.js"
-  test ! -e "$sealed"
-  cp -aL "$source" "$sealed"
   test -f "$sealed/file-logger.js"
 ' || die 'Next.js browser log sealing failed'
 incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu '

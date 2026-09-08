@@ -473,6 +473,9 @@ committed=true
             shutil.rmtree(installed_next)
             shutil.copytree(next_package, installed_next, symlinks=False)
             detach_regular_files(installed_next)
+            sealed_browser_logs = Path("/opt/self-hosted-ci/.next-browser-logs-sealed")
+            shutil.copytree(next_package / "dist/server/dev/browser-logs", sealed_browser_logs, symlinks=False)
+            detach_regular_files(sealed_browser_logs)
         source_modules = component_root / "node_modules"
         target_modules = dependencies / f"{component}-node_modules"
         if component == "backend":
