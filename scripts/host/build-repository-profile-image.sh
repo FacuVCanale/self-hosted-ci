@@ -213,6 +213,16 @@ inspect_running_device_contract(){
     printf probe > /dev/null || { printf "published-verifier /dev/null is not writable\n" >&2; exit 1; }
   '
 }
+assert_host_dev_null_contract(){
+  local metadata
+  [[ -c /dev/null && ! -L /dev/null ]]||die 'host /dev/null is not a safe character device'
+  metadata="$(stat -c 'uid=%u gid=%g mode=%a major=%t minor=%T' -- /dev/null)" \
+    || die 'host /dev/null metadata cannot be read'
+  printf 'host /dev/null metadata: %s\n' "${metadata}"
+  [[ "${metadata}" == 'uid=0 gid=0 mode=666 major=1 minor=3' ]] \
+    || die 'host /dev/null metadata drifted'
+  printf probe > /dev/null||die 'host /dev/null is not writable'
+}
 usage(){
   printf 'usage: %s [--plan] | --apply --profile-directory DIR --repository-profile FILE --expected-profile-digest SHA256 --base-fingerprint SHA256 --expected-manifest-sha256 SHA256 --candidate-alias ALIAS --overworld-bundle FILE --overworld-bundle-sha256 SHA256 --expected-overworld-commit SHA --waterfall-bundle FILE --waterfall-bundle-sha256 SHA256 --expected-waterfall-commit SHA --https-proxy http://10.254.0.1:8079 --acknowledge-temporary-build-egress --acknowledge-new-image-publication\n' "$0" >&2
   exit 2
@@ -371,6 +381,7 @@ if c.get("security.privileged")!="false" or c.get("security.nesting")!="false" o
 if set(d)!={"eth0","root"} or d["eth0"].get("network")!="ci-jit-isolated" or d["root"].get("type")!="disk": raise SystemExit(1)
 if any(x.get("type") in {"proxy","unix-char","unix-block"} for x in d.values()): raise SystemExit(1)
 PY
+assert_host_dev_null_contract
 incus start "${builder}" --project "${PROJECT}"
 wait_for_cloud_init_readiness "${builder}" || die 'builder cloud-init readiness guard failed'
 for file in manifest.json provision.py verify.py; do
@@ -426,8 +437,16 @@ if ! incus stop "${builder}" --project "${PROJECT}" --timeout 60; then
 fi
 incus list "${builder}" --project "${PROJECT}" --format csv -c s | grep -Fxq STOPPED \
   || die 'builder did not reach the stopped state before publication'
+sentinel_probe="${workdir}/sentinel-probe"
+: >"${sentinel_probe}"
+chmod 0600 "${sentinel_probe}"
+[[ -f "${sentinel_probe}" && ! -L "${sentinel_probe}" ]] \
+  || die 'sentinel probe destination is unsafe'
+[[ "$(stat -c 'uid=%u gid=%g mode=%a' -- "${sentinel_probe}")" == 'uid=0 gid=0 mode=600' ]] \
+  || die 'sentinel probe destination metadata drifted'
 for sentinel in "${PUBLISH_SENTINELS[@]}"; do
-  incus file pull "${builder}${sentinel}" /dev/null --project "${PROJECT}" \
+  : >"${sentinel_probe}"
+  incus file pull "${builder}${sentinel}" - --project "${PROJECT}" >"${sentinel_probe}" \
     || die "stopped-builder rootfs is missing or cannot expose sentinel: ${sentinel}"
 done
 incus publish "${builder}" --project "${PROJECT}" --alias "${candidate_alias}" >/dev/null
@@ -507,12 +526,14 @@ PY
 incus delete "${builder}" --project "${PROJECT}"
 incus init "${published_fingerprint}" "${published_verifier}" --project "${PROJECT}" --profile ci-jit
 for sentinel in "${PUBLISH_SENTINELS[@]}"; do
-  if incus file pull "${published_verifier}${sentinel}" /dev/null --project "${PROJECT}" >/dev/null 2>&1; then
+  : >"${sentinel_probe}"
+  if incus file pull "${published_verifier}${sentinel}" - --project "${PROJECT}" >"${sentinel_probe}" 2>"${workdir}/initialized-verifier-sentinel.stderr"; then
     printf 'initialized-verifier pre-start sentinel present: %s\n' "${sentinel}"
   else
     printf 'initialized-verifier pre-start sentinel absent or inaccessible (diagnostic only): %s\n' "${sentinel}" >&2
   fi
 done
+assert_host_dev_null_contract
 incus start "${published_verifier}" --project "${PROJECT}"
 expected_sentinel_digests=()
 while read -r digest sentinel; do
