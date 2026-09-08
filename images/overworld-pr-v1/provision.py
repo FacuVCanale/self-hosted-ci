@@ -73,6 +73,19 @@ def detach_regular_files(root: Path) -> None:
                     os.unlink(temporary)
 
 
+def normalize_tree_ownership(root: Path) -> None:
+    def fail_on_walk_error(error: OSError) -> None:
+        raise error
+
+    if root.is_symlink() or not root.is_dir():
+        raise SystemExit(f"cannot normalize unsafe dependency tree: {root}")
+    os.chown(root, 0, 0, follow_symlinks=False)
+    for directory, names, files in os.walk(root, followlinks=False, onerror=fail_on_walk_error):
+        parent = Path(directory)
+        for name in (*names, *files):
+            os.chown(parent / name, 0, 0, follow_symlinks=False)
+
+
 def tree_digest(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
@@ -493,6 +506,7 @@ committed=true
             sealed_frontend = Path("/opt/self-hosted-ci/.frontend-node-modules-sealed")
             shutil.copytree(target_modules, sealed_frontend, symlinks=False)
             detach_regular_files(sealed_frontend)
+            normalize_tree_ownership(sealed_frontend)
             required_next = target_modules / "next/dist/server/dev/browser-logs/file-logger.js"
             if not required_next.is_file() or required_next.resolve() != required_next:
                 raise SystemExit("frontend dependency snapshot retained a staging-backed path")

@@ -43,8 +43,11 @@ inspect_running_sentinels(){
       metadata=$(stat -c "uid=%u gid=%g mode=%a links=%h size=%s device=%d" -- "$path")
       printf "%s sentinel metadata: path=%s %s\n" "$phase" "$path" "$metadata"
       case "$metadata" in uid=0\ gid=0\ *) ;; *) printf "%s sentinel ownership is not root:root: %s\n" "$phase" "$path" >&2; failed=1 ;; esac
-      mount=$(findmnt -rn -T "$path" -o TARGET,SOURCE,FSTYPE 2>/dev/null | sed -n "1p")
-      if [ -n "$mount" ]; then
+      mount=""
+      if ! mount=$(findmnt -rn -T "$path" -o TARGET,SOURCE,FSTYPE); then
+        printf "%s sentinel mount lookup failed: %s\n" "$phase" "$path" >&2
+        failed=1
+      elif [ -n "$mount" ]; then
         printf "%s sentinel mount: path=%s %s\n" "$phase" "$path" "$mount"
         if [ "${mount%% *}" != / ]; then printf "%s sentinel mount target is not rootfs: %s\n" "$phase" "$path" >&2; failed=1; fi
       else
@@ -68,8 +71,11 @@ inspect_running_sentinels(){
       metadata=$(stat -c "uid=%u gid=%g mode=%a links=%h size=%s device=%d" -- "$directory")
       printf "%s sentinel ancestor metadata: path=%s %s\n" "$phase" "$directory" "$metadata"
       case "$metadata" in uid=0\ gid=0\ *) ;; *) printf "%s sentinel ancestor ownership is not root:root: %s\n" "$phase" "$directory" >&2; failed=1 ;; esac
-      mount=$(findmnt -rn -T "$directory" -o TARGET,SOURCE,FSTYPE 2>/dev/null | sed -n "1p")
-      if [ -n "$mount" ]; then
+      mount=""
+      if ! mount=$(findmnt -rn -T "$directory" -o TARGET,SOURCE,FSTYPE); then
+        printf "%s sentinel ancestor mount lookup failed: %s\n" "$phase" "$directory" >&2
+        failed=1
+      elif [ -n "$mount" ]; then
         printf "%s sentinel ancestor mount: path=%s %s\n" "$phase" "$directory" "$mount"
         if [ "${mount%% *}" != / ]; then printf "%s sentinel ancestor mount target is not rootfs: %s\n" "$phase" "$directory" >&2; failed=1; fi
       else
@@ -79,6 +85,25 @@ inspect_running_sentinels(){
     done
     exit "$failed"
   ' sentinel-check "${phase}" "${PUBLISH_SENTINELS[@]}" "$@"
+}
+inspect_running_device_contract(){
+  local instance=$1
+  incus exec "${instance}" --project "${PROJECT}" -- /bin/sh -ceu '
+    [ -c /dev/null ] || { printf "published-verifier /dev/null is not a character device\n" >&2; exit 1; }
+    metadata=$(stat -c "uid=%u gid=%g mode=%a major=%t minor=%T" -- /dev/null)
+    printf "published-verifier /dev/null metadata: %s\n" "$metadata"
+    [ "$metadata" = "uid=0 gid=0 mode=666 major=1 minor=3" ] \
+      || { printf "published-verifier /dev/null metadata drifted\n" >&2; exit 1; }
+    mount=""
+    if ! mount=$(findmnt -rn -T /dev -o TARGET,SOURCE,FSTYPE); then
+      printf "published-verifier /dev mount lookup failed\n" >&2
+      exit 1
+    fi
+    [ -n "$mount" ] || { printf "published-verifier /dev mount lookup was empty\n" >&2; exit 1; }
+    printf "published-verifier /dev mount: %s\n" "$mount"
+    [ "${mount%% *}" = /dev ] || { printf "published-verifier /dev mount target drifted\n" >&2; exit 1; }
+    printf probe > /dev/null || { printf "published-verifier /dev/null is not writable\n" >&2; exit 1; }
+  '
 }
 usage(){
   printf 'usage: %s [--plan] | --apply --profile-directory DIR --repository-profile FILE --expected-profile-digest SHA256 --base-fingerprint SHA256 --expected-manifest-sha256 SHA256 --candidate-alias ALIAS --overworld-bundle FILE --overworld-bundle-sha256 SHA256 --expected-overworld-commit SHA --waterfall-bundle FILE --waterfall-bundle-sha256 SHA256 --expected-waterfall-commit SHA --https-proxy http://10.254.0.1:8079 --acknowledge-temporary-build-egress --acknowledge-new-image-publication\n' "$0" >&2
@@ -313,6 +338,64 @@ import json,sys
 rows=[r for r in json.load(open(sys.argv[2])) if r.get("fingerprint")==sys.argv[1]]
 if len(rows)!=1 or rows[0].get("type")!="container" or rows[0].get("architecture")!="x86_64": raise SystemExit(1)
 PY
+published_export_dir="${workdir}/published-export"
+mkdir -m 0700 "${published_export_dir}"
+incus image export "${published_fingerprint}" "${published_export_dir}/image" --project "${PROJECT}" \
+  || die 'published image export failed'
+python3 - "${published_export_dir}" "${workdir}/publish-sentinels.sha256" "${PUBLISH_SENTINELS[@]}" <<'PY' \
+  || die 'published image tar sentinel verification failed'
+import hashlib
+from pathlib import Path
+import sys
+import tarfile
+
+export_dir = Path(sys.argv[1])
+inventory_path = Path(sys.argv[2])
+sentinels = sys.argv[3:]
+archives = [path for path in export_dir.iterdir() if path.is_file() and not path.is_symlink()]
+if len(archives) != 1:
+    raise SystemExit(f"published image export is ambiguous: regular_archive_count={len(archives)}")
+expected = {}
+for line in inventory_path.read_text(encoding="utf-8").splitlines():
+    fields = line.split(maxsplit=1)
+    if len(fields) != 2 or len(fields[0]) != 64 or fields[1] in expected:
+        raise SystemExit("published image sentinel digest inventory is malformed")
+    expected[fields[1]] = fields[0]
+if set(expected) != set(sentinels):
+    raise SystemExit("published image sentinel digest inventory is incomplete")
+with tarfile.open(archives[0], mode="r|*") as archive:
+    wanted = {f"rootfs/{sentinel.removeprefix('/')}": sentinel for sentinel in sentinels}
+    seen = set()
+    while True:
+        member = archive.next()
+        if member is None:
+            break
+        try:
+            sentinel = wanted.get(member.name)
+            if sentinel is None:
+                continue
+            if member.name in seen:
+                raise SystemExit(f"published image archive contains a duplicate member: {member.name}")
+            seen.add(member.name)
+            if not member.isfile() or member.uid != 0 or member.gid != 0:
+                raise SystemExit(f"published image archive sentinel is unsafe: {member.name}")
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise SystemExit(f"published image archive sentinel cannot be read: {member.name}")
+            digest = hashlib.sha256()
+            with stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            actual = digest.hexdigest()
+            print(f"published image archive sentinel: path={member.name} uid={member.uid} gid={member.gid} sha256={actual}")
+            if actual != expected[sentinel]:
+                raise SystemExit(f"published image archive sentinel digest changed: {member.name}")
+        finally:
+            archive.members.clear()
+    missing = set(wanted) - seen
+    if missing:
+        raise SystemExit(f"published image archive sentinels are missing: count={len(missing)}")
+PY
 incus delete "${builder}" --project "${PROJECT}"
 incus init "${published_fingerprint}" "${published_verifier}" --project "${PROJECT}" --profile ci-jit
 for sentinel in "${PUBLISH_SENTINELS[@]}"; do
@@ -331,6 +414,8 @@ done <"${workdir}/publish-sentinels.sha256"
   || die 'builder sentinel digest inventory is incomplete'
 inspect_running_sentinels "${published_verifier}" published-verifier-post-start "${expected_sentinel_digests[@]}" \
   || die 'published image boot sentinel verification failed'
+inspect_running_device_contract "${published_verifier}" \
+  || die 'published image boot device verification failed'
 incus delete "${published_verifier}" --project "${PROJECT}" --force
 if incus list "${published_verifier}" --project "${PROJECT}" --format csv -c n | grep -Fxq "${published_verifier}"; then
   die 'published image verifier cleanup failed'
