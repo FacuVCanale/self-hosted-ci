@@ -192,6 +192,19 @@ class LocalApprovalTests(unittest.TestCase):
         self.assertEqual("e" * 40, request["pilot_package"]["base_sha"])
         self.assertEqual("f" * 40, request["pilot_package"]["tested_merge_sha"])
 
+    def test_reapprove_same_head_blocks_when_stale_request_is_claimed(self):
+        self.store.approve(REPO, 42)
+        self.assertIsNotNone(self.store.poll())
+        self.resolver.base = "d" * 40
+        self.resolver.merge = "e" * 40
+        with self.assertRaisesRegex(
+            LocalApprovalError, "claimed approval no longer matches"
+        ):
+            self.store.approve(REPO, 42)
+        statuses = self.store.status(REPO, 42)
+        self.assertEqual(1, len(statuses))
+        self.assertEqual("claimed", statuses[0]["state"])
+
     def test_ttl_expiry_never_returns_work(self):
         self.store.approve(REPO, 42)
         self.clock.now = NOW + timedelta(minutes=4)

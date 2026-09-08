@@ -372,15 +372,17 @@ class LocalApprovalStore:
             target.repository_id, pr_number, target.head_sha
         )
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT request_id,state,expires_at,request_json FROM approvals WHERE repository=? AND pr_number=? AND head_sha=?",
+                "SELECT request_id,state,expires_at,request_json FROM approvals WHERE repository=? AND pr_number=? AND head_sha=? AND state IN ('pending','claimed') ORDER BY created_at DESC LIMIT 1",
                 (repository, pr_number, target.head_sha),
             ).fetchone()
-            if (
-                row
-                and row["state"] in {"pending", "claimed"}
-                and now < self._parse(row["expires_at"])
-            ):
+            if row and now >= self._parse(row["expires_at"]):
+                db.execute(
+                    "UPDATE approvals SET state='expired',reason='ttl-expired',active_key=NULL WHERE request_id=? AND state IN ('pending','claimed')",
+                    (row["request_id"],),
+                )
+            elif row:
                 try:
                     existing_request = json.loads(row["request_json"])
                 except json.JSONDecodeError as exc:
@@ -388,6 +390,7 @@ class LocalApprovalStore:
                         "stored active approval is invalid"
                     ) from exc
                 if self._request_matches_target(existing_request, target):
+                    db.execute("COMMIT")
                     return {
                         "request_id": row["request_id"],
                         "state": row["state"],
@@ -397,10 +400,15 @@ class LocalApprovalStore:
                     raise LocalApprovalError(
                         "claimed approval no longer matches the resolved target"
                     )
-                db.execute(
-                    "UPDATE approvals SET state='expired',reason='resolved-target-changed',active_key=NULL WHERE request_id=?",
+                changed = db.execute(
+                    "UPDATE approvals SET state='expired',reason='resolved-target-changed',active_key=NULL WHERE request_id=? AND state='pending' AND durable=0",
                     (row["request_id"],),
-                )
+                ).rowcount
+                if changed != 1:
+                    raise LocalApprovalError(
+                        "pending approval changed while reconciling its target"
+                    )
+            db.execute("COMMIT")
         request_id = str(uuid4())
         nonce = secrets.token_urlsafe(32)
         if len(nonce) != 43:
