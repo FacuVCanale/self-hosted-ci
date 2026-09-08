@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import quote
 from uuid import UUID
 
 _REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -151,6 +152,7 @@ class JitPilotPackageV1:
 
 class PilotGitHubReader(Protocol):
     def repository(self) -> Mapping[str, Any]: ...
+    def branch(self, name: str) -> Mapping[str, Any]: ...
     def pull_request(self, number: int) -> Mapping[str, Any]: ...
     def workflow(self) -> Mapping[str, Any]: ...
 
@@ -204,6 +206,13 @@ class GitHubApiReader:
     def repository(self):
         return self._get(f"/repos/{self.package.repository}")
 
+    def branch(self, name):
+        if name != self.package.base_branch:
+            raise JitPilotError("pilot branch crossed the package base branch")
+        return self._get(
+            f"/repos/{self.package.repository}/branches/{quote(name, safe='')}"
+        )
+
     def pull_request(self, number):
         return self._get(f"/repos/{self.package.repository}/pulls/{number}")
 
@@ -221,6 +230,14 @@ def revalidate_package(package: JitPilotPackageV1, github: PilotGitHubReader) ->
         or repository.get("default_branch") != package.base_branch
     ):
         raise JitPilotError("live repository identity crossed the pilot package")
+    branch = github.branch(package.base_branch)
+    branch_commit = branch.get("commit")
+    if (
+        branch.get("name") != package.base_branch
+        or not isinstance(branch_commit, Mapping)
+        or branch_commit.get("sha") != package.base_sha
+    ):
+        raise JitPilotError("live default branch crossed the pilot package")
     pull = github.pull_request(package.pr_number)
     head, base = pull.get("head"), pull.get("base")
     if (
@@ -229,7 +246,6 @@ def revalidate_package(package: JitPilotPackageV1, github: PilotGitHubReader) ->
         or not isinstance(head, Mapping)
         or head.get("sha") != package.head_sha
         or not isinstance(base, Mapping)
-        or base.get("sha") != package.base_sha
         or base.get("ref") != package.base_branch
         or not isinstance(base.get("repo"), Mapping)
         or base["repo"].get("id") != package.repository_id

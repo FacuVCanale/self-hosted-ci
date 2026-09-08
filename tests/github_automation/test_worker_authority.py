@@ -199,6 +199,7 @@ class WorkerAuthorityTests(unittest.TestCase):
             response(
                 200, {"id": 303, "full_name": REPOSITORY, "default_branch": "main"}
             ),
+            response(200, {"name": "main", "commit": {"sha": "b" * 40}}),
             response(
                 200,
                 {
@@ -246,6 +247,7 @@ class WorkerAuthorityTests(unittest.TestCase):
         )
         token = client.authenticate()
         self.assertEqual(303, client.repository(token)["id"])
+        self.assertEqual("b" * 40, client.default_branch_head(token))
         self.assertEqual("a" * 40, client.pull_request(7, token)["head"]["sha"])
         self.assertEqual(404, client.workflow(token)["id"])
         self.assertEqual(505, client.dispatch_pilot("{}", token))
@@ -255,6 +257,7 @@ class WorkerAuthorityTests(unittest.TestCase):
         self.assertEqual(
             [
                 API_ROOT + f"/repos/{REPOSITORY}",
+                API_ROOT + f"/repos/{REPOSITORY}/branches/main",
                 API_ROOT + f"/repos/{REPOSITORY}/pulls/7",
                 API_ROOT
                 + f"/repos/{REPOSITORY}/actions/workflows/ci-jit-pilot-child.yml",
@@ -272,7 +275,7 @@ class WorkerAuthorityTests(unittest.TestCase):
                 "inputs": {"pilot_package": "{}"},
                 "return_run_details": True,
             },
-            transport.calls[6][3],
+            transport.calls[7][3],
         )
 
     def test_pilot_dispatch_cannot_cross_to_a_non_pilot_workflow(self) -> None:
@@ -326,6 +329,10 @@ class WorkerAuthorityTests(unittest.TestCase):
             policy["allowed_endpoints"],
         )
         self.assertIn("POST /graphql", policy["allowed_endpoints"])
+        self.assertIn(
+            "GET /repos/{owner}/{repo}/branches/{branch}",
+            policy["allowed_endpoints"],
+        )
         self.assertNotIn(
             "POST /repos/{owner}/{repo}/actions/runners",
             policy["allowed_endpoints"],

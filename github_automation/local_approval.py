@@ -71,18 +71,13 @@ class WorkerAuthorityResolver:
             )
         token = self.client.authenticate()
         self.client.repository(token)
+        base = self.client.default_branch_head(token)
         pr = self.client.pull_request(pr_number, token)
         self.client.workflow(token)
-        base = pr.get("base", {}).get("sha")
         merge = pr.get("merge_commit_sha")
         if not isinstance(merge, str) or not re.fullmatch(r"[0-9a-f]{40}", merge):
             merge = self.client.potential_merge_commit(pr_number, token)
-        if (
-            not isinstance(base, str)
-            or not re.fullmatch(r"[0-9a-f]{40}", base)
-            or not isinstance(merge, str)
-            or not re.fullmatch(r"[0-9a-f]{40}", merge)
-        ):
+        if not isinstance(merge, str) or not re.fullmatch(r"[0-9a-f]{40}", merge):
             raise LocalApprovalError(
                 "pull request lacks exact base or tested merge SHA"
             )
