@@ -5,6 +5,7 @@ import tempfile, unittest
 from types import SimpleNamespace
 from github_automation.gatestore import GateStore
 from github_automation.local_approval import (
+    LocalApprovalError,
     LocalApprovalStore,
     PilotWorkRequestBuilder,
     ResolvedApprovalTarget,
@@ -28,6 +29,8 @@ class Clock:
 class Resolver:
     def __init__(self):
         self.head = "a" * 40
+        self.base = "b" * 40
+        self.merge = "c" * 40
         self.fail = False
         self.calls = []
 
@@ -42,8 +45,8 @@ class Resolver:
             self.head,
             "main",
             f"{REPO}/.github/workflows/ci-gate-child.yml@refs/heads/main",
-            "b" * 40,
-            "c" * 40,
+            self.base,
+            self.merge,
         )
 
 
@@ -133,6 +136,75 @@ class LocalApprovalTests(unittest.TestCase):
         self.assertIsNone(self.store.poll())
         self.assertEqual("expired", self.store.status(REPO, 42)[0]["state"])
 
+    def test_moved_base_and_merge_expire_before_work_is_returned(self):
+        approved = self.store.approve(REPO, 42)
+        self.resolver.base = "d" * 40
+        self.resolver.merge = "e" * 40
+        self.assertIsNone(self.store.poll())
+        status = self.store.status(REPO, 42)[0]
+        self.assertEqual(approved["request_id"], status["request_id"])
+        self.assertEqual("expired", status["state"])
+        self.assertEqual(
+            "resolved-target-or-generation-changed", status["reason"]
+        )
+        self.assertIsNone(self.store.current_request)
+
+    def test_reapprove_same_head_replaces_stale_pending_pilot_target(self):
+        root = Path(self.temp.name)
+
+        class PilotResolver:
+            def __init__(self):
+                self.base = "b" * 40
+                self.merge = "c" * 40
+
+            def resolve(self, repository, pr):
+                return ResolvedApprovalTarget(
+                    "123",
+                    REPO,
+                    42,
+                    "a" * 40,
+                    "main",
+                    f"{REPO}/.github/workflows/ci-jit-pilot-child.yml@refs/heads/main",
+                    self.base,
+                    self.merge,
+                )
+
+        resolver = PilotResolver()
+        store = LocalApprovalStore(
+            root / "reapprove-pilot.sqlite3",
+            GateStore(root / "reapprove-pilot-gate.sqlite3", clock=self.clock),
+            resolver,
+            PilotWorkRequestBuilder("d" * 64),
+            clock=self.clock,
+        )
+        first = store.approve(REPO, 42)
+        resolver.base = "e" * 40
+        resolver.merge = "f" * 40
+        second = store.approve(REPO, 42)
+        self.assertNotEqual(first["request_id"], second["request_id"])
+        self.assertFalse(second["idempotent"])
+        statuses = {item["request_id"]: item for item in store.status(REPO, 42)}
+        self.assertEqual("expired", statuses[first["request_id"]]["state"])
+        self.assertEqual(
+            "resolved-target-changed", statuses[first["request_id"]]["reason"]
+        )
+        request = store.poll()
+        self.assertEqual("e" * 40, request["pilot_package"]["base_sha"])
+        self.assertEqual("f" * 40, request["pilot_package"]["tested_merge_sha"])
+
+    def test_reapprove_same_head_blocks_when_stale_request_is_claimed(self):
+        self.store.approve(REPO, 42)
+        self.assertIsNotNone(self.store.poll())
+        self.resolver.base = "d" * 40
+        self.resolver.merge = "e" * 40
+        with self.assertRaisesRegex(
+            LocalApprovalError, "claimed approval no longer matches"
+        ):
+            self.store.approve(REPO, 42)
+        statuses = self.store.status(REPO, 42)
+        self.assertEqual(1, len(statuses))
+        self.assertEqual("claimed", statuses[0]["state"])
+
     def test_ttl_expiry_never_returns_work(self):
         self.store.approve(REPO, 42)
         self.clock.now = NOW + timedelta(minutes=4)
@@ -159,6 +231,39 @@ class LocalApprovalTests(unittest.TestCase):
         )
         self.store.retry(approved["request_id"], "transient")
         self.assertEqual("claimed", self.store.status()[0]["state"])
+
+    def test_reapprove_after_ttl_preserves_exact_durable_claim(self):
+        approved = self.store.approve(REPO, 42)
+        request = self.store.poll()
+        self.store.claim(approved["request_id"], request, lease_seconds=7200)
+        self.clock.now = NOW + timedelta(minutes=10)
+        repeated = self.store.approve(REPO, 42)
+        self.assertEqual(approved["request_id"], repeated["request_id"])
+        self.assertEqual("claimed", repeated["state"])
+        self.assertTrue(repeated["idempotent"])
+        self.assertEqual(
+            request,
+            self.store.resume(approved["request_id"], request, lease_seconds=7200),
+        )
+
+    def test_reapprove_changed_target_never_replaces_durable_claim(self):
+        approved = self.store.approve(REPO, 42)
+        request = self.store.poll()
+        self.store.claim(approved["request_id"], request, lease_seconds=7200)
+        self.clock.now = NOW + timedelta(minutes=10)
+        self.resolver.base = "d" * 40
+        self.resolver.merge = "e" * 40
+        with self.assertRaisesRegex(
+            LocalApprovalError, "durable approval no longer matches"
+        ):
+            self.store.approve(REPO, 42)
+        statuses = self.store.status(REPO, 42)
+        self.assertEqual(1, len(statuses))
+        self.assertEqual("claimed", statuses[0]["state"])
+        self.assertEqual(
+            request,
+            self.store.resume(approved["request_id"], request, lease_seconds=7200),
+        )
 
     def test_resume_rejects_crossed_durable_request(self):
         approved = self.store.approve(REPO, 42)
@@ -233,9 +338,47 @@ class LocalApprovalTests(unittest.TestCase):
             def workflow(self, token):
                 return {"state": "active"}
 
+            def merge_commit_parents(self, sha, token):
+                return ("d" * 40, "a" * 40)
+
         target = WorkerAuthorityResolver(Client()).resolve(REPO, 42)
         self.assertEqual("d" * 40, target.base_sha)
         self.assertEqual("c" * 40, target.tested_merge_sha)
+
+    def test_worker_resolver_rejects_stale_merge_before_building_work(self):
+        class Client:
+            authority = SimpleNamespace(
+                repository=REPO,
+                repository_id=123,
+                default_branch="main",
+                workflow_path=".github/workflows/ci-jit-pilot-child.yml",
+            )
+
+            def authenticate(self):
+                return "token"
+
+            def repository(self, token):
+                return {"default_branch": "main"}
+
+            def default_branch_head(self, token):
+                return "d" * 40
+
+            def pull_request(self, number, token):
+                return {
+                    "number": number,
+                    "head": {"sha": "a" * 40},
+                    "base": {"sha": "b" * 40, "ref": "main"},
+                    "merge_commit_sha": "c" * 40,
+                }
+
+            def workflow(self, token):
+                return {"state": "active"}
+
+            def merge_commit_parents(self, sha, token):
+                return ("b" * 40, "a" * 40)
+
+        with self.assertRaisesRegex(LocalApprovalError, "merge ref is stale"):
+            WorkerAuthorityResolver(Client()).resolve(REPO, 42)
 
     def test_pilot_builder_preserves_explicit_organization_runner_authority(self):
         builder = PilotWorkRequestBuilder(

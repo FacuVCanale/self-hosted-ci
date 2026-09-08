@@ -309,6 +309,28 @@ class WorkerGitHubClient:
             raise WorkerAuthorityError("GitHub potential merge commit is invalid")
         return oid
 
+    def merge_commit_parents(
+        self, sha: str, token: WorkerInstallationToken
+    ) -> tuple[str, ...]:
+        if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+            raise WorkerAuthorityError("GitHub merge commit SHA is invalid")
+        value = self._token_json(
+            "GET",
+            f"/repos/{self.authority.repository}/git/commits/{sha}",
+            token,
+            200,
+        )
+        parents = value.get("parents")
+        if value.get("sha") != sha or not isinstance(parents, list):
+            raise WorkerAuthorityError("GitHub merge commit response is invalid")
+        parent_shas: list[str] = []
+        for parent in parents:
+            parent_sha = parent.get("sha") if isinstance(parent, Mapping) else None
+            if not isinstance(parent_sha, str) or not _SHA.fullmatch(parent_sha):
+                raise WorkerAuthorityError("GitHub merge commit parents are invalid")
+            parent_shas.append(parent_sha)
+        return tuple(parent_shas)
+
     def workflow(self, token: WorkerInstallationToken) -> Mapping[str, Any]:
         workflow = quote(self.authority.workflow_id, safe="")
         value = self._token_json(

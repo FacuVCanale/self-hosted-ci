@@ -81,6 +81,14 @@ class WorkerAuthorityResolver:
             raise LocalApprovalError(
                 "pull request lacks exact base or tested merge SHA"
             )
+        if self.client.merge_commit_parents(merge, token) != (
+            base,
+            pr["head"]["sha"],
+        ):
+            raise LocalApprovalError(
+                "GitHub merge ref is stale relative to the live default branch; "
+                "update the pull request branch before retrying"
+            )
         return ResolvedApprovalTarget(
             str(authority.repository_id),
             authority.repository,
@@ -325,6 +333,28 @@ class LocalApprovalStore:
     def _parse(value: str) -> datetime:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
+    @staticmethod
+    def _request_matches_target(
+        request: Any, target: ResolvedApprovalTarget
+    ) -> bool:
+        if not isinstance(request, Mapping):
+            return False
+        package = request.get("pilot_package") or request.get("protocol_package")
+        reservation = request.get("reservation")
+        if not isinstance(package, Mapping) or not isinstance(reservation, Mapping):
+            return False
+        package_branch = package.get("base_branch", package.get("default_branch"))
+        return (
+            str(package.get("repository_id")) == target.repository_id
+            and package.get("repository") == target.repository
+            and package.get("pr_number") == target.pr_number
+            and package.get("head_sha") == target.head_sha
+            and package_branch == target.default_branch
+            and reservation.get("workflow_ref") == target.workflow_ref
+            and package.get("base_sha") == target.base_sha
+            and package.get("tested_merge_sha") == target.tested_merge_sha
+        )
+
     def approve(self, repository: str, pr_number: int) -> Mapping[str, Any]:
         if not isinstance(repository, str) or not re.fullmatch(
             r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository
@@ -342,20 +372,62 @@ class LocalApprovalStore:
             target.repository_id, pr_number, target.head_sha
         )
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT request_id,state,expires_at FROM approvals WHERE repository=? AND pr_number=? AND head_sha=?",
+                "SELECT request_id,state,expires_at,request_json,durable FROM approvals WHERE repository=? AND pr_number=? AND head_sha=? AND state IN ('pending','claimed') ORDER BY created_at DESC LIMIT 1",
                 (repository, pr_number, target.head_sha),
             ).fetchone()
-            if (
-                row
-                and row["state"] in {"pending", "claimed"}
-                and now < self._parse(row["expires_at"])
-            ):
-                return {
-                    "request_id": row["request_id"],
-                    "state": row["state"],
-                    "idempotent": True,
-                }
+            if row:
+                try:
+                    existing_request = json.loads(row["request_json"])
+                except json.JSONDecodeError as exc:
+                    raise LocalApprovalError(
+                        "stored active approval is invalid"
+                    ) from exc
+                target_matches = self._request_matches_target(
+                    existing_request, target
+                )
+                if row["durable"] == 1:
+                    if not target_matches:
+                        raise LocalApprovalError(
+                            "durable approval no longer matches the resolved target"
+                        )
+                    db.execute("COMMIT")
+                    return {
+                        "request_id": row["request_id"],
+                        "state": row["state"],
+                        "idempotent": True,
+                    }
+                elif now >= self._parse(row["expires_at"]):
+                    changed = db.execute(
+                        "UPDATE approvals SET state='expired',reason='ttl-expired',active_key=NULL WHERE request_id=? AND state IN ('pending','claimed') AND durable=0",
+                        (row["request_id"],),
+                    ).rowcount
+                    if changed != 1:
+                        raise LocalApprovalError(
+                            "approval changed while reconciling its TTL"
+                        )
+                elif target_matches:
+                    db.execute("COMMIT")
+                    return {
+                        "request_id": row["request_id"],
+                        "state": row["state"],
+                        "idempotent": True,
+                    }
+                elif row["state"] == "claimed":
+                    raise LocalApprovalError(
+                        "claimed approval no longer matches the resolved target"
+                    )
+                else:
+                    changed = db.execute(
+                        "UPDATE approvals SET state='expired',reason='resolved-target-changed',active_key=NULL WHERE request_id=? AND state='pending' AND durable=0",
+                        (row["request_id"],),
+                    ).rowcount
+                    if changed != 1:
+                        raise LocalApprovalError(
+                            "pending approval changed while reconciling its target"
+                        )
+            db.execute("COMMIT")
         request_id = str(uuid4())
         nonce = secrets.token_urlsafe(32)
         if len(nonce) != 43:
@@ -395,16 +467,20 @@ class LocalApprovalStore:
             except sqlite3.IntegrityError:
                 db.execute("ROLLBACK")
                 row = db.execute(
-                    "SELECT request_id,state FROM approvals WHERE repository=? AND pr_number=? AND head_sha=? AND state IN ('pending','claimed') ORDER BY created_at DESC LIMIT 1",
+                    "SELECT request_id,state,request_json FROM approvals WHERE repository=? AND pr_number=? AND head_sha=? AND state IN ('pending','claimed') ORDER BY created_at DESC LIMIT 1",
                     (repository, pr_number, target.head_sha),
                 ).fetchone()
-                if row:
+                if row and self._request_matches_target(
+                    json.loads(row["request_json"]), target
+                ):
                     return {
                         "request_id": row["request_id"],
                         "state": row["state"],
                         "idempotent": True,
                     }
-                raise
+                raise LocalApprovalError(
+                    "concurrent approval no longer matches the resolved target"
+                )
         return {
             "request_id": request_id,
             "state": "pending",
@@ -511,14 +587,18 @@ class LocalApprovalStore:
             except Exception:
                 self.fail(row["request_id"], "authority-reresolution-failed")
                 continue
+            resolved_target_changed = not self._request_matches_target(request, current)
             if (
-                current.head_sha != row["head_sha"]
+                resolved_target_changed
+                or current.head_sha != row["head_sha"]
                 or self.gatestore.observe_head(
                     current.repository_id, current.pr_number, current.head_sha
                 )
                 != row["head_generation"]
             ):
-                self._set(row["request_id"], "expired", "head-or-generation-changed")
+                self._set(
+                    row["request_id"], "expired", "resolved-target-or-generation-changed"
+                )
                 continue
             self.current_request = request
             return request
