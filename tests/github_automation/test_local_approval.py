@@ -232,6 +232,39 @@ class LocalApprovalTests(unittest.TestCase):
         self.store.retry(approved["request_id"], "transient")
         self.assertEqual("claimed", self.store.status()[0]["state"])
 
+    def test_reapprove_after_ttl_preserves_exact_durable_claim(self):
+        approved = self.store.approve(REPO, 42)
+        request = self.store.poll()
+        self.store.claim(approved["request_id"], request, lease_seconds=7200)
+        self.clock.now = NOW + timedelta(minutes=10)
+        repeated = self.store.approve(REPO, 42)
+        self.assertEqual(approved["request_id"], repeated["request_id"])
+        self.assertEqual("claimed", repeated["state"])
+        self.assertTrue(repeated["idempotent"])
+        self.assertEqual(
+            request,
+            self.store.resume(approved["request_id"], request, lease_seconds=7200),
+        )
+
+    def test_reapprove_changed_target_never_replaces_durable_claim(self):
+        approved = self.store.approve(REPO, 42)
+        request = self.store.poll()
+        self.store.claim(approved["request_id"], request, lease_seconds=7200)
+        self.clock.now = NOW + timedelta(minutes=10)
+        self.resolver.base = "d" * 40
+        self.resolver.merge = "e" * 40
+        with self.assertRaisesRegex(
+            LocalApprovalError, "durable approval no longer matches"
+        ):
+            self.store.approve(REPO, 42)
+        statuses = self.store.status(REPO, 42)
+        self.assertEqual(1, len(statuses))
+        self.assertEqual("claimed", statuses[0]["state"])
+        self.assertEqual(
+            request,
+            self.store.resume(approved["request_id"], request, lease_seconds=7200),
+        )
+
     def test_resume_rejects_crossed_durable_request(self):
         approved = self.store.approve(REPO, 42)
         request = self.store.poll()
