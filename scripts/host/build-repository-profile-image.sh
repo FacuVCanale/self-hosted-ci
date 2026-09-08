@@ -215,6 +215,8 @@ if ! incus stop "${builder}" --project "${PROJECT}" --timeout 60; then
 fi
 incus list "${builder}" --project "${PROJECT}" --format csv -c s | grep -Fxq STOPPED \
   || die 'builder did not reach the stopped state before publication'
+incus file pull "${builder}/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js" /dev/null --project "${PROJECT}" \
+  || die 'stopped-builder rootfs is missing the required Next.js browser log module'
 incus publish "${builder}" --project "${PROJECT}" --alias "${candidate_alias}" >/dev/null
 alias_published=true
 published_fingerprint="$(python3 - "${candidate_alias}" "$(incus image alias list --project "${PROJECT}" --format json)" <<'PY'
@@ -233,6 +235,8 @@ if len(rows)!=1 or rows[0].get("type")!="container" or rows[0].get("architecture
 PY
 incus delete "${builder}" --project "${PROJECT}"
 incus init "${published_fingerprint}" "${published_verifier}" --project "${PROJECT}" --profile ci-jit
+incus file pull "${published_verifier}/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js" /dev/null --project "${PROJECT}" \
+  || die 'initialized-verifier rootfs is missing the required Next.js browser log module'
 incus start "${published_verifier}" --project "${PROJECT}"
 incus exec "${published_verifier}" --project "${PROJECT}" -- /bin/test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js \
   || die 'published image boot verification failed'

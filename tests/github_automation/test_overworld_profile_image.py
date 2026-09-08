@@ -220,6 +220,35 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertLess(lines.index(publish), lines.index(builder_delete))
         self.assertLess(lines.index(builder_delete), lines.index(verifier_init))
 
+    def test_builder_discriminates_rootfs_persistence_across_publication(self) -> None:
+        source = BUILDER.read_text(encoding="utf-8")
+        lines = source.splitlines()
+        required = "/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js"
+        stopped = 'incus list "${builder}" --project "${PROJECT}" --format csv -c s | grep -Fxq STOPPED'
+        stopped_pull = f'incus file pull "${{builder}}{required}" /dev/null --project "${{PROJECT}}"'
+        publish = 'incus publish "${builder}" --project "${PROJECT}" --alias "${candidate_alias}" >/dev/null'
+        builder_delete = 'incus delete "${builder}" --project "${PROJECT}"'
+        verifier_init = 'incus init "${published_fingerprint}" "${published_verifier}" --project "${PROJECT}" --profile ci-jit'
+        initialized_pull = f'incus file pull "${{published_verifier}}{required}" /dev/null --project "${{PROJECT}}"'
+        verifier_start = 'incus start "${published_verifier}" --project "${PROJECT}"'
+        running_check = f'incus exec "${{published_verifier}}" --project "${{PROJECT}}" -- /bin/test -f {required}'
+
+        for probe in (stopped_pull, initialized_pull, running_check):
+            self.assertEqual(1, source.count(probe))
+        self.assertIn("die 'stopped-builder rootfs is missing the required Next.js browser log module'", source)
+        self.assertIn("die 'initialized-verifier rootfs is missing the required Next.js browser log module'", source)
+        positions = (
+            next(i for i, line in enumerate(lines) if line.startswith(stopped)),
+            next(i for i, line in enumerate(lines) if line.startswith(stopped_pull)),
+            lines.index(publish),
+            lines.index(builder_delete),
+            lines.index(verifier_init),
+            next(i for i, line in enumerate(lines) if line.startswith(initialized_pull)),
+            lines.index(verifier_start),
+            next(i for i, line in enumerate(lines) if line.startswith(running_check)),
+        )
+        self.assertTrue(all(left < right for left, right in zip(positions, positions[1:])))
+
     def test_build_egress_is_exact_and_not_a_general_wildcard(self) -> None:
         policy = (PROFILE / "squid-build.conf").read_text(encoding="utf-8")
         for domain in (
