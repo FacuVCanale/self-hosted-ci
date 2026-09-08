@@ -149,6 +149,49 @@ class LocalApprovalTests(unittest.TestCase):
         )
         self.assertIsNone(self.store.current_request)
 
+    def test_reapprove_same_head_replaces_stale_pending_pilot_target(self):
+        root = Path(self.temp.name)
+
+        class PilotResolver:
+            def __init__(self):
+                self.base = "b" * 40
+                self.merge = "c" * 40
+
+            def resolve(self, repository, pr):
+                return ResolvedApprovalTarget(
+                    "123",
+                    REPO,
+                    42,
+                    "a" * 40,
+                    "main",
+                    f"{REPO}/.github/workflows/ci-jit-pilot-child.yml@refs/heads/main",
+                    self.base,
+                    self.merge,
+                )
+
+        resolver = PilotResolver()
+        store = LocalApprovalStore(
+            root / "reapprove-pilot.sqlite3",
+            GateStore(root / "reapprove-pilot-gate.sqlite3", clock=self.clock),
+            resolver,
+            PilotWorkRequestBuilder("d" * 64),
+            clock=self.clock,
+        )
+        first = store.approve(REPO, 42)
+        resolver.base = "e" * 40
+        resolver.merge = "f" * 40
+        second = store.approve(REPO, 42)
+        self.assertNotEqual(first["request_id"], second["request_id"])
+        self.assertFalse(second["idempotent"])
+        statuses = {item["request_id"]: item for item in store.status(REPO, 42)}
+        self.assertEqual("expired", statuses[first["request_id"]]["state"])
+        self.assertEqual(
+            "resolved-target-changed", statuses[first["request_id"]]["reason"]
+        )
+        request = store.poll()
+        self.assertEqual("e" * 40, request["pilot_package"]["base_sha"])
+        self.assertEqual("f" * 40, request["pilot_package"]["tested_merge_sha"])
+
     def test_ttl_expiry_never_returns_work(self):
         self.store.approve(REPO, 42)
         self.clock.now = NOW + timedelta(minutes=4)

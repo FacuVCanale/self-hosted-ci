@@ -333,6 +333,28 @@ class LocalApprovalStore:
     def _parse(value: str) -> datetime:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
+    @staticmethod
+    def _request_matches_target(
+        request: Any, target: ResolvedApprovalTarget
+    ) -> bool:
+        if not isinstance(request, Mapping):
+            return False
+        package = request.get("pilot_package") or request.get("protocol_package")
+        reservation = request.get("reservation")
+        if not isinstance(package, Mapping) or not isinstance(reservation, Mapping):
+            return False
+        package_branch = package.get("base_branch", package.get("default_branch"))
+        return (
+            str(package.get("repository_id")) == target.repository_id
+            and package.get("repository") == target.repository
+            and package.get("pr_number") == target.pr_number
+            and package.get("head_sha") == target.head_sha
+            and package_branch == target.default_branch
+            and reservation.get("workflow_ref") == target.workflow_ref
+            and package.get("base_sha") == target.base_sha
+            and package.get("tested_merge_sha") == target.tested_merge_sha
+        )
+
     def approve(self, repository: str, pr_number: int) -> Mapping[str, Any]:
         if not isinstance(repository, str) or not re.fullmatch(
             r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository
@@ -351,7 +373,7 @@ class LocalApprovalStore:
         )
         with self._connect() as db:
             row = db.execute(
-                "SELECT request_id,state,expires_at FROM approvals WHERE repository=? AND pr_number=? AND head_sha=?",
+                "SELECT request_id,state,expires_at,request_json FROM approvals WHERE repository=? AND pr_number=? AND head_sha=?",
                 (repository, pr_number, target.head_sha),
             ).fetchone()
             if (
@@ -359,11 +381,26 @@ class LocalApprovalStore:
                 and row["state"] in {"pending", "claimed"}
                 and now < self._parse(row["expires_at"])
             ):
-                return {
-                    "request_id": row["request_id"],
-                    "state": row["state"],
-                    "idempotent": True,
-                }
+                try:
+                    existing_request = json.loads(row["request_json"])
+                except json.JSONDecodeError as exc:
+                    raise LocalApprovalError(
+                        "stored active approval is invalid"
+                    ) from exc
+                if self._request_matches_target(existing_request, target):
+                    return {
+                        "request_id": row["request_id"],
+                        "state": row["state"],
+                        "idempotent": True,
+                    }
+                if row["state"] == "claimed":
+                    raise LocalApprovalError(
+                        "claimed approval no longer matches the resolved target"
+                    )
+                db.execute(
+                    "UPDATE approvals SET state='expired',reason='resolved-target-changed',active_key=NULL WHERE request_id=?",
+                    (row["request_id"],),
+                )
         request_id = str(uuid4())
         nonce = secrets.token_urlsafe(32)
         if len(nonce) != 43:
@@ -403,16 +440,20 @@ class LocalApprovalStore:
             except sqlite3.IntegrityError:
                 db.execute("ROLLBACK")
                 row = db.execute(
-                    "SELECT request_id,state FROM approvals WHERE repository=? AND pr_number=? AND head_sha=? AND state IN ('pending','claimed') ORDER BY created_at DESC LIMIT 1",
+                    "SELECT request_id,state,request_json FROM approvals WHERE repository=? AND pr_number=? AND head_sha=? AND state IN ('pending','claimed') ORDER BY created_at DESC LIMIT 1",
                     (repository, pr_number, target.head_sha),
                 ).fetchone()
-                if row:
+                if row and self._request_matches_target(
+                    json.loads(row["request_json"]), target
+                ):
                     return {
                         "request_id": row["request_id"],
                         "state": row["state"],
                         "idempotent": True,
                     }
-                raise
+                raise LocalApprovalError(
+                    "concurrent approval no longer matches the resolved target"
+                )
         return {
             "request_id": request_id,
             "state": "pending",
@@ -519,22 +560,7 @@ class LocalApprovalStore:
             except Exception:
                 self.fail(row["request_id"], "authority-reresolution-failed")
                 continue
-            package = request.get("pilot_package") or request.get("protocol_package")
-            if not isinstance(package, Mapping):
-                self.fail(row["request_id"], "stored-package-invalid")
-                continue
-            package_branch = package.get("base_branch", package.get("default_branch"))
-            resolved_target_changed = (
-                str(package.get("repository_id")) != current.repository_id
-                or package.get("repository") != current.repository
-                or package.get("pr_number") != current.pr_number
-                or package.get("head_sha") != current.head_sha
-                or package_branch != current.default_branch
-                or request["reservation"].get("workflow_ref")
-                != current.workflow_ref
-                or package.get("base_sha") != current.base_sha
-                or package.get("tested_merge_sha") != current.tested_merge_sha
-            )
+            resolved_target_changed = not self._request_matches_target(request, current)
             if (
                 resolved_target_changed
                 or current.head_sha != row["head_sha"]
