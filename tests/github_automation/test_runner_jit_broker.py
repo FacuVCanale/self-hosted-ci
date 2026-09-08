@@ -27,7 +27,10 @@ from github_automation.runner_jit_broker import (
     GarmCliAllocationDriver,
     JobStartedContext,
     RUNNER_CLAIM_ASSERT_ATTEMPTS,
+    RUNNER_CLAIM_ASSERT_BUDGET_SECONDS,
     RUNNER_CLAIM_ASSERT_RETRY_SECONDS,
+    RUNNER_HOOK_DEADLINE_SECONDS,
+    RUNNER_HOOK_SAFETY_MARGIN_SECONDS,
 )
 from tests.github_automation.test_runner_jit import payload, reservation
 
@@ -59,7 +62,9 @@ class FakeGarm:
         self.events.append("enable")
         self.scales[name]["enabled"] = True
 
-    def assert_runner_claim(self, scale_id, name, runner_name, payload):
+    def assert_runner_claim(
+        self, scale_id, name, runner_name, payload, *, timeout_seconds
+    ):
         self.events.append("claim")
         if runner_name != self.runner_name or not self.scales[name]["enabled"]:
             raise AssertionError
@@ -433,6 +438,66 @@ class AllocationBrokerTests(unittest.TestCase):
                 driver._run("scaleset", "update", "87", "--enabled=false")
         self.assertEqual(1, run.call_count)
 
+    def test_runner_claim_shares_one_timeout_across_both_garm_reads(self):
+        hook = Path(self.tempdir.name) / "hook.py"
+        hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        driver = GarmCliAllocationDriver(
+            {
+                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "provider_name": "incus_ci_jit",
+                "image_alias": "runner-pinned",
+                "image_fingerprint": "b" * 64,
+                "targets": {},
+            },
+            hook,
+        )
+
+        class Clock:
+            now = 100.0
+
+            def __call__(self):
+                return self.now
+
+        clock = Clock()
+        observed_timeouts = []
+
+        def run(argv, **kwargs):
+            observed_timeouts.append(kwargs["timeout"])
+            if argv[-3:-1] == ["scaleset", "show"]:
+                clock.now += 5
+                value = {
+                    "id": "41",
+                    "name": "jit",
+                    "enabled": True,
+                    "max_runners": 1,
+                    "min_idle_runners": 0,
+                }
+            else:
+                value = [{"name": "runner-unique"}]
+            return mock.Mock(returncode=0, stdout=json.dumps(value), stderr="")
+
+        with (
+            mock.patch(
+                "github_automation.runner_jit_broker.time.monotonic",
+                side_effect=clock,
+            ),
+            mock.patch(
+                "github_automation.runner_jit_broker.subprocess.run",
+                side_effect=run,
+            ),
+        ):
+            driver.assert_runner_claim(
+                "41",
+                "jit",
+                "runner-unique",
+                self.payload,
+                timeout_seconds=8,
+            )
+
+        self.assertEqual(2, len(observed_timeouts))
+        self.assertAlmostEqual(8, observed_timeouts[0])
+        self.assertAlmostEqual(3, observed_timeouts[1])
+
     def test_garm_omitempty_false_and_zero_fields_preserve_disabled_jit_contract(self):
         hook = Path(self.tempdir.name) / "hook.py"
         hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
@@ -496,14 +561,26 @@ class AllocationBrokerTests(unittest.TestCase):
         self.assertNotIn('required_env("CI_GATE_TRUSTED_TESTED_SHA")', source)
         self.assertIn("response.status != 204 or response_body", source)
 
-    def test_live_job_verifier_budget_fits_inside_runner_hook_deadline(self):
-        self.assertLess(
-            (RUNNER_CLAIM_ASSERT_ATTEMPTS - 1)
-            * RUNNER_CLAIM_ASSERT_RETRY_SECONDS
-            + ExternalLiveWorkflowJobVerifier.MAX_ATTEMPTS * 15
+    def test_claim_and_live_verifier_budgets_leave_hook_safety_margin(self):
+        hook_source = (
+            Path(__file__).parents[2] / "scripts/host/runner-job-started-hook.py"
+        ).read_text()
+        live_verifier_budget = (
+            ExternalLiveWorkflowJobVerifier.MAX_ATTEMPTS * 15
             + (ExternalLiveWorkflowJobVerifier.MAX_ATTEMPTS - 1)
-            * ExternalLiveWorkflowJobVerifier.RETRY_DELAY_SECONDS,
-            60,
+            * ExternalLiveWorkflowJobVerifier.RETRY_DELAY_SECONDS
+        )
+        self.assertEqual(47, live_verifier_budget)
+        self.assertEqual(8, RUNNER_CLAIM_ASSERT_BUDGET_SECONDS)
+        self.assertIn(
+            f"urlopen(request, timeout={RUNNER_HOOK_DEADLINE_SECONDS})",
+            hook_source,
+        )
+        self.assertLessEqual(
+            RUNNER_CLAIM_ASSERT_BUDGET_SECONDS
+            + live_verifier_budget
+            + RUNNER_HOOK_SAFETY_MARGIN_SECONDS,
+            RUNNER_HOOK_DEADLINE_SECONDS,
         )
 
     def test_broker_http_threads_are_strictly_bounded(self):
@@ -590,7 +667,9 @@ class AllocationBrokerTests(unittest.TestCase):
                 super().__init__()
                 self.claim_attempts = 0
 
-            def assert_runner_claim(self, scale_id, name, runner_name, payload):
+            def assert_runner_claim(
+                self, scale_id, name, runner_name, payload, *, timeout_seconds
+            ):
                 self.events.append("claim")
                 self.claim_attempts += 1
                 if self.claim_attempts == 1:
@@ -637,7 +716,9 @@ class AllocationBrokerTests(unittest.TestCase):
                 super().__init__()
                 self.claim_attempts = 0
 
-            def assert_runner_claim(self, scale_id, name, runner_name, payload):
+            def assert_runner_claim(
+                self, scale_id, name, runner_name, payload, *, timeout_seconds
+            ):
                 self.events.append("claim")
                 self.claim_attempts += 1
                 raise RunnerJitError("GARM claim remains absent")
@@ -665,6 +746,66 @@ class AllocationBrokerTests(unittest.TestCase):
 
         self.assertEqual(RUNNER_CLAIM_ASSERT_ATTEMPTS, driver.claim_attempts)
         self.assertEqual(RUNNER_CLAIM_ASSERT_ATTEMPTS - 1, sleep.call_count)
+        self.assertEqual([], self.live.calls)
+        self.assertEqual([], transition.call_args_list)
+        self.assertNotIn("disable", driver.events)
+        record = self.ledger.get(self.payload["allocation_id"])
+        self.assertEqual("issued", record.state)
+        self.assertEqual(0, record.jobs_started)
+
+    def test_blocked_runner_claim_exhausts_shared_budget_before_transitions(self):
+        class Clock:
+            now = 100.0
+
+            def __call__(self):
+                return self.now
+
+        clock = Clock()
+
+        class BlockingClaimGarm(FakeGarm):
+            def __init__(self):
+                super().__init__()
+                self.timeouts = []
+
+            def assert_runner_claim(
+                self, scale_id, name, runner_name, payload, *, timeout_seconds
+            ):
+                self.events.append("claim")
+                self.timeouts.append(timeout_seconds)
+                clock.now += timeout_seconds
+                raise RunnerJitError("GARM claim read timed out")
+
+        driver = BlockingClaimGarm()
+        broker = AllocationBroker(
+            self.ledger,
+            driver,
+            self.private.public_key(),
+            spki_fingerprint(self.private.public_key()),
+            self.live,
+        )
+        broker.reserve(self.reservation, now=NOW)
+        broker.finalize(self.envelope, now=NOW)
+        context = self.context(runner_name=driver.runner_name)
+        started_at = clock.now
+
+        with (
+            mock.patch(
+                "github_automation.runner_jit_broker.time.monotonic",
+                side_effect=clock,
+            ),
+            mock.patch("github_automation.runner_jit_broker.time.sleep") as sleep,
+            mock.patch.object(
+                self.ledger, "transition", wraps=self.ledger.transition
+            ) as transition,
+            self.assertRaisesRegex(RunnerJitError, "exceeded its budget"),
+        ):
+            broker.job_started(self.payload["allocation_id"], context, now=NOW)
+
+        self.assertLessEqual(
+            clock.now - started_at, RUNNER_CLAIM_ASSERT_BUDGET_SECONDS
+        )
+        self.assertEqual([RUNNER_CLAIM_ASSERT_BUDGET_SECONDS], driver.timeouts)
+        sleep.assert_not_called()
         self.assertEqual([], self.live.calls)
         self.assertEqual([], transition.call_args_list)
         self.assertNotIn("disable", driver.events)

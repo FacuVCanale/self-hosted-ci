@@ -27,8 +27,11 @@ from .runner_jit import RunnerJitError, SqliteAllocationLedger
 RUNNER_INSTALL_TEMPLATE = Path(
     "/usr/local/share/self-hosted-ci/runner-install-offline.sh.tmpl"
 )
+RUNNER_HOOK_DEADLINE_SECONDS = 60
+RUNNER_HOOK_SAFETY_MARGIN_SECONDS = 5
 RUNNER_CLAIM_ASSERT_ATTEMPTS = 3
 RUNNER_CLAIM_ASSERT_RETRY_SECONDS = 1
+RUNNER_CLAIM_ASSERT_BUDGET_SECONDS = 8
 
 
 @dataclass(frozen=True)
@@ -96,6 +99,8 @@ class GarmAllocationDriver(Protocol):
         scale_set_name: str,
         runner_name: str,
         payload: Mapping[str, Any],
+        *,
+        timeout_seconds: float,
     ) -> None: ...
 
     def disable_scale_set(self, scale_set_id: str, scale_set_name: str) -> None: ...
@@ -145,16 +150,33 @@ class AllocationBroker:
     ) -> None:
         """Bound eventual GARM reads before any durable job transition."""
 
+        deadline = time.monotonic() + RUNNER_CLAIM_ASSERT_BUDGET_SECONDS
+        last_error: RunnerJitError | None = None
         for attempt in range(RUNNER_CLAIM_ASSERT_ATTEMPTS):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RunnerJitError(
+                    "GARM runner claim observation exceeded its budget"
+                ) from last_error
             try:
                 self.driver.assert_runner_claim(
-                    scale_set_id, scale_set_name, runner_name, payload
+                    scale_set_id,
+                    scale_set_name,
+                    runner_name,
+                    payload,
+                    timeout_seconds=remaining,
                 )
                 return
-            except RunnerJitError:
+            except RunnerJitError as exc:
+                last_error = exc
                 if attempt + 1 == RUNNER_CLAIM_ASSERT_ATTEMPTS:
                     raise
-                time.sleep(RUNNER_CLAIM_ASSERT_RETRY_SECONDS)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RunnerJitError(
+                        "GARM runner claim observation exceeded its budget"
+                    ) from exc
+                time.sleep(min(RUNNER_CLAIM_ASSERT_RETRY_SECONDS, remaining))
         raise AssertionError("unreachable runner claim retry state")
 
     def reserve(
@@ -436,13 +458,20 @@ class GarmCliAllocationDriver:
         # scale-set runner inventory even after GitHub and Incus are empty.
         self._timeout = GARM_CLEANUP_CONVERGENCE_SECONDS
 
-    def _run(self, *args: str) -> Any:
+    def _run(self, *args: str, timeout_seconds: float | None = None) -> Any:
         read_only = args[:2] in {
             ("scaleset", "list"),
             ("scaleset", "show"),
         } or args[:3] == ("scaleset", "runner", "list")
         attempts = GARM_CLI_READ_ATTEMPTS if read_only else 1
-        deadline = time.monotonic() + GARM_CLI_COMMAND_TIMEOUT_SECONDS
+        if timeout_seconds is not None and (
+            isinstance(timeout_seconds, bool) or timeout_seconds <= 0
+        ):
+            raise RunnerJitError("GARM CLI command budget is invalid")
+        command_budget = GARM_CLI_COMMAND_TIMEOUT_SECONDS
+        if timeout_seconds is not None:
+            command_budget = min(command_budget, timeout_seconds)
+        deadline = time.monotonic() + command_budget
         for attempt in range(attempts):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -685,9 +714,16 @@ systemctl daemon-reexec
         return None
 
     def _show_exact(
-        self, scale_set_id: str, scale_set_name: str, enabled: bool | None = None
+        self,
+        scale_set_id: str,
+        scale_set_name: str,
+        enabled: bool | None = None,
+        *,
+        timeout_seconds: float | None = None,
     ) -> Mapping[str, Any]:
-        value = self._run("scaleset", "show", scale_set_id)
+        value = self._run(
+            "scaleset", "show", scale_set_id, timeout_seconds=timeout_seconds
+        )
         if (
             not isinstance(value, Mapping)
             or str(value.get("id")) != scale_set_id
@@ -719,9 +755,30 @@ systemctl daemon-reexec
         scale_set_name: str,
         runner_name: str,
         payload: Mapping[str, Any],
+        *,
+        timeout_seconds: float,
     ) -> None:
-        self._show_exact(scale_set_id, scale_set_name, True)
-        runners = self._run("scaleset", "runner", "list", scale_set_id)
+        deadline = time.monotonic() + timeout_seconds
+
+        def remaining() -> float:
+            value = deadline - time.monotonic()
+            if value <= 0:
+                raise RunnerJitError("GARM runner claim observation timed out")
+            return value
+
+        self._show_exact(
+            scale_set_id,
+            scale_set_name,
+            True,
+            timeout_seconds=remaining(),
+        )
+        runners = self._run(
+            "scaleset",
+            "runner",
+            "list",
+            scale_set_id,
+            timeout_seconds=remaining(),
+        )
         if (
             not isinstance(runners, list)
             or len(runners) != 1
