@@ -602,7 +602,17 @@ incus exec "${published_verifier}" --project "${PROJECT}" -- /bin/sh -ceu '
   test "$resolved" = "$root/eslint/bin/eslint.js"
   test -f "$resolved" && test ! -L "$resolved"
   test -f "$root/eslint/package.json" && test ! -L "$root/eslint/package.json"
-  runuser -u runner -- bun "$link" --version
+  workspace=$(mktemp -d /var/tmp/self-hosted-ci-eslint-verify.XXXXXX)
+  cleanup(){ rm -rf -- "$workspace"; }
+  trap cleanup EXIT
+  trap "exit 1" HUP INT TERM
+  mkdir -p "$workspace/frontend/node_modules"
+  chmod 0755 "$workspace" "$workspace/frontend" "$workspace/frontend/node_modules"
+  cp -al "$root/." "$workspace/frontend/node_modules/"
+  runuser -u runner -- bun "$workspace/frontend/node_modules/.bin/eslint" --version
+  cleanup
+  test ! -e "$workspace"
+  trap - EXIT HUP INT TERM
 ' || die 'published image frontend eslint launcher verification failed'
 incus delete "${published_verifier}" --project "${PROJECT}" --force
 if incus list "${published_verifier}" --project "${PROJECT}" --format csv -c n | grep -Fxq "${published_verifier}"; then

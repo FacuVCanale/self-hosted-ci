@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import io
@@ -282,6 +283,65 @@ class OverworldProfileImageTests(unittest.TestCase):
                     )
                     self.assertEqual(0, result.returncode, result.stderr)
                     self.assertEqual("internal-link-ok", result.stdout.strip())
+
+    def test_bun_resolves_bare_siblings_only_from_runtime_node_modules_layout(self) -> None:
+        bun = shutil.which("bun")
+        if bun is None:
+            self.skipTest("bun is not installed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / "frontend-node_modules"
+            frontend = root / "frontend"
+            launcher = snapshot / "tool/bin/tool.js"
+            internal = snapshot / "tool/lib/internal.js"
+            sibling = snapshot / "sibling"
+            (snapshot / ".bin").mkdir(parents=True)
+            frontend.mkdir()
+            launcher.parent.mkdir(parents=True)
+            internal.parent.mkdir()
+            sibling.mkdir()
+            package = '{"scripts":{"lint":"tool"}}\n'
+            (snapshot / "package.json").write_text(package, encoding="utf-8")
+            (frontend / "package.json").write_text(package, encoding="utf-8")
+            launcher.write_text(
+                '#!/usr/bin/env bun\nconsole.log(require("../lib/internal.js"))\n',
+                encoding="utf-8",
+            )
+            launcher.chmod(0o755)
+            internal.write_text(
+                'module.exports = require("sibling")\n', encoding="utf-8"
+            )
+            (sibling / "package.json").write_text(
+                '{"name":"sibling","main":"index.js"}\n', encoding="utf-8"
+            )
+            (sibling / "index.js").write_text(
+                'module.exports = "bare-sibling-ok"\n', encoding="utf-8"
+            )
+            (snapshot / ".bin/tool").symlink_to("../tool/bin/tool.js")
+
+            direct = subprocess.run(
+                [bun, "run", "lint"],
+                cwd=snapshot,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(0, direct.returncode)
+
+            runtime_modules = frontend / "node_modules"
+            runtime_modules.mkdir(parents=True)
+            subprocess.run(
+                ["cp", "-al", f"{snapshot}/.", f"{runtime_modules}/"],
+                check=True,
+            )
+            staged = subprocess.run(
+                [bun, "run", "lint"],
+                cwd=frontend,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(0, staged.returncode, staged.stderr)
+            self.assertEqual("bare-sibling-ok", staged.stdout.strip())
 
     def test_dependency_tree_copy_rejects_unsafe_symlinks(self) -> None:
         spec = importlib.util.spec_from_file_location(
@@ -882,6 +942,7 @@ class OverworldProfileImageTests(unittest.TestCase):
             '"ALL_PROXY=http://127.0.0.1:9"',
             '"NO_PROXY="',
             '"bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts"',
+            '"bun", "run", "lint", "--", "--version"',
             'shutil.rmtree(smoke_root)',
             'before = tree_digest(modules)',
             'if tree_digest(modules) != before:',
@@ -891,11 +952,57 @@ class OverworldProfileImageTests(unittest.TestCase):
         hardening = source.index('for path in dependencies.rglob("*")')
         copying = source.index('shutil.copytree(overworld, smoke_root')
         executing = source.index('"bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts"')
+        frontend_lint = source.index('"bun", "run", "lint", "--", "--version"')
+        frontend_next = source.index(
+            'require("./node_modules/next/dist/server/node-environment-extensions/console-file.js")'
+        )
         cleanup = source.index('shutil.rmtree(smoke_root)', executing)
         self.assertLess(regenerated_cleanup, hardening)
         self.assertLess(hardening, copying)
         self.assertLess(copying, executing)
+        self.assertLess(executing, frontend_lint)
+        self.assertLess(frontend_lint, frontend_next)
         self.assertLess(executing, cleanup)
+        syntax = ast.parse(source)
+        smoke_loop = next(
+            node
+            for node in ast.walk(syntax)
+            if isinstance(node, ast.For)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "component"
+            and any(
+                isinstance(statement, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name) and target.id == "before"
+                    for target in statement.targets
+                )
+                for statement in node.body
+            )
+        )
+        frontend_branch = next(
+            statement
+            for statement in smoke_loop.body
+            if isinstance(statement, ast.If)
+            and ast.unparse(statement.test) == "component == 'frontend'"
+        )
+        digest_guard = next(
+            statement
+            for statement in smoke_loop.body
+            if isinstance(statement, ast.If)
+            and ast.unparse(statement.test) == "tree_digest(modules) != before"
+        )
+        frontend_body = "\n".join(ast.unparse(node) for node in frontend_branch.body)
+        self.assertIn("bun', 'run', 'lint', '--', '--version", frontend_body)
+        self.assertIn("node-environment-extensions/console-file.js", frontend_body)
+        self.assertLess(smoke_loop.body.index(frontend_branch), smoke_loop.body.index(digest_guard))
+        self.assertFalse(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "run"
+                for node in ast.walk(digest_guard)
+            )
+        )
         self.assertIn('[[ $(id -nG runner) == runner ]]', source)
         self.assertIn('runuser -u runner -- test ! -x /usr/bin/sudo', source)
         self.assertIn('root:root:644|root:root:664', source)
@@ -1082,17 +1189,38 @@ printf normalized > "$MOCK_CHMOD_MARKER"
         canonical_target = f"target={frontend_modules}"
         legacy_absent = 'test ! -e "$legacy"'
         boot_check = 'inspect_running_sentinels "${published_verifier}" published-verifier-post-start "${expected_sentinel_digests[@]}"'
-        eslint_check = 'runuser -u runner -- bun "$link" --version'
+        workspace_create = 'workspace=$(mktemp -d /var/tmp/self-hosted-ci-eslint-verify.XXXXXX)'
+        workspace_layout = 'mkdir -p "$workspace/frontend/node_modules"'
+        hardlink_snapshot = 'cp -al "$root/." "$workspace/frontend/node_modules/"'
+        eslint_check = 'runuser -u runner -- bun "$workspace/frontend/node_modules/.bin/eslint" --version'
         direct_eslint_check = 'runuser -u runner -- "$link" --version'
+        renamed_root_eslint_check = 'runuser -u runner -- bun "$link" --version'
+        explicit_cleanup = "  cleanup\n"
+        workspace_absent = '  test ! -e "$workspace"\n'
         verifier_cleanup = 'incus delete "${published_verifier}" --project "${PROJECT}" --force'
         self.assertIn(post_cleanup_file_check, source)
         self.assertIn(canonical_target, source)
         self.assertIn(legacy_absent, source)
         self.assertIn(boot_check, source)
+        self.assertIn(workspace_create, source)
+        self.assertIn(workspace_layout, source)
+        self.assertIn(hardlink_snapshot, source)
         self.assertIn(eslint_check, source)
         self.assertNotIn(direct_eslint_check, source)
+        self.assertNotIn(renamed_root_eslint_check, source)
+        self.assertIn("trap cleanup EXIT", source)
+        self.assertIn(workspace_absent, source)
+        self.assertIn("trap - EXIT HUP INT TERM", source)
         self.assertLess(source.index(publish), source.index(boot_check))
-        self.assertLess(source.index(boot_check), source.index(eslint_check))
+        self.assertLess(source.index(boot_check), source.index(workspace_create))
+        self.assertLess(source.index(workspace_create), source.index(workspace_layout))
+        self.assertLess(source.index(workspace_layout), source.index(hardlink_snapshot))
+        self.assertLess(source.index(hardlink_snapshot), source.index(eslint_check))
+        self.assertLess(source.index(eslint_check), source.index(explicit_cleanup, source.index(eslint_check)))
+        self.assertLess(
+            source.index(explicit_cleanup, source.index(eslint_check)),
+            source.index(workspace_absent, source.index(eslint_check)),
+        )
         self.assertLess(
             source.index(eslint_check),
             source.index(verifier_cleanup, source.index(eslint_check)),
