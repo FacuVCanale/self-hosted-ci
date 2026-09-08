@@ -22,7 +22,7 @@ ROOT = SCRIPT.parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from github_automation.crypto import parse_ijson
+from github_automation.crypto import canonicalize_jcs, parse_ijson
 from github_automation.runner_boundary import verify_runner_boundary_attestation
 
 
@@ -43,6 +43,10 @@ RESERVED_SIGNED_NAMES = {
     "contract/reviewer-public-key.pem",
     "contract/reviewer-key.sha256",
 }
+# archive path, payload (None for a directory), deterministic output mode,
+# observed input mode. Keeping the two policies separate lets the transport use
+# root-private 0700/0600 controls without weakening exact signed evidence modes.
+Entry = tuple[str, bytes | None, int, int]
 
 
 def _safe_relative(name: str) -> PurePosixPath:
@@ -59,14 +63,24 @@ def _assert_public(name: str, data: bytes) -> None:
         raise BundleError(f"private key material is forbidden: {name}")
 
 
-def _entry(name: str, data: bytes | None) -> tuple[str, bytes | None]:
+def _output_mode(name: str, data: bytes | None) -> int:
+    if data is None:
+        return 0o755
+    if name.startswith(("contract/evidence/", "contract/live/")):
+        return 0o640
+    return 0o644
+
+
+def _entry(name: str, data: bytes | None, input_mode: int) -> Entry:
     normalized = _safe_relative(name).as_posix()
+    if input_mode < 0 or input_mode > 0o7777 or input_mode & 0o7022:
+        raise BundleError(f"unsafe input mode: {normalized}")
     if data is not None:
         _assert_public(normalized, data)
-    return normalized, data
+    return normalized, data, _output_mode(normalized, data), input_mode
 
 
-def _write_tar(output: Path, entries: list[tuple[str, bytes | None]]) -> None:
+def _write_tar(output: Path, entries: list[Entry]) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     ordered = sorted(entries, key=lambda item: (item[0].count("/"), item[0]))
     seen: set[str] = set()
@@ -75,7 +89,7 @@ def _write_tar(output: Path, entries: list[tuple[str, bytes | None]]) -> None:
         with os.fdopen(fd, "wb") as raw, tarfile.open(
             fileobj=raw, mode="w", format=tarfile.PAX_FORMAT
         ) as archive:
-            for name, data in ordered:
+            for name, data, mode, _input_mode in ordered:
                 if name in seen:
                     raise BundleError(f"duplicate archive path: {name}")
                 seen.add(name)
@@ -86,17 +100,12 @@ def _write_tar(output: Path, entries: list[tuple[str, bytes | None]]) -> None:
                 info.pax_headers = {}
                 if data is None:
                     info.type = tarfile.DIRTYPE
-                    info.mode = 0o755
+                    info.mode = mode
                     info.size = 0
                     archive.addfile(info)
                 else:
                     info.type = tarfile.REGTYPE
-                    # Host evidence is carried forward into the signed bundle
-                    # and is not rewritten by the live stager. Keep it at the
-                    # root-only-readable mode required by the evidence
-                    # installer; public runtime sources are regenerated and
-                    # remeasured separately during installation.
-                    info.mode = 0o640 if name.startswith("contract/evidence/") else 0o644
+                    info.mode = mode
                     info.size = len(data)
                     archive.addfile(info, io.BytesIO(data))
             raw.flush()
@@ -111,7 +120,7 @@ def _write_tar(output: Path, entries: list[tuple[str, bytes | None]]) -> None:
         raise
 
 
-def _directory_entries(contract_dir: Path) -> list[tuple[str, bytes | None]]:
+def _directory_entries(contract_dir: Path) -> list[Entry]:
     if contract_dir.is_symlink():
         raise BundleError("contract source symlink is forbidden")
     root = contract_dir.resolve(strict=True)
@@ -120,7 +129,7 @@ def _directory_entries(contract_dir: Path) -> list[tuple[str, bytes | None]]:
     template = root / "runner-boundary-template-v2.json"
     if not template.is_file() or template.is_symlink():
         raise BundleError("runner-boundary-template-v2.json is required")
-    entries: list[tuple[str, bytes | None]] = [("contract", None)]
+    entries: list[Entry] = [_entry("contract", None, stat.S_IMODE(root.stat().st_mode))]
     for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
         current_path = Path(current)
         dirs.sort()
@@ -131,19 +140,27 @@ def _directory_entries(contract_dir: Path) -> list[tuple[str, bytes | None]]:
             if not stat.S_ISDIR(mode) or source.is_symlink():
                 raise BundleError(f"non-directory or symlink is forbidden: {source}")
             relative = source.relative_to(root).as_posix()
-            entries.append(_entry(f"contract/{relative}", None))
+            entries.append(
+                _entry(f"contract/{relative}", None, stat.S_IMODE(mode))
+            )
         for item in files:
             source = current_path / item
             mode = source.lstat().st_mode
             if not stat.S_ISREG(mode) or source.is_symlink():
                 raise BundleError(f"non-regular file is forbidden: {source}")
             relative = source.relative_to(root).as_posix()
-            entries.append(_entry(f"contract/{relative}", source.read_bytes()))
+            entries.append(
+                _entry(
+                    f"contract/{relative}",
+                    source.read_bytes(),
+                    stat.S_IMODE(mode),
+                )
+            )
     return entries
 
 
-def _unsigned_entries(source: Path) -> list[tuple[str, bytes | None]]:
-    entries: list[tuple[str, bytes | None]] = []
+def _unsigned_entries(source: Path) -> list[Entry]:
+    entries: list[Entry] = []
     seen: set[str] = set()
     with tarfile.open(source, "r:") as archive:
         for member in archive.getmembers():
@@ -155,18 +172,18 @@ def _unsigned_entries(source: Path) -> list[tuple[str, bytes | None]]:
                 raise BundleError("unsigned archive must contain only contract/")
             if member.issym() or member.islnk() or member.isdev():
                 raise BundleError(f"links and devices are forbidden: {name}")
-            if member.mode & 0o7022:
-                raise BundleError(f"unsafe input mode: {name}")
+            if member.uid != 0 or member.gid != 0:
+                raise BundleError(f"unsigned archive member must be root-owned: {name}")
             if member.isdir():
-                entries.append(_entry(name, None))
+                entries.append(_entry(name, None, member.mode))
             elif member.isfile():
                 extracted = archive.extractfile(member)
                 if extracted is None:
                     raise BundleError(f"could not read archive member: {name}")
-                entries.append(_entry(name, extracted.read()))
+                entries.append(_entry(name, extracted.read(), member.mode))
             else:
                 raise BundleError(f"unsupported archive member: {name}")
-    names = {name for name, _ in entries}
+    names = {name for name, _, _, _ in entries}
     if "contract" not in names or "contract/runner-boundary-template-v2.json" not in names:
         raise BundleError("unsigned archive layout is incomplete")
     if RESERVED_SIGNED_NAMES & names:
@@ -191,6 +208,48 @@ def _public_key(
     if hashlib.sha256(der).hexdigest() != fingerprint:
         raise BundleError("reviewer public key fingerprint mismatch")
     return data, loaded
+
+
+def _validate_signed_measurements(entries: list[Entry], boundary: dict) -> None:
+    by_name = {
+        name: (data, output_mode, input_mode)
+        for name, data, output_mode, input_mode in entries
+    }
+    artifacts = boundary.get("measurements", {}).get("artifacts", [])
+    if not isinstance(artifacts, list) or not artifacts:
+        raise BundleError("signed boundary has no measurement artifacts")
+    seen: set[str] = set()
+    for record in artifacts:
+        if not isinstance(record, dict):
+            raise BundleError("signed measurement record is invalid")
+        ref = record.get("ref")
+        if not isinstance(ref, str) or ref in seen:
+            raise BundleError("signed measurement refs are invalid or duplicated")
+        seen.add(ref)
+        entry = by_name.get(f"contract/{ref}")
+        if entry is None or entry[0] is None:
+            raise BundleError(f"signed measurement source is absent: {ref}")
+        data, output_mode, input_mode = entry
+        mode_text = record.get("mode")
+        if (
+            record.get("uid") != 0
+            or record.get("gid") != 0
+            or not isinstance(mode_text, str)
+            or len(mode_text) != 4
+            or any(character not in "01234567" for character in mode_text)
+        ):
+            raise BundleError(f"signed measurement metadata is invalid: {ref}")
+        recorded_mode = int(mode_text, 8)
+        if recorded_mode & 0o7137:
+            raise BundleError(f"signed evidence mode is not installable: {ref}")
+        if recorded_mode != 0o640 or output_mode != recorded_mode:
+            raise BundleError(f"signed evidence mode must be exactly 0640: {ref}")
+        if (
+            input_mode != recorded_mode
+            or record.get("size") != len(data)
+            or record.get("sha256") != hashlib.sha256(data).hexdigest()
+        ):
+            raise BundleError(f"signed measurement differs from archive member: {ref}")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -230,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
             boundary_value = parse_ijson(boundary)
             if not isinstance(boundary_value, dict):
                 raise BundleError("signed boundary must be a JSON object")
+            if boundary != canonicalize_jcs(boundary_value) + b"\n":
+                raise BundleError("signed boundary must be canonical JCS plus newline")
             public_key, loaded_public_key = _public_key(
                 args.reviewer_public_key, args.reviewer_key_fingerprint
             )
@@ -238,13 +299,15 @@ def main(argv: list[str] | None = None) -> int:
                 loaded_public_key,
                 pinned_fingerprint=args.reviewer_key_fingerprint,
             )
+            _validate_signed_measurements(entries, boundary_value)
             entries.extend(
                 (
-                    ("contract/runner-boundary-v2.json", boundary),
-                    ("contract/reviewer-public-key.pem", public_key),
-                    (
+                    _entry("contract/runner-boundary-v2.json", boundary, 0o644),
+                    _entry("contract/reviewer-public-key.pem", public_key, 0o644),
+                    _entry(
                         "contract/reviewer-key.sha256",
                         (args.reviewer_key_fingerprint + "\n").encode("ascii"),
+                        0o644,
                     ),
                 )
             )

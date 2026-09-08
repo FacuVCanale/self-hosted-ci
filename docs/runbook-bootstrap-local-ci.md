@@ -298,10 +298,28 @@ owner/mode Unix y contener un único árbol `contract/` con:
 - todos los refs relativos medidos por el bundle (por ejemplo `evidence/` y
   `live/`).
 
-El wrapper vuelve a ejecutar staging y collection dentro de
-`Ubuntu-24.04-CI`, exige igualdad canónica con el contenido firmado, verifica y
-recién entonces provisiona. No recibe claves privadas, no habilita GARM, no
-configura GitHub y no crea ni modifica `outbound-worker.runtime-ready`.
+Antes de abrir una consola elevada, el mismo paquete exacto debe ejecutar el
+preflight no mutante dentro de `Ubuntu-24.04-CI`. Este comando comprueba el
+SHA-256 y tamaño externos, todas las entradas y modos del tar, owner/group,
+fingerprint SPKI Ed25519, firma, JCS canónico, igualdad tras regenerar stage y
+measurements, hashes/tamaños/modos firmados y la política exacta de
+instalabilidad del evidence installer:
+
+```bash
+sudo python3 scripts/host/preflight-wsl-jit-live-contract.py \
+  --bundle /path/to/live-contract-bundle.tar \
+  --expected-sha256 <sha256-exacto-del-bundle> \
+  --expected-bytes <bytes-exactos-del-bundle> \
+  --pinned-fingerprint <sha256-spki-del-reviewer> \
+  --package-root /path/to/exact-package
+```
+
+Sólo un JSON `status=verified`, `host_mutated=false` y la lista completa de
+guards habilita la ceremonia elevada. El wrapper llama a ese mismo comando,
+publica atómicamente su árbol validado bajo `/run` y provisiona directamente
+desde allí; no mantiene una segunda implementación de los guards. No recibe
+claves privadas, no habilita GARM, no configura GitHub y no crea ni modifica
+`outbound-worker.runtime-ready`.
 
 Desde una PowerShell elevada, primero inspeccioná el plan:
 
@@ -310,15 +328,24 @@ Desde una PowerShell elevada, primero inspeccioná el plan:
   -ExpectedServiceAccountSid "<SID-exacto>"
 ```
 
-Aplicá el mismo bundle content-addressed con los dos acknowledgements:
+Aplicá el mismo bundle content-addressed con los acknowledgements de mutación,
+deactivación canónica y rotación one-shot:
 
 ```powershell
 & .\install-wsl-jit-live-contract.ps1 `
   -ExpectedServiceAccountSid "<SID-exacto>" `
   -Apply `
   -AcknowledgeLiveContractMutation `
+  -AcknowledgeExternalGitHubMutation `
+  -AcknowledgeLocalCiDeactivation `
   -AcknowledgeOneTimePasswordRotation
 ```
+
+Si existe `ACTIVATION_APPROVED`, el installer no lo elimina. Ejecuta primero el
+workflow dueño `deactivate-garm-jit.sh`, exige su receipt exacto con broker y
+outbound inactivos, cero scale sets, cero instancias Incus y policy detenida,
+y sólo después provisiona. Repetir el flujo con el sentinel ausente es un
+no-op de reconciliación.
 
 El bundle por defecto es
 `artifacts/live-contract/live-contract-bundle.tar`; `-BundleRelativePath`
@@ -903,6 +930,22 @@ python3 scripts/host/build-wsl-jit-live-contract-tar.py signed \
   --output artifacts/live-contract/live-contract-bundle.tar
 ```
 
+Antes de copiar ese bundle al paquete Windows o solicitar elevación, ejecutá
+el preflight completo contra el árbol público exacto que será instalado:
+
+```bash
+sudo python3 scripts/host/preflight-wsl-jit-live-contract.py \
+  --bundle artifacts/live-contract/live-contract-bundle.tar \
+  --expected-sha256 <sha256-exacto-del-bundle> \
+  --expected-bytes <bytes-exactos-del-bundle> \
+  --pinned-fingerprint <sha256-spki-del-reviewer> \
+  --package-root /path/to/exact-package
+```
+
+El preflight es read-only respecto del runtime y devuelve
+`host_mutated=false`; cualquier diferencia de modo, owner, hash, tamaño,
+fingerprint, firma o contenido regenerado bloquea antes de UAC.
+
 La clave privada del reviewer permanece fuera de Windows y fuera del
 repositorio. El flujo detallado de stage, medición, firma y verificación está
 en [`wsl-jit-runner-mvp.md`](wsl-jit-runner-mvp.md).
@@ -921,10 +964,14 @@ una PowerShell elevada:
   -ExpectedInputBytes <bytes-del-bundle-firmado> `
   -ExpectedReviewerFingerprint "<sha256-spki-del-reviewer>" `
   -AcknowledgeLiveContractMutation `
+  -AcknowledgeExternalGitHubMutation `
+  -AcknowledgeLocalCiDeactivation `
   -AcknowledgeOneTimePasswordRotation
 ```
 
 El éxito exige que la tarea, la credencial almacenada y el staging hayan sido
-eliminados; además re-mide el contrato dentro de la distro y exige igualdad con
-el contenido firmado antes de provisionar. Un fallo conserva sólo diagnósticos
-redactados y deja el sistema sin activation/runtime-ready nuevos.
+eliminados; además ejecuta el mismo preflight completo dentro de la distro antes
+de reconciliar activación o provisionar. Si había una aprobación de activación,
+la remueve exclusivamente el workflow canónico de deactivación después de probar
+cero runtime. Un fallo conserva sólo diagnósticos redactados y deja el sistema
+inactivo, sin activation/runtime-ready nuevos.

@@ -30,7 +30,7 @@ make_service_inert() {
 }
 
 usage() {
-  printf 'usage: %s [--plan] | --apply (--evidence FILE | --bootstrap-evidence FILE --windows-observation FILE --wsl-observation FILE --public-manifest FILE --expected-bootstrap-nonce HEX32) --reviewer-public-key FILE --reviewer-key-fingerprint SHA256 --acknowledge-host-mutation --acknowledge-dedicated-boundary\n' "$0" >&2
+  printf 'usage: %s [--plan] | --apply (--evidence FILE | --bootstrap-evidence FILE --windows-observation FILE --wsl-observation FILE --public-manifest FILE --expected-bootstrap-nonce HEX32) --reviewer-public-key FILE --reviewer-key-fingerprint SHA256 --acknowledge-host-mutation --acknowledge-dedicated-boundary [--inherited-transaction-lock]\n' "$0" >&2
   exit 2
 }
 
@@ -45,6 +45,7 @@ ack_mutation=false
 ack_boundary=false
 reviewer_public_key=""
 reviewer_key_fingerprint=""
+inherited_transaction_lock=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --plan) mode="plan"; shift ;;
@@ -59,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --reviewer-key-fingerprint) [[ $# -ge 2 ]] || usage; reviewer_key_fingerprint="$2"; shift 2 ;;
     --acknowledge-host-mutation) ack_mutation=true; shift ;;
     --acknowledge-dedicated-boundary) ack_boundary=true; shift ;;
+    --inherited-transaction-lock) inherited_transaction_lock=true; shift ;;
     *) usage ;;
   esac
 done
@@ -107,6 +109,18 @@ else
     --reviewer-public-key "${reviewer_public_key}" --pinned-fingerprint "${reviewer_key_fingerprint}" >/dev/null || \
     die "runner-boundary evidence is not fully verified"
 fi
+# Source executable product code only after the cryptographic package/evidence
+# boundary has passed. The same fd 9 lock then serializes every observation and
+# mutation performed by activation, deactivation, and provisioning. A compound
+# transaction coordinator may pass its already locked fd through this script.
+# shellcheck disable=SC1091
+source "${repo_root}/scripts/host/garm-jit-transaction-lib.sh"
+die() { printf 'wsl-jit provisioning blocked: %s\n' "$*" >&2; exit 1; }
+if [[ "${inherited_transaction_lock}" == true ]]; then
+  require_inherited_transaction_lock
+else
+  acquire_transaction_lock
+fi
 command -v systemctl >/dev/null || die "systemd is required"
 command -v incus >/dev/null || die "Incus is not installed"
 command -v garm >/dev/null || die "GARM is not installed"
@@ -117,9 +131,10 @@ fi
 service_enablement="$(systemctl is-enabled "${SERVICE_NAME}" 2>/dev/null)" || true
 [[ "${service_enablement}" != "enabled" && "${service_enablement}" != "enabled-runtime" && "${service_enablement}" != "indirect" ]] || \
   die "${SERVICE_NAME} must be disabled before provisioning"
+[[ ! -e "${TARGET_ROOT}/ACTIVATION_APPROVED" && ! -L "${TARGET_ROOT}/ACTIVATION_APPROVED" ]] || \
+  die "provisioning requires activation approval to be absent"
 if [[ "${contract_mode}" == "bootstrap-inert" ]]; then
-  [[ ! -e "${TARGET_ROOT}/ACTIVATION_APPROVED" ]] || die "bootstrap requires activation approval to be absent"
-  [[ ! -e "${TARGET_ROOT}/outbound-worker.runtime-ready" ]] || die "bootstrap requires runtime-ready state to be absent"
+  [[ ! -e "${TARGET_ROOT}/outbound-worker.runtime-ready" && ! -L "${TARGET_ROOT}/outbound-worker.runtime-ready" ]] || die "bootstrap requires runtime-ready state to be absent"
 fi
 if [[ "${contract_mode}" == "bootstrap-inert" ]]; then
   for inert_service in garm.service self-hosted-ci-boundary-verify.service self-hosted-ci-network-policy.service self-hosted-ci-egress-proxy.service self-hosted-ci-allocation-broker.service self-hosted-ci-outbound-worker.service self-hosted-ci-canary.target self-hosted-ci-canary-broker.service self-hosted-ci-canary-cleanup.service self-hosted-ci-canary-egress-proxy.service self-hosted-ci-canary-garm.service self-hosted-ci-canary-network-policy.service "${SERVICE_NAME}"; do
@@ -148,6 +163,7 @@ install -o root -g root -m 0755 "${repo_root}/scripts/host/collect-health-snapsh
 install -o root -g root -m 0755 "${repo_root}/scripts/host/garm-cli-session.py" "/usr/local/lib/self-hosted-ci/garm-cli-session.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/update-health-heartbeat.py" "/usr/local/lib/self-hosted-ci/update-health-heartbeat.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/install-wsl-jit-evidence.py" "/usr/local/lib/self-hosted-ci/install-wsl-jit-evidence.py"
+install -o root -g root -m 0755 "${repo_root}/scripts/host/preflight-wsl-jit-live-contract.py" "/usr/local/lib/self-hosted-ci/preflight-wsl-jit-live-contract.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/garm-allocation-broker.py" "/usr/local/lib/self-hosted-ci/garm-allocation-broker.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/github-live-job-verifier.py" "/usr/local/libexec/self-hosted-ci/github-live-job-verifier.py"
 install -o root -g root -m 0755 "${repo_root}/scripts/host/runner-job-started-hook.py" "/usr/local/lib/self-hosted-ci/runner-job-started-hook.py"
@@ -230,7 +246,8 @@ for canary_unit in self-hosted-ci-canary.target self-hosted-ci-canary-broker.ser
   install -o root -g root -m 0644 "${repo_root}/packaging/systemd/${canary_unit}" "/etc/systemd/system/${canary_unit}"
 done
 systemctl daemon-reload
-rm -f "${TARGET_ROOT}/ACTIVATION_APPROVED"
+[[ ! -e "${TARGET_ROOT}/ACTIVATION_APPROVED" && ! -L "${TARGET_ROOT}/ACTIVATION_APPROVED" ]] || \
+  die "activation approval appeared during provisioning"
 if [[ "${contract_mode}" == "runner-final" ]]; then
   /usr/local/lib/self-hosted-ci/verify-live-artifact-contract.py \
     --evidence "${TARGET_ROOT}/runner-boundary-v2.json" \

@@ -445,7 +445,8 @@ class RunnerBoundaryV2Tests(unittest.TestCase):
         self.assertIn("install-runner-network-runtime.sh", source)
         self.assertIn("activate-garm-jit.sh", source)
         self.assertIn("deactivate-garm-jit.sh", source)
-        self.assertIn('rm -f "${TARGET_ROOT}/ACTIVATION_APPROVED"', source)
+        self.assertIn("activation approval appeared during provisioning", source)
+        self.assertNotIn('rm -f "${TARGET_ROOT}/ACTIVATION_APPROVED"', source)
         self.assertIn(
             "systemctl enable --now self-hosted-ci-health-heartbeat.timer", source
         )

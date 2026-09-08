@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/garm-jit-transaction-lib.sh"
-usage(){ printf 'usage: %s [--plan] | --apply --incus-project ci-jit --garm-cli-home /run/self-hosted-ci/garm-cli --acknowledge-external-github-mutation --acknowledge-local-ci-deactivation\n' "$0" >&2; exit 2; }
-mode=plan; incus_project=""; garm_cli_home=""; ack_external=false; ack_deactivation=false
-while [[ $# -gt 0 ]]; do case "$1" in --plan) mode=plan;shift;; --apply) mode=apply;shift;; --incus-project) incus_project="$2";shift 2;; --garm-cli-home) garm_cli_home="$2";shift 2;; --acknowledge-external-github-mutation) ack_external=true;shift;; --acknowledge-local-ci-deactivation) ack_deactivation=true;shift;; *) usage;; esac; done
+usage(){ printf 'usage: %s [--plan] | --apply --incus-project ci-jit --garm-cli-home /run/self-hosted-ci/garm-cli --acknowledge-external-github-mutation --acknowledge-local-ci-deactivation [--inherited-transaction-lock]\n' "$0" >&2; exit 2; }
+mode=plan; incus_project=""; garm_cli_home=""; ack_external=false; ack_deactivation=false; inherited_lock=false
+while [[ $# -gt 0 ]]; do case "$1" in --plan) mode=plan;shift;; --apply) mode=apply;shift;; --incus-project) incus_project="$2";shift 2;; --garm-cli-home) garm_cli_home="$2";shift 2;; --acknowledge-external-github-mutation) ack_external=true;shift;; --acknowledge-local-ci-deactivation) ack_deactivation=true;shift;; --inherited-transaction-lock) inherited_lock=true;shift;; *) usage;; esac; done
 if [[ "$mode" == plan ]]; then printf '%s\n' '{"mode":"plan","external_calls":"not_performed","host_changes":false,"sequence":["restore policy and GARM","stop broker admission","recover disable-drain-delete allocations","prove all target scale-set inventories and Incus empty","stop GARM and policy"]}'; exit 0; fi
 [[ "$ack_external" == true && "$ack_deactivation" == true ]]||die "--apply requires both explicit acknowledgements"
 [[ "$incus_project" == ci-jit && "$garm_cli_home" == "$GARM_RUNTIME_HOME" ]]||die "exact Incus project and garm-cli home are required"
-require_exact_distro; acquire_transaction_lock
+require_exact_distro
+if [[ "$inherited_lock" == true ]]; then require_inherited_transaction_lock; else acquire_transaction_lock; fi
 systemctl disable --now "$OUTBOUND_WORKER_SERVICE" "$BROKER_SERVICE"
 for unit in "$OUTBOUND_WORKER_SERVICE" "$BROKER_SERVICE"; do systemctl is-active --quiet "$unit"&&die "$unit admission remains active"; done
 require_deactivation_command_contracts; require_real_policy_units; require_base_health

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import shutil
@@ -38,17 +39,24 @@ def safe_ref(root: Path, ref: str) -> Path:
     return path
 
 
-def install(evidence: Path, measurement_root: Path, target_root: Path) -> None:
-    if os.geteuid() != 0:
-        raise InstallError("evidence installation must run as root")
+def validate(evidence: Path, measurement_root: Path) -> tuple[dict, dict[str, dict]]:
+    """Validate a signed evidence tree without mutating the host.
+
+    Installation and bundle preflight deliberately share this function so a
+    bundle cannot pass preflight and later encounter a stricter evidence-copy
+    guard.
+    """
+
     regular_file(evidence)
     if measurement_root.is_symlink() or not measurement_root.is_dir():
         raise InstallError("measurement root is not a real directory")
-    if target_root.is_symlink() or not target_root.is_dir():
-        raise InstallError("target root is not a real directory")
 
     value = parse_ijson(evidence.read_bytes())
+    if not isinstance(value, dict):
+        raise InstallError("signed evidence must be a JSON object")
     artifacts = value.get("measurements", {}).get("artifacts", [])
+    if not isinstance(artifacts, list) or not artifacts:
+        raise InstallError("measurement artifacts are absent or invalid")
     records = {item.get("ref"): item for item in artifacts if isinstance(item, dict)}
     if len(records) != len(artifacts) or None in records:
         raise InstallError("measurement artifact records are invalid or duplicated")
@@ -67,6 +75,42 @@ def install(evidence: Path, measurement_root: Path, target_root: Path) -> None:
             "measurement artifacts are not the exact signed reference set"
         )
 
+    for ref, record in sorted(records.items()):
+        if record.get("uid") != 0 or record.get("gid") != 0:
+            raise InstallError(f"signed evidence is not root-owned: {ref}")
+        mode_text = record.get("mode")
+        if (
+            not isinstance(mode_text, str)
+            or len(mode_text) != 4
+            or any(ch not in "01234567" for ch in mode_text)
+        ):
+            raise InstallError(f"signed evidence mode is invalid: {ref}")
+        mode = int(mode_text, 8)
+        if mode & 0o7137:
+            raise InstallError(
+                f"signed evidence is writable/executable outside root: {ref}"
+            )
+        source = safe_ref(measurement_root, ref)
+        source_stat = os.stat(source, follow_symlinks=False)
+        data = source.read_bytes()
+        if (
+            source_stat.st_uid != record["uid"]
+            or source_stat.st_gid != record["gid"]
+            or source_stat.st_mode & 0o7777 != mode
+            or record.get("size") != len(data)
+            or record.get("sha256") != hashlib.sha256(data).hexdigest()
+        ):
+            raise InstallError(f"signed evidence differs from source: {ref}")
+    return value, records
+
+
+def install(evidence: Path, measurement_root: Path, target_root: Path) -> None:
+    if os.geteuid() != 0:
+        raise InstallError("evidence installation must run as root")
+    _, records = validate(evidence, measurement_root)
+    if target_root.is_symlink() or not target_root.is_dir():
+        raise InstallError("target root is not a real directory")
+
     target_evidence = target_root / "host-evidence"
     target_bundle = target_root / "runner-boundary-v2.json"
     for target in (target_evidence, target_bundle):
@@ -82,20 +126,7 @@ def install(evidence: Path, measurement_root: Path, target_root: Path) -> None:
         os.chown(stage, 0, 0)
         os.chmod(stage, 0o750)
         for ref, record in sorted(records.items()):
-            if record.get("uid") != 0 or record.get("gid") != 0:
-                raise InstallError(f"signed evidence is not root-owned: {ref}")
-            mode_text = record.get("mode")
-            if (
-                not isinstance(mode_text, str)
-                or len(mode_text) != 4
-                or any(ch not in "01234567" for ch in mode_text)
-            ):
-                raise InstallError(f"signed evidence mode is invalid: {ref}")
-            mode = int(mode_text, 8)
-            if mode & 0o7137:
-                raise InstallError(
-                    f"signed evidence is writable/executable outside root: {ref}"
-                )
+            mode = int(record["mode"], 8)
             source = safe_ref(measurement_root, ref)
             destination = stage.joinpath(*PurePosixPath(ref).parts)
             destination.parent.mkdir(parents=True, exist_ok=True)

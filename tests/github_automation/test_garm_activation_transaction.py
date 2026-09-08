@@ -80,6 +80,13 @@ class GarmActivationTransactionTests(unittest.TestCase):
         )
         for token in ("os.fsync(f.fileno())", "os.replace(t,p)", "os.fsync(d)"):
             self.assertIn(token, library)
+        for token in (
+            "GARM_TRANSACTION_LOCK=/run/self-hosted-ci-garm-jit.lock",
+            "require_inherited_transaction_lock",
+            "inherited transaction lock fd is not canonical",
+            '[[ ! -e "$ACTIVATION_SENTINEL" && ! -L "$ACTIVATION_SENTINEL" ]]',
+        ):
+            self.assertIn(token, library)
         self.assertLess(
             source.index("create_activation_sentinel"),
             source.index('systemctl enable --now "$POLICY_SERVICE"'),

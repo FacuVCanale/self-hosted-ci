@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 readonly GARM_SERVICE=self-hosted-ci-garm.service BROKER_SERVICE=self-hosted-ci-allocation-broker.service OUTBOUND_WORKER_SERVICE=self-hosted-ci-outbound-worker.service BOUNDARY_SERVICE=self-hosted-ci-boundary-verify.service POLICY_SERVICE=self-hosted-ci-network-policy.service PROXY_SERVICE=self-hosted-ci-egress-proxy.service HEALTH_TIMER=self-hosted-ci-health-heartbeat.timer
+readonly GARM_TRANSACTION_LOCK=/run/self-hosted-ci-garm-jit.lock
 readonly ACTIVATION_SENTINEL=/etc/self-hosted-ci/ACTIVATION_APPROVED NETWORK_SENTINEL=/etc/self-hosted-ci/runner-network-v2.enabled HEALTH_STATE=/etc/self-hosted-ci/garm/health-state.json BROKER_CONFIG=/etc/self-hosted-ci/garm/allocation-broker.json BROKER_PUBLIC_KEY=/etc/self-hosted-ci/garm/allocation-authority-public-key.pem
 readonly OUTBOUND_CONFIG=/etc/self-hosted-ci/outbound-worker.json
 readonly GARM_CONFIG=/etc/self-hosted-ci/garm/config.toml PROVIDER_CONFIG=/etc/self-hosted-ci/garm/garm-provider-incus.toml GARM_SESSION_HELPER=/usr/local/lib/self-hosted-ci/garm-cli-session.py BROKER_CLI=/usr/local/lib/self-hosted-ci/garm-allocation-broker.py LIVE_JOB_VERIFIER=/usr/local/libexec/self-hosted-ci/github-live-job-verifier.py LIVE_CONTRACT_VERIFIER=/usr/local/lib/self-hosted-ci/verify-live-artifact-contract.py CANARY_MATRIX_CLI=/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py GARM_RUNTIME_HOME=/run/self-hosted-ci/garm-cli NETWORK_POLICY_SCRIPT=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh
 readonly GARM_DATABASE=/var/lib/self-hosted-ci/garm/garm.db
 die(){ printf 'garm-jit transaction blocked: %s\n' "$*" >&2; exit 1; }
-acquire_transaction_lock(){ command -v flock >/dev/null||die "flock is required"; exec 9>/run/self-hosted-ci-garm-jit.lock; flock -n 9||die "another transaction is active"; }
+acquire_transaction_lock(){ command -v flock >/dev/null||die "flock is required"; exec 9>"$GARM_TRANSACTION_LOCK"; flock -n 9||die "another transaction is active"; }
+require_inherited_transaction_lock(){
+  local observed
+  command -v flock >/dev/null||die "flock is required"
+  observed="$(readlink -f /proc/$$/fd/9 2>/dev/null)"||die "inherited transaction lock fd is absent"
+  [[ "$observed" == "$GARM_TRANSACTION_LOCK" ]]||die "inherited transaction lock fd is not canonical"
+  flock -n 9||die "inherited transaction lock is not held"
+}
 require_root_regular_file(){ local p="$1" m="$2" a; [[ -f "$p" && ! -L "$p" && "$(stat -c '%u:%h' "$p")" == 0:1 ]]||die "$p metadata unsafe"; a="$(stat -c '%a' "$p")"; (( (8#$a & ~8#$m)==0 ))||die "$p permissions too broad"; }
 require_exact_distro(){ [[ "$EUID" -eq 0 && "${WSL_DISTRO_NAME:-}" == Ubuntu-24.04-CI ]]||die "exact root WSL distro required"; grep -qi wsl2 /proc/sys/kernel/osrelease||die "WSL2 required"; }
 require_deactivation_command_contracts(){ command -v systemctl >/dev/null; command -v incus >/dev/null; for p in /usr/local/bin/garm /usr/local/bin/garm-cli "$GARM_SESSION_HELPER" "$BROKER_CLI" "$LIVE_JOB_VERIFIER"; do [[ -x "$p" && ! -L "$p" ]]||die "$p absent or unsafe"; done; for p in "$GARM_CONFIG" "$PROVIDER_CONFIG" "$BROKER_CONFIG" "$BROKER_PUBLIC_KEY" /etc/self-hosted-ci/garm/incus-client.crt /etc/self-hosted-ci/garm/incus-client.key /etc/self-hosted-ci/garm/incus-server.crt; do require_root_regular_file "$p" 0640; done; openssl x509 -in /etc/self-hosted-ci/garm/incus-client.crt -noout -checkend 2592000 >/dev/null||die "provider client certificate expires within 30 days"; grep -Fqx 'project_name = "ci-jit"' "$PROVIDER_CONFIG"||die "provider project drifted"; grep -Fqx 'url = "https://127.0.0.1:8443"' "$PROVIDER_CONFIG"||die "provider endpoint drifted"; grep -Fqx 'include_default_profile = false' "$PROVIDER_CONFIG"||die "provider may inherit default profile"; ! grep -Eq 'unix_socket|skip_verify *= *true|project_name = "default"' "$PROVIDER_CONFIG"||die "provider privilege bypass"; id garm-manager >/dev/null; id -nG garm-manager|tr ' ' '\n'|grep -Eq '^(incus|incus-admin|sudo|admin|wheel)$'&&die "garm-manager belongs to a forbidden privileged group"||true; }
@@ -101,8 +109,8 @@ with os.fdopen(fd,"w") as f: json.dump(v,f,sort_keys=True,separators=(",",":"));
 os.replace(t,p); d=os.open(os.path.dirname(p),os.O_RDONLY|os.O_DIRECTORY); os.fsync(d); os.close(d)
 PY
 }
-create_activation_sentinel(){ [[ ! -e "$ACTIVATION_SENTINEL" ]]||return 1; durable_write "$ACTIVATION_SENTINEL" '{"schema_version":2,"allocation_mode":"transient-broker"}'; }
-create_network_sentinel(){ [[ ! -e "$NETWORK_SENTINEL" ]]||return 1; durable_write "$NETWORK_SENTINEL" '{"schema_version":1,"policy":"runner-network-v2","state":"active"}'; }
+create_activation_sentinel(){ [[ ! -e "$ACTIVATION_SENTINEL" && ! -L "$ACTIVATION_SENTINEL" ]]||return 1; durable_write "$ACTIVATION_SENTINEL" '{"schema_version":2,"allocation_mode":"transient-broker"}'; }
+create_network_sentinel(){ [[ ! -e "$NETWORK_SENTINEL" && ! -L "$NETWORK_SENTINEL" ]]||return 1; durable_write "$NETWORK_SENTINEL" '{"schema_version":1,"policy":"runner-network-v2","state":"active"}'; }
 remove_durable_file(){ python3 - "$1" <<'PY'
 import os,sys
 try: os.unlink(sys.argv[1])

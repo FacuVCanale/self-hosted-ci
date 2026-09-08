@@ -13,6 +13,8 @@ param(
     [switch]$Apply,
     [switch]$AcknowledgeLiveContractMutation,
     [switch]$AcknowledgeUnsignedCollection,
+    [switch]$AcknowledgeExternalGitHubMutation,
+    [switch]$AcknowledgeLocalCiDeactivation,
     [switch]$AcknowledgeOneTimePasswordRotation
 )
 
@@ -183,7 +185,9 @@ Assert-NonAdmin $service
     input_bytes = $inputLength
     diagnostic_contract_version = $DiagnosticVersion
     transport = "stdin-no-drvfs"
-    operations = $(if ($CollectUnsigned) { @("regenerate the unsigned live artifact contract", "export a deterministic content-addressed tar", "leave provisioning and activation untouched") } else { @("regenerate and compare the signed live artifact contract", "verify and provision under the dedicated WSL service identity", "leave GARM and GitHub integration inactive") })
+    operations = $(if ($CollectUnsigned) { @("regenerate the unsigned live artifact contract", "export a deterministic content-addressed tar", "leave provisioning and activation untouched") } else { @("regenerate and compare the signed live artifact contract", "reconcile any active runtime through the owning deactivation workflow", "verify and provision under the dedicated WSL service identity", "leave GARM and GitHub integration inactive") })
+    external_github_mutation_acknowledged = [bool]$AcknowledgeExternalGitHubMutation
+    local_ci_deactivation_acknowledged = [bool]$AcknowledgeLocalCiDeactivation
     garm_activated = $false
     github_configured = $false
     runtime_ready_created = $false
@@ -195,6 +199,8 @@ if ($ExpectedInputBytes -le 0 -or $ExpectedInputBytes -ne $inputLength) { throw 
 if (-not $AcknowledgeOneTimePasswordRotation) { throw "Apply requires AcknowledgeOneTimePasswordRotation" }
 if ($CollectUnsigned -and -not $AcknowledgeUnsignedCollection) { throw "CollectUnsigned Apply requires AcknowledgeUnsignedCollection" }
 if (-not $CollectUnsigned -and -not $AcknowledgeLiveContractMutation) { throw "signed install Apply requires AcknowledgeLiveContractMutation" }
+if (-not $CollectUnsigned -and -not $AcknowledgeExternalGitHubMutation) { throw "signed install Apply requires AcknowledgeExternalGitHubMutation" }
+if (-not $CollectUnsigned -and -not $AcknowledgeLocalCiDeactivation) { throw "signed install Apply requires AcknowledgeLocalCiDeactivation" }
 if (-not $CollectUnsigned -and ($ExpectedReviewerFingerprint -notmatch '^[0-9a-f]{64}$' -or $ExpectedReviewerFingerprint -cne $ExpectedReviewerFingerprint.ToLowerInvariant())) { throw "signed install Apply requires an exact lowercase ExpectedReviewerFingerprint" }
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task already exists" }
 if (Test-Path -LiteralPath $Root) { throw "staging root already exists" }
@@ -254,81 +260,91 @@ printf '{"status":"collected","unsigned_bundle_sha256":"%s","unsigned_bundle_byt
         $payload = @'
 set -euo pipefail
 umask 077
-readonly package_root="$1" bundle="$2" expected_sha="$3"
+readonly package_root="$1" bundle="$2" expected_sha="$3" expected_bytes="$4" reviewer_fingerprint="$5"
+readonly acknowledge_external_github_mutation="$6" acknowledge_local_ci_deactivation="$7"
 readonly work=/run/self-hosted-ci-live-contract-install
+readonly contract_root="$work/validated-contract"
 cleanup(){ rm -rf -- "$work"; }
 trap cleanup EXIT HUP INT TERM
 [[ "$(id -u)" == 0 ]] || { echo 'live contract payload requires root' >&2; exit 2; }
 [[ "${WSL_DISTRO_NAME:-}" == 'Ubuntu-24.04-CI' ]] || { echo 'unexpected WSL distro' >&2; exit 2; }
-[[ -f "$bundle" && ! -L "$bundle" ]] || { echo 'live contract bundle is unsafe or absent' >&2; exit 2; }
-actual_sha="$(sha256sum -- "$bundle" | awk '{print $1}')"
-[[ "$actual_sha" == "$expected_sha" ]] || { echo 'live contract bundle sha256 mismatch' >&2; exit 2; }
 rm -rf -- "$work"
-install -d -o root -g root -m 0700 "$work" "$work/bundle"
-python3 - "$bundle" "$work/bundle" <<'PY'
-import pathlib, sys, tarfile
-source, target = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-required = {"runner-boundary-template-v2.json", "runner-boundary-v2.json", "reviewer-public-key.pem", "reviewer-key.sha256"}
-with tarfile.open(source, "r:") as archive:
-    members = archive.getmembers()
-    for member in members:
-        path = pathlib.PurePosixPath(member.name)
-        if path.is_absolute() or ".." in path.parts or member.issym() or member.islnk() or member.isdev():
-            raise SystemExit("unsafe live contract bundle member")
-        if member.uid != 0 or member.gid != 0:
-            raise SystemExit("live contract bundle members must be root-owned")
-        if member.mode & 0o7022:
-            raise SystemExit("live contract bundle member has unsafe mode")
-    roots = {pathlib.PurePosixPath(member.name).parts[0] for member in members if pathlib.PurePosixPath(member.name).parts}
-    names = {pathlib.PurePosixPath(member.name) for member in members}
-    if roots != {"contract"} or not {pathlib.PurePosixPath("contract") / name for name in required}.issubset(names):
-        raise SystemExit("live contract bundle layout is invalid")
-    archive.extractall(target, numeric_owner=True, filter="data")
+install -d -o root -g root -m 0700 "$work"
+preflight_result="$(PYTHONPATH="$package_root" python3 "$package_root/scripts/host/preflight-wsl-jit-live-contract.py" \
+  --bundle "$bundle" --expected-sha256 "$expected_sha" --expected-bytes "$expected_bytes" \
+  --pinned-fingerprint "$reviewer_fingerprint" --package-root "$package_root" \
+  --temporary-parent "$work" --validated-contract-root "$contract_root")"
+python3 - "$preflight_result" "$contract_root" <<'PY'
+import json, pathlib, sys
+result = json.loads(sys.argv[1])
+expected_guards = [
+    "external-hash-size",
+    "archive-layout-types-owner-modes",
+    "archive-exact-signed-closure-and-size-limits",
+    "ed25519-spki-fingerprint",
+    "boundary-canonical-jcs",
+    "boundary-signature",
+    "evidence-installability",
+    "package-regeneration-equality",
+    "runner-readiness",
+]
+if (
+    result.get("status") != "verified"
+    or result.get("host_mutated") is not False
+    or result.get("guards") != expected_guards
+    or result.get("validated_contract_root") != sys.argv[2]
+    or result.get("measurement_artifacts", 0) <= 0
+    or not pathlib.Path(sys.argv[2]).is_dir()
+):
+    raise SystemExit("live contract preflight returned an invalid result")
 PY
-readonly contract_root="$work/bundle/contract"
-for required in runner-boundary-template-v2.json runner-boundary-v2.json reviewer-public-key.pem reviewer-key.sha256; do
-  [[ -f "$contract_root/$required" && ! -L "$contract_root/$required" ]] || { echo "missing bundle member: $required" >&2; exit 2; }
-done
-fingerprint="$(tr -d '\r\n' <"$contract_root/reviewer-key.sha256")"
-[[ "$fingerprint" == "$4" ]] || { echo 'reviewer fingerprint differs from external pin' >&2; exit 2; }
-python3 "$package_root/scripts/host/stage-wsl-jit-live-contract.py" \
-  --input-boundary "$contract_root/runner-boundary-template-v2.json" \
-  --output-boundary "$work/staged.json" --measurement-root "$contract_root"
-python3 "$package_root/scripts/host/collect-wsl-jit-measurements.py" \
-  --input "$work/staged.json" --output "$work/measured.json" --measurement-root "$contract_root"
-PYTHONPATH="$package_root" python3 - "$work/measured.json" "$contract_root/runner-boundary-v2.json" <<'PY'
-import pathlib, sys
-from github_automation.crypto import canonicalize_jcs, parse_ijson
-measured = parse_ijson(pathlib.Path(sys.argv[1]).read_bytes())
-signed = parse_ijson(pathlib.Path(sys.argv[2]).read_bytes())
-if "attestation" not in signed:
-    raise SystemExit("signed live contract has no attestation")
-signed.pop("attestation")
-if canonicalize_jcs(measured) != canonicalize_jcs(signed):
-    raise SystemExit("regenerated live contract differs from signed content")
-PY
-python3 "$package_root/scripts/host/verify-wsl-jit-readiness.py" \
-  --evidence "$contract_root/runner-boundary-v2.json" --measurement-root "$contract_root" \
-  --reviewer-public-key "$contract_root/reviewer-public-key.pem" --pinned-fingerprint "$4" >/dev/null
+# Hold the canonical transaction lock across state observation, optional owner
+# deactivation, zero proof, provisioning, and all postconditions.
+source "$package_root/scripts/host/garm-jit-transaction-lib.sh"
+acquire_transaction_lock
 ready_sentinel=/etc/self-hosted-ci/outbound-worker.runtime-ready
-if [[ -e "$ready_sentinel" ]]; then
+if [[ -e "$ready_sentinel" || -L "$ready_sentinel" ]]; then
   [[ -f "$ready_sentinel" && ! -L "$ready_sentinel" ]] || { echo 'preexisting runtime-ready sentinel is unsafe' >&2; exit 2; }
   ready_before="$(sha256sum -- "$ready_sentinel" | awk '{print $1}')"
 else
   ready_before=absent
 fi
-[[ ! -e /etc/self-hosted-ci/ACTIVATION_APPROVED ]] || { echo 'preexisting activation approval must be removed by its owning workflow' >&2; exit 2; }
+activation_reconciled=false
+if [[ -e /etc/self-hosted-ci/ACTIVATION_APPROVED || -L /etc/self-hosted-ci/ACTIVATION_APPROVED ]]; then
+  [[ "$acknowledge_external_github_mutation" == true && "$acknowledge_local_ci_deactivation" == true ]] || { echo 'activation reconciliation lacks exact acknowledgements' >&2; exit 2; }
+  deactivation_result="$(bash "$package_root/scripts/host/deactivate-garm-jit.sh" --apply \
+    --incus-project ci-jit --garm-cli-home /run/self-hosted-ci/garm-cli \
+    --acknowledge-external-github-mutation --acknowledge-local-ci-deactivation \
+    --inherited-transaction-lock)"
+  python3 - "$deactivation_result" <<'PY'
+import json, sys
+result = json.loads(sys.argv[1])
+expected = {
+    "status": "deactivated",
+    "broker_active": False,
+    "outbound_worker_active": False,
+    "zero_scale_sets": True,
+    "zero_incus_instances": True,
+    "policy_stopped_after_zero": True,
+}
+if result != expected:
+    raise SystemExit("owning deactivation workflow returned an invalid result")
+PY
+  activation_reconciled=true
+fi
+[[ ! -e /etc/self-hosted-ci/ACTIVATION_APPROVED && ! -L /etc/self-hosted-ci/ACTIVATION_APPROVED ]] || { echo 'owning deactivation workflow left activation approval present' >&2; exit 2; }
 bash "$package_root/scripts/host/provision-wsl-jit-contract.sh" --apply \
   --evidence "$contract_root/runner-boundary-v2.json" --reviewer-public-key "$contract_root/reviewer-public-key.pem" \
-  --reviewer-key-fingerprint "$fingerprint" --acknowledge-host-mutation --acknowledge-dedicated-boundary >/dev/null
+  --reviewer-key-fingerprint "$reviewer_fingerprint" --acknowledge-host-mutation --acknowledge-dedicated-boundary \
+  --inherited-transaction-lock >/dev/null
 systemctl is-enabled --quiet self-hosted-ci-garm.service && { echo 'GARM was unexpectedly enabled' >&2; exit 2; }
-[[ ! -e /etc/self-hosted-ci/ACTIVATION_APPROVED ]] || { echo 'activation approval was unexpectedly created' >&2; exit 2; }
+[[ ! -e /etc/self-hosted-ci/ACTIVATION_APPROVED && ! -L /etc/self-hosted-ci/ACTIVATION_APPROVED ]] || { echo 'activation approval was unexpectedly created' >&2; exit 2; }
 if [[ "$ready_before" == absent ]]; then
-  [[ ! -e "$ready_sentinel" ]] || { echo 'runtime-ready sentinel was unexpectedly created' >&2; exit 2; }
+  [[ ! -e "$ready_sentinel" && ! -L "$ready_sentinel" ]] || { echo 'runtime-ready sentinel was unexpectedly created' >&2; exit 2; }
 else
   [[ -f "$ready_sentinel" && ! -L "$ready_sentinel" && "$(sha256sum -- "$ready_sentinel" | awk '{print $1}')" == "$ready_before" ]] || { echo 'runtime-ready sentinel changed' >&2; exit 2; }
 fi
-printf '%s\n' '{"status":"installed","live_contract_verified":true,"garm_enabled":false,"github_configured":false,"runtime_ready_created":false,"runner_registration_performed":false}'
+printf '{"status":"installed","live_contract_verified":true,"activation_reconciled":%s,"garm_enabled":false,"github_configured":false,"runtime_ready_created":false,"runner_registration_performed":false}\n' "$activation_reconciled"
 '@
     }
     $payloadBytes = [Text.Encoding]::UTF8.GetBytes($payload)
@@ -338,9 +354,11 @@ printf '%s\n' '{"status":"installed","live_contract_verified":true,"garm_enabled
     $bootstrap = @'
 import base64, hashlib, json, os, pathlib, shutil, stat, subprocess, sys, tempfile, zipfile
 envelope = json.loads(sys.stdin.buffer.read())
-expected_keys = {"package_archive_b64", "package_archive_bytes", "package_archive_sha256", "input_bytes", "input_relative_path", "input_sha256", "operation", "payload_b64", "payload_sha256", "reviewer_fingerprint"}
+expected_keys = {"acknowledge_external_github_mutation", "acknowledge_local_ci_deactivation", "package_archive_b64", "package_archive_bytes", "package_archive_sha256", "input_bytes", "input_relative_path", "input_sha256", "operation", "payload_b64", "payload_sha256", "reviewer_fingerprint"}
 if set(envelope) != expected_keys:
     raise SystemExit("invalid stdin envelope")
+if not isinstance(envelope["acknowledge_external_github_mutation"], bool) or not isinstance(envelope["acknowledge_local_ci_deactivation"], bool):
+    raise SystemExit("invalid activation reconciliation acknowledgements")
 archive = base64.b64decode(envelope["package_archive_b64"], validate=True)
 payload = base64.b64decode(envelope["payload_b64"], validate=True)
 if len(archive) != envelope["package_archive_bytes"] or hashlib.sha256(archive).hexdigest() != envelope["package_archive_sha256"]:
@@ -385,7 +403,14 @@ try:
     if envelope["operation"] == "collect-unsigned":
         arguments.append(str(output_path))
     elif envelope["operation"] == "install-signed":
-        arguments.append(envelope["reviewer_fingerprint"])
+        if not envelope["acknowledge_external_github_mutation"] or not envelope["acknowledge_local_ci_deactivation"]:
+            raise SystemExit("signed install lacks activation reconciliation acknowledgements")
+        arguments.extend([
+            str(envelope["input_bytes"]),
+            envelope["reviewer_fingerprint"],
+            str(envelope["acknowledge_external_github_mutation"]).lower(),
+            str(envelope["acknowledge_local_ci_deactivation"]).lower(),
+        ])
     else:
         raise SystemExit("invalid stdin operation")
     completed = subprocess.run(["/bin/bash", payload_path, *arguments], check=False, text=True, capture_output=True)
@@ -412,6 +437,8 @@ finally:
     shutil.rmtree(work, ignore_errors=True)
 '@
     $bootstrapB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($bootstrap))
+    $externalGitHubAckLiteral = $(if ($AcknowledgeExternalGitHubMutation) { '$true' } else { '$false' })
+    $localCiDeactivationAckLiteral = $(if ($AcknowledgeLocalCiDeactivation) { '$true' } else { '$false' })
     $worker = @"
 `$ErrorActionPreference = 'Stop'
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne '$ExpectedServiceAccountSid') { throw 'worker service SID mismatch' }
@@ -422,7 +449,7 @@ if (`$actualInputSha -cne '$inputSha256' -or `$inputBytes.Length -ne $inputLengt
 `$packageBytes = [IO.File]::ReadAllBytes('$PackageArchivePath')
 `$actualPackageSha = ([Security.Cryptography.SHA256]::Create().ComputeHash(`$packageBytes) | ForEach-Object { `$_.ToString('x2') }) -join ''
 if (`$actualPackageSha -cne '$packageArchiveSha256' -or `$packageBytes.Length -ne $packageArchiveLength) { throw 'package archive changed before stdin transfer' }
-`$envelope = [ordered]@{ package_archive_b64=[Convert]::ToBase64String(`$packageBytes); package_archive_bytes=$packageArchiveLength; package_archive_sha256=`$actualPackageSha; input_bytes=$inputLength; input_relative_path='$($inputRelativePath.Replace('\','/'))'; input_sha256='$inputSha256'; operation='$operation'; payload_b64='$payloadB64'; payload_sha256='$payloadSha256'; reviewer_fingerprint='$ExpectedReviewerFingerprint' } | ConvertTo-Json -Compress
+`$envelope = [ordered]@{ acknowledge_external_github_mutation=$externalGitHubAckLiteral; acknowledge_local_ci_deactivation=$localCiDeactivationAckLiteral; package_archive_b64=[Convert]::ToBase64String(`$packageBytes); package_archive_bytes=$packageArchiveLength; package_archive_sha256=`$actualPackageSha; input_bytes=$inputLength; input_relative_path='$($inputRelativePath.Replace('\','/'))'; input_sha256='$inputSha256'; operation='$operation'; payload_b64='$payloadB64'; payload_sha256='$payloadSha256'; reviewer_fingerprint='$ExpectedReviewerFingerprint' } | ConvertTo-Json -Compress
 [Array]::Clear(`$packageBytes, 0, `$packageBytes.Length)
 `$psi = [Diagnostics.ProcessStartInfo]::new()
 `$psi.FileName = "`$env:SystemRoot\System32\wsl.exe"
@@ -447,7 +474,7 @@ if ('$operation' -eq 'collect-unsigned') {
     if (`$unsignedSha -cne `$result.unsigned_bundle_sha256 -or `$unsignedBytes.Length -ne `$result.unsigned_bundle_bytes) { throw 'unsigned return transport hash or size mismatch' }
     [IO.File]::WriteAllBytes('$UnsignedStagingPath', `$unsignedBytes); [Array]::Clear(`$unsignedBytes, 0, `$unsignedBytes.Length)
     `$result.PSObject.Properties.Remove('unsigned_bundle_b64')
-} elseif (`$result.status -ne 'installed' -or `$result.transport -ne 'stdin-no-drvfs' -or `$result.live_contract_verified -ne `$true -or `$result.garm_enabled -ne `$false -or `$result.github_configured -ne `$false -or `$result.runtime_ready_created -ne `$false -or `$result.runner_registration_performed -ne `$false) { throw 'live contract postcondition failed' }
+} elseif (`$result.status -ne 'installed' -or `$result.transport -ne 'stdin-no-drvfs' -or `$result.live_contract_verified -ne `$true -or `$result.activation_reconciled -notin @(`$true, `$false) -or `$result.garm_enabled -ne `$false -or `$result.github_configured -ne `$false -or `$result.runtime_ready_created -ne `$false -or `$result.runner_registration_performed -ne `$false) { throw 'live contract postcondition failed' }
 [IO.File]::WriteAllText('$ResultPath', (`$result | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new(`$false))
 "@
     [IO.File]::WriteAllText($WorkerPath, $worker, [Text.UTF8Encoding]::new($false))
@@ -487,7 +514,7 @@ if ('$operation' -eq 'collect-unsigned') {
         } else {
             Copy-Item -LiteralPath $UnsignedStagingPath -Destination $unsignedDestination
         }
-    } elseif ($result.status -ne "installed" -or $result.live_contract_verified -ne $true -or $result.garm_enabled -ne $false -or $result.github_configured -ne $false -or $result.runtime_ready_created -ne $false -or $result.runner_registration_performed -ne $false) { throw "installed live contract postcondition failed" }
+    } elseif ($result.status -ne "installed" -or $result.live_contract_verified -ne $true -or $result.activation_reconciled -notin @($true, $false) -or $result.garm_enabled -ne $false -or $result.github_configured -ne $false -or $result.runtime_ready_created -ne $false -or $result.runner_registration_performed -ne $false) { throw "installed live contract postcondition failed" }
     $finalPassword = New-CryptographicAccountPassword
     try { Set-LocalUser -Name $service.Name -Password $finalPassword -ErrorAction Stop }
     finally { $finalPassword.Dispose() }
@@ -499,7 +526,7 @@ if ('$operation' -eq 'collect-unsigned') {
     if ($CollectUnsigned) {
         [ordered]@{ status="collected"; transport="stdin-no-drvfs"; unsigned_bundle_path=$unsignedDestination; unsigned_bundle_sha256=$actualUnsignedSha; unsigned_bundle_bytes=[int64]$result.unsigned_bundle_bytes; provisioned=$false; garm_enabled=$false; github_configured=$false; runtime_ready_created=$false; runner_registration_performed=$false; one_shot_task_absent=$true; stored_task_credential_invalidated=$true; staging_absent=$true } | ConvertTo-Json -Compress
     } else {
-        [ordered]@{ status="installed"; transport="stdin-no-drvfs"; live_contract_verified=$true; bundle_sha256=$inputSha256; garm_enabled=$false; github_configured=$false; runtime_ready_created=$false; runner_registration_performed=$false; one_shot_task_absent=$true; stored_task_credential_invalidated=$true; staging_absent=$true } | ConvertTo-Json -Compress
+        [ordered]@{ status="installed"; transport="stdin-no-drvfs"; live_contract_verified=$true; activation_reconciled=[bool]$result.activation_reconciled; bundle_sha256=$inputSha256; garm_enabled=$false; github_configured=$false; runtime_ready_created=$false; runner_registration_performed=$false; one_shot_task_absent=$true; stored_task_credential_invalidated=$true; staging_absent=$true } | ConvertTo-Json -Compress
     }
 }
 catch {
