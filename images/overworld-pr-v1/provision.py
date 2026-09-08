@@ -57,6 +57,22 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def detach_regular_files(root: Path) -> None:
+    for path in root.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+            try:
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(path.read_bytes())
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.chmod(temporary, path.stat().st_mode & 0o7777)
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+
+
 def tree_digest(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
@@ -456,6 +472,7 @@ committed=true
                 raise SystemExit("Bun did not install the pinned Next.js package directory")
             shutil.rmtree(installed_next)
             shutil.copytree(next_package, installed_next, symlinks=False)
+            detach_regular_files(installed_next)
         source_modules = component_root / "node_modules"
         target_modules = dependencies / f"{component}-node_modules"
         if component == "backend":

@@ -270,6 +270,8 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn('downloaded["next"], next_package', source)
         self.assertIn('next_metadata.get("version") != "16.2.3"', source)
         self.assertIn('shutil.copytree(next_package, installed_next, symlinks=False)', source)
+        self.assertIn('detach_regular_files(installed_next)', source)
+        self.assertIn('os.replace(temporary, path)', source)
         self.assertNotIn('shutil.copytree(official_browser_logs, installed_browser_logs)', source)
         self.assertIn('run("cp", "-aL", f"{source_modules}/.", str(target_modules))', source)
         self.assertIn('required_next.resolve() != required_next', source)
