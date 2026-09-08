@@ -473,9 +473,6 @@ committed=true
             shutil.rmtree(installed_next)
             shutil.copytree(next_package, installed_next, symlinks=False)
             detach_regular_files(installed_next)
-            sealed_next = Path("/opt/self-hosted-ci/.next-package-sealed")
-            shutil.copytree(next_package, sealed_next, symlinks=False)
-            detach_regular_files(sealed_next)
         source_modules = component_root / "node_modules"
         target_modules = dependencies / f"{component}-node_modules"
         if component == "backend":
@@ -487,6 +484,9 @@ committed=true
                 source_modules.unlink()
             else:
                 shutil.rmtree(source_modules)
+            sealed_frontend = Path("/opt/self-hosted-ci/.frontend-node-modules-sealed")
+            shutil.copytree(target_modules, sealed_frontend, symlinks=False)
+            detach_regular_files(sealed_frontend)
             required_next = target_modules / "next/dist/server/dev/browser-logs/file-logger.js"
             if not required_next.is_file() or required_next.resolve() != required_next:
                 raise SystemExit("frontend dependency snapshot retained a staging-backed path")
