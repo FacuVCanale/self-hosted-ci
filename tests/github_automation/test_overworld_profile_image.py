@@ -478,11 +478,11 @@ class OverworldProfileImageTests(unittest.TestCase):
         digest_inventory = 'incus exec "${builder}" --project "${PROJECT}" -- sha256sum -- "${PUBLISH_SENTINELS[@]}"'
         sync = 'incus exec "${builder}" --project "${PROJECT}" -- /bin/sync'
         stopped = 'incus list "${builder}" --project "${PROJECT}" --format csv -c s | grep -Fxq STOPPED'
-        stopped_pull = 'incus file pull "${builder}${sentinel}" /dev/null --project "${PROJECT}"'
+        stopped_pull = 'incus file pull "${builder}${sentinel}" - --project "${PROJECT}" >"${sentinel_probe}"'
         publish = 'incus publish "${builder}" --project "${PROJECT}" --alias "${candidate_alias}" >/dev/null'
         builder_delete = 'incus delete "${builder}" --project "${PROJECT}"'
         verifier_init = 'incus init "${published_fingerprint}" "${published_verifier}" --project "${PROJECT}" --profile ci-jit'
-        initialized_pull = 'incus file pull "${published_verifier}${sentinel}" /dev/null --project "${PROJECT}" >/dev/null 2>&1'
+        initialized_pull = 'incus file pull "${published_verifier}${sentinel}" - --project "${PROJECT}" >"${sentinel_probe}"'
         verifier_start = 'incus start "${published_verifier}" --project "${PROJECT}"'
         running_check = 'inspect_running_sentinels "${published_verifier}" published-verifier-post-start "${expected_sentinel_digests[@]}"'
         export = 'incus image export "${published_fingerprint}" "${published_export_dir}/image" --project "${PROJECT}"'
@@ -496,6 +496,12 @@ class OverworldProfileImageTests(unittest.TestCase):
         initialized_probe = source[source.index(initialized_pull):source.index(verifier_start)]
         self.assertIn("diagnostic only", initialized_probe)
         self.assertNotIn("die ", initialized_probe)
+        self.assertNotIn('incus file pull "${builder}${sentinel}" /dev/null', source)
+        self.assertNotIn('incus file pull "${published_verifier}${sentinel}" /dev/null', source)
+        self.assertIn('sentinel_probe="${workdir}/sentinel-probe"', source)
+        self.assertIn('chmod 0600 "${sentinel_probe}"', source)
+        self.assertIn("uid=0 gid=0 mode=600", source)
+        self.assertEqual(3, source.count(': >"${sentinel_probe}"'))
         self.assertIn("builder sentinel digest inventory is incomplete", source)
         self.assertIn("published image boot sentinel verification failed", source)
         publish_position = source.index(publish)
@@ -550,6 +556,19 @@ class OverworldProfileImageTests(unittest.TestCase):
             self.assertIn(token, device_probe)
         self.assertNotIn("2>/dev/null", device_probe)
         self.assertNotIn("| sed", device_probe)
+
+        host_device_probe = source.split("assert_host_dev_null_contract(){", 1)[1].split("\n}\nusage(){", 1)[0]
+        for token in (
+            "[[ -c /dev/null && ! -L /dev/null ]]",
+            "uid=%u gid=%g mode=%a major=%t minor=%T",
+            "uid=0 gid=0 mode=666 major=1 minor=3",
+            "printf probe > /dev/null",
+        ):
+            self.assertIn(token, host_device_probe)
+        self.assertEqual(2, source.count("\nassert_host_dev_null_contract\n"))
+        self.assertLess(source.index("\nassert_host_dev_null_contract\n"), source.index('incus start "${builder}"'))
+        second_guard = source.index("\nassert_host_dev_null_contract\n", source.index("\nassert_host_dev_null_contract\n") + 1)
+        self.assertLess(second_guard, source.index(verifier_start))
 
     def test_build_egress_is_exact_and_not_a_general_wildcard(self) -> None:
         policy = (PROFILE / "squid-build.conf").read_text(encoding="utf-8")
