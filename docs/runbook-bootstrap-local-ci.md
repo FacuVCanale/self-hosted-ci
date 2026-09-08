@@ -21,6 +21,12 @@ la ejecución local permanece bloqueada.
 La implementación no usa Cloudflare ni Workers. `scripts/check-local-only.py`
 bloquea su reintroducción y se ejecuta mediante `make distribution-check`.
 
+Las operaciones Windows protegidas siguen requiriendo PowerShell elevada. El
+camino propuesto para evitar UAC repetido sólo en mantenimiento rutinario del
+WSL dedicado está documentado en
+[`audited-maintenance-dispatcher.md`](audited-maintenance-dispatcher.md). Es un
+diseño, no una interfaz instalada ni una autorización de activación.
+
 ## Prerrequisitos
 
 Se requiere una distro WSL2 dedicada `Ubuntu-24.04-CI`, propiedad de una cuenta
