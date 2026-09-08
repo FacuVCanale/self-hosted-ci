@@ -176,8 +176,8 @@ class OverworldProfileImageTests(unittest.TestCase):
             'netrc credential file persisted',
             'GitHub CLI credential file persisted',
             'required Next.js browser log module missing after cleanup',
-            'mv /opt/self-hosted-ci/.next-browser-logs-sealed "$target"',
-            'Next.js browser log seal persisted',
+            'mv /opt/self-hosted-ci/.next-package-sealed "$target"',
+            'Next.js package seal persisted',
             "die 'provisioned image sync failed'",
             'set(d)!={"eth0","root"}',
             'd["eth0"].get("network")!="ci-jit-isolated"',
@@ -270,8 +270,8 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn('next_metadata.get("version") != "16.2.3"', source)
         self.assertIn('shutil.copytree(next_package, installed_next, symlinks=False)', source)
         self.assertIn('detach_regular_files(installed_next)', source)
-        self.assertIn('shutil.copytree(next_package / "dist/server/dev/browser-logs", sealed_browser_logs, symlinks=False)', source)
-        self.assertIn('detach_regular_files(sealed_browser_logs)', source)
+        self.assertIn('shutil.copytree(next_package, sealed_next, symlinks=False)', source)
+        self.assertIn('detach_regular_files(sealed_next)', source)
         self.assertIn('os.replace(temporary, path)', source)
         self.assertNotIn('shutil.copytree(official_browser_logs, installed_browser_logs)', source)
         self.assertIn('run("cp", "-aL", f"{source_modules}/.", str(target_modules))', source)
