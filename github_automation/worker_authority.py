@@ -241,6 +241,22 @@ class WorkerGitHubClient:
             raise WorkerAuthorityError("selected repository identity mismatch")
         return value
 
+    def default_branch_head(self, token: WorkerInstallationToken) -> str:
+        branch = quote(self.authority.default_branch, safe="")
+        value = self._token_json(
+            "GET",
+            f"/repos/{self.authority.repository}/branches/{branch}",
+            token,
+            200,
+        )
+        commit = value.get("commit")
+        sha = commit.get("sha") if isinstance(commit, Mapping) else None
+        if value.get("name") != self.authority.default_branch or not isinstance(
+            sha, str
+        ) or not _SHA.fullmatch(sha):
+            raise WorkerAuthorityError("worker default branch identity mismatch")
+        return sha
+
     def pull_request(
         self, number: int, token: WorkerInstallationToken
     ) -> Mapping[str, Any]:

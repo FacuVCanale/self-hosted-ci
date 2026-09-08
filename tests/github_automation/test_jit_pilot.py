@@ -60,12 +60,18 @@ class Reader:
             self.mutate("repository", value)
         return value
 
+    def branch(self, name):
+        value = {"name": "main", "commit": {"sha": "a" * 40}}
+        if self.mutate:
+            self.mutate("branch", value)
+        return value
+
     def pull_request(self, number):
         value = {
             "number": 7,
             "state": "open",
             "head": {"sha": "b" * 40},
-            "base": {"sha": "a" * 40, "ref": "main", "repo": {"id": 123}},
+            "base": {"sha": "f" * 40, "ref": "main", "repo": {"id": 123}},
         }
         if self.mutate:
             self.mutate("pull", value)
@@ -169,7 +175,7 @@ class JitPilotTests(unittest.TestCase):
                 '{"jit_pilot_package_version":1,"jit_pilot_package_version":1}', now=NOW
             )
 
-    def test_live_repository_pr_base_head_and_workflow_are_each_revalidated(self):
+    def test_live_default_branch_pr_head_and_workflow_are_each_revalidated(self):
         parsed = JitPilotPackageV1.from_mapping(package(), now=NOW)
         revalidate_package(parsed, Reader())
         mutations = (
@@ -178,7 +184,7 @@ class JitPilotTests(unittest.TestCase):
                 value["head"].update(sha="d" * 40) if kind == "pull" else None
             ),
             lambda kind, value: (
-                value["base"].update(sha="d" * 40) if kind == "pull" else None
+                value["commit"].update(sha="d" * 40) if kind == "branch" else None
             ),
             lambda kind, value: (
                 value.update(path=".github/workflows/other.yml")
