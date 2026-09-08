@@ -231,6 +231,7 @@ import json,sys
 rows=[r for r in json.load(open(sys.argv[2])) if r.get("fingerprint")==sys.argv[1]]
 if len(rows)!=1 or rows[0].get("type")!="container" or rows[0].get("architecture")!="x86_64": raise SystemExit(1)
 PY
+incus delete "${builder}" --project "${PROJECT}"
 incus init "${published_fingerprint}" "${published_verifier}" --project "${PROJECT}" --profile ci-jit
 incus start "${published_verifier}" --project "${PROJECT}"
 incus exec "${published_verifier}" --project "${PROJECT}" -- /bin/test -f /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js \
@@ -239,7 +240,6 @@ incus delete "${published_verifier}" --project "${PROJECT}" --force
 if incus list "${published_verifier}" --project "${PROJECT}" --format csv -c n | grep -Fxq "${published_verifier}"; then
   die 'published image verifier cleanup failed'
 fi
-incus delete "${builder}" --project "${PROJECT}"
 transaction_succeeded=true
 printf '{"status":"built","project":"%s","profile":"overworld-pr-v1","base_fingerprint":"%s","manifest_sha256":"%s","candidate_alias":"%s","fingerprint":"%s","builder_privileged":false,"builder_nesting":false,"credentials_persisted":false,"alias_moved":false}\n' \
   "${PROJECT}" "${base_fingerprint}" "${manifest_sha}" "${candidate_alias}" "${published_fingerprint}"
