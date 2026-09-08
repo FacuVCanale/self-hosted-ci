@@ -197,10 +197,12 @@ inspect_running_sentinels(){
 inspect_running_device_contract(){
   local instance=$1
   incus exec "${instance}" --project "${PROJECT}" -- /bin/sh -ceu '
-    [ -c /dev/null ] || { printf "published-verifier /dev/null is not a character device\n" >&2; exit 1; }
+    [ -c /dev/null ] && [ ! -L /dev/null ] \
+      || { printf "published-verifier /dev/null is not a safe character device\n" >&2; exit 1; }
     metadata=$(stat -c "uid=%u gid=%g mode=%a major=%t minor=%T" -- /dev/null)
     printf "published-verifier /dev/null metadata: %s\n" "$metadata"
-    [ "$metadata" = "uid=0 gid=0 mode=666 major=1 minor=3" ] \
+    device_identity=$(stat -c "mode=%a major=%t minor=%T" -- /dev/null)
+    [ "$device_identity" = "mode=666 major=1 minor=3" ] \
       || { printf "published-verifier /dev/null metadata drifted\n" >&2; exit 1; }
     mount=""
     if ! mount=$(findmnt -rn -T /dev -o TARGET,SOURCE,FSTYPE); then
@@ -210,7 +212,11 @@ inspect_running_device_contract(){
     [ -n "$mount" ] || { printf "published-verifier /dev mount lookup was empty\n" >&2; exit 1; }
     printf "published-verifier /dev mount: %s\n" "$mount"
     [ "${mount%% *}" = /dev ] || { printf "published-verifier /dev mount target drifted\n" >&2; exit 1; }
-    printf probe > /dev/null || { printf "published-verifier /dev/null is not writable\n" >&2; exit 1; }
+    [ "${mount##* }" = tmpfs ] || { printf "published-verifier /dev mount filesystem drifted\n" >&2; exit 1; }
+    runuser -u runner -- /usr/bin/python3 -c "import os; fd = os.open(\"/dev/null\", os.O_RDONLY); data = os.read(fd, 1); raise SystemExit(0 if data == b\"\" else 1)" \
+      || { printf "published-verifier /dev/null did not return EOF for runner\n" >&2; exit 1; }
+    runuser -u runner -- /bin/sh -ceu "printf probe > /dev/null" \
+      || { printf "published-verifier /dev/null is not writable by runner\n" >&2; exit 1; }
   '
 }
 assert_incus_archive_exclude_contract(){
