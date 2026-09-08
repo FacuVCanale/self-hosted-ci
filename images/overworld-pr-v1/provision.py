@@ -421,6 +421,12 @@ committed=true
         browser_contract = Path("/opt/self-hosted-ci/browsers")
         browser_contract.mkdir(parents=True, exist_ok=False)
         (browser_contract / "chromium").symlink_to(chromium.parent)
+    run(
+        "systemctl", "stop",
+        "apt-daily.timer", "apt-daily-upgrade.timer",
+        "apt-daily.service", "apt-daily-upgrade.service",
+        "unattended-upgrades.service",
+    )
     run("apt-get", "clean")
     shutil.rmtree("/var/lib/apt/lists", ignore_errors=True)
 
