@@ -208,6 +208,18 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn("systemctl is-active --quiet \"${BUILD_PROXY_UNIT}\" && status=1", source)
         self.assertIn("grep -Eq '(^|:)8079$'", source)
 
+    def test_builder_is_deleted_before_published_image_verification(self) -> None:
+        lines = BUILDER.read_text(encoding="utf-8").splitlines()
+        publish = 'incus publish "${builder}" --project "${PROJECT}" --alias "${candidate_alias}" >/dev/null'
+        builder_delete = 'incus delete "${builder}" --project "${PROJECT}"'
+        verifier_init = 'incus init "${published_fingerprint}" "${published_verifier}" --project "${PROJECT}" --profile ci-jit'
+
+        self.assertEqual(1, lines.count(publish))
+        self.assertEqual(1, lines.count(builder_delete))
+        self.assertEqual(1, lines.count(verifier_init))
+        self.assertLess(lines.index(publish), lines.index(builder_delete))
+        self.assertLess(lines.index(builder_delete), lines.index(verifier_init))
+
     def test_build_egress_is_exact_and_not_a_general_wildcard(self) -> None:
         policy = (PROFILE / "squid-build.conf").read_text(encoding="utf-8")
         for domain in (
