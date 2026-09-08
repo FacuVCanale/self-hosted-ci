@@ -189,15 +189,23 @@ fi
 incus exec "${builder}" --project "${PROJECT}" -- /usr/bin/python3 /run/self-hosted-ci-profile-build/verify.py \
   || die 'provisioned image verification failed'
 incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu '
+  source=/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs
+  sealed=/opt/self-hosted-ci/.next-browser-logs-sealed
+  test -f "$source/file-logger.js"
+  test ! -e "$sealed"
+  cp -aL "$source" "$sealed"
+  test -f "$sealed/file-logger.js"
+' || die 'Next.js browser log sealing failed'
+incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu '
   required=/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js
   rm -rf /run/self-hosted-ci-profile-build || { echo "build staging cleanup failed" >&2; exit 1; }
-  test -f "$required" || { echo "required Next.js browser log module depended on build staging" >&2; exit 1; }
   rm -rf /root/.cache /root/.bun || { echo "root cache cleanup failed" >&2; exit 1; }
-  test -f "$required" || { echo "required Next.js browser log module depended on root cache" >&2; exit 1; }
   rm -rf /tmp/* || { echo "tmp cleanup failed" >&2; exit 1; }
-  test -f "$required" || { echo "required Next.js browser log module depended on tmp" >&2; exit 1; }
   rm -rf /var/tmp/* || { echo "var-tmp cleanup failed" >&2; exit 1; }
-  test -f "$required" || { echo "required Next.js browser log module depended on var-tmp" >&2; exit 1; }
+  target=${required%/file-logger.js}
+  rm -rf "$target"
+  mv /opt/self-hosted-ci/.next-browser-logs-sealed "$target"
+  test ! -e /opt/self-hosted-ci/.next-browser-logs-sealed || { echo "Next.js browser log seal persisted" >&2; exit 1; }
   test ! -e /root/.npmrc || { echo "npm credential file persisted" >&2; exit 1; }
   test ! -e /root/.netrc || { echo "netrc credential file persisted" >&2; exit 1; }
   test ! -e /root/.config/gh/hosts.yml || { echo "GitHub CLI credential file persisted" >&2; exit 1; }
