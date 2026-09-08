@@ -399,9 +399,17 @@ class OverworldProfileImageTests(unittest.TestCase):
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        profile = json.loads(
+            (ROOT / "repository_profiles/overworld/profile.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        frontend_modules = Path(
+            profile["dependency_snapshots"]["frontend"]["node_modules_path"]
+        )
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "frontend-node-modules"
+            root = Path(directory) / frontend_modules.name
             eslint = root / "eslint"
             (root / ".bin").mkdir(parents=True)
             (eslint / "bin").mkdir(parents=True)
@@ -573,16 +581,47 @@ class OverworldProfileImageTests(unittest.TestCase):
 
     def test_builder_discriminates_rootfs_persistence_across_publication(self) -> None:
         source = BUILDER.read_text(encoding="utf-8")
+        profile = json.loads(
+            (ROOT / "repository_profiles/overworld/profile.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        frontend_modules = profile["dependency_snapshots"]["frontend"][
+            "node_modules_path"
+        ]
         sentinels = (
             "/etc/self-hosted-ci/repository-profile-image-v1.json",
             "/opt/self-hosted-ci/node_modules/pyright/package.json",
-            "/opt/self-hosted-ci/overworld-deps/frontend-node-modules/react/package.json",
-            "/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/package.json",
-            "/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/receive-logs.js",
-            "/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js",
+            f"{frontend_modules}/react/package.json",
+            f"{frontend_modules}/next/package.json",
+            f"{frontend_modules}/next/dist/server/dev/browser-logs/receive-logs.js",
+            f"{frontend_modules}/next/dist/server/dev/browser-logs/file-logger.js",
         )
         sentinel_block = source.split("readonly PUBLISH_SENTINELS=(", 1)[1].split(")", 1)[0]
         self.assertEqual(sentinels, tuple(line.strip() for line in sentinel_block.splitlines() if line.strip()))
+        builder_without_seal = source.replace(".frontend-node-modules-sealed", "")
+        self.assertNotIn("frontend-node-modules", builder_without_seal)
+        cleanup = source.split(
+            'incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu \'\n'
+            '  required=',
+            1,
+        )[1].split("\n' \\\n  || die 'provisioned image cleanup verification failed'", 1)[0]
+        legacy_assignment = next(
+            line.strip() for line in cleanup.splitlines() if line.strip().startswith("legacy=")
+        )
+        legacy = subprocess.run(
+            [
+                "/bin/sh",
+                "-ceu",
+                f'target=$1\n{legacy_assignment}\nprintf "%s\\n" "$legacy"',
+                "derive-legacy-path",
+                frontend_modules,
+            ],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(0, legacy.returncode, legacy.stderr)
+        self.assertEqual(frontend_modules.replace("_", "-", 1), legacy.stdout.strip())
 
         probe = source.split("inspect_running_sentinels(){", 1)[1].split("\n}\nusage(){", 1)[0]
         for token in (
@@ -797,7 +836,29 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertNotIn('dependencies / "uv-cache"', verifier_source)
         self.assertIn('if any(dependencies.rglob(".git")):', verifier_source)
         self.assertIn('frontend-node_modules/next/dist/server/dev/browser-logs/file-logger.js', verifier_source)
-        self.assertIn('verify_frontend_eslint_link(dependencies / "frontend-node-modules")', verifier_source)
+        profile_value = json.loads(
+            (ROOT / "repository_profiles/overworld/profile.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        frontend_modules_path = profile_value["dependency_snapshots"]["frontend"][
+            "node_modules_path"
+        ]
+        self.assertEqual(
+            "/opt/self-hosted-ci/overworld-deps/frontend-node_modules",
+            frontend_modules_path,
+        )
+        runner_source = (
+            ROOT / "repository_profiles/overworld/run-overworld-ci.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            f"readonly FRONTEND_MODULES={frontend_modules_path}", runner_source
+        )
+        self.assertIn(
+            'Path(expected_snapshots["frontend"]["node_modules_path"])',
+            verifier_source,
+        )
+        self.assertNotIn("frontend-node-modules", verifier_source)
         self.assertNotIn('run("playwright", "install"', source)
         self.assertIn('"UV_PYTHON_INSTALL_DIR": str(uv_python)', source)
         self.assertIn('run("runuser", "-u", "runner", "--", "test", "-x", str(waterfall_python))', source)
@@ -1009,11 +1070,23 @@ printf normalized > "$MOCK_CHMOD_MARKER"
         self.assertLess(source.index(graceful), source.index(forced))
         self.assertLess(source.index(forced), source.index(stopped))
         self.assertLess(source.index(stopped), source.index(publish))
-        post_cleanup_file_check = "required=/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js"
+        profile = json.loads(
+            (ROOT / "repository_profiles/overworld/profile.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        frontend_modules = profile["dependency_snapshots"]["frontend"][
+            "node_modules_path"
+        ]
+        post_cleanup_file_check = f"required={frontend_modules}/next/dist/server/dev/browser-logs/file-logger.js"
+        canonical_target = f"target={frontend_modules}"
+        legacy_absent = 'test ! -e "$legacy"'
         boot_check = 'inspect_running_sentinels "${published_verifier}" published-verifier-post-start "${expected_sentinel_digests[@]}"'
         eslint_check = 'runuser -u runner -- "$link" --version'
         verifier_cleanup = 'incus delete "${published_verifier}" --project "${PROJECT}" --force'
         self.assertIn(post_cleanup_file_check, source)
+        self.assertIn(canonical_target, source)
+        self.assertIn(legacy_absent, source)
         self.assertIn(boot_check, source)
         self.assertIn(eslint_check, source)
         self.assertLess(source.index(publish), source.index(boot_check))

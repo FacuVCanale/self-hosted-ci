@@ -145,7 +145,9 @@ def main() -> int:
             raise SystemExit(f"offline dependency is absent: {required}")
     waterfall_python = dependencies / "waterfall/.venv/bin/python"
     verify_runner_executable(waterfall_python)
-    verify_frontend_eslint_link(dependencies / "frontend-node-modules")
+    verify_frontend_eslint_link(
+        Path(expected_snapshots["frontend"]["node_modules_path"])
+    )
     if (dependencies / "waterfall/.self-hosted-ci-commit").read_text(encoding="ascii").strip() != expected_toolchain["waterfall_revision"]:
         raise SystemExit("Waterfall offline source revision drifted")
     if any(dependencies.rglob(".git")):

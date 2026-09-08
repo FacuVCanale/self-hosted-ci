@@ -8,10 +8,10 @@ readonly TRANSACTION_LIB=/usr/local/lib/self-hosted-ci/garm-jit-transaction-lib.
 readonly PUBLISH_SENTINELS=(
   /etc/self-hosted-ci/repository-profile-image-v1.json
   /opt/self-hosted-ci/node_modules/pyright/package.json
-  /opt/self-hosted-ci/overworld-deps/frontend-node-modules/react/package.json
-  /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/package.json
-  /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/receive-logs.js
-  /opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js
+  /opt/self-hosted-ci/overworld-deps/frontend-node_modules/react/package.json
+  /opt/self-hosted-ci/overworld-deps/frontend-node_modules/next/package.json
+  /opt/self-hosted-ci/overworld-deps/frontend-node_modules/next/dist/server/dev/browser-logs/receive-logs.js
+  /opt/self-hosted-ci/overworld-deps/frontend-node_modules/next/dist/server/dev/browser-logs/file-logger.js
 )
 
 die(){ printf 'repository-profile image build blocked: %s\n' "$*" >&2; exit 1; }
@@ -453,12 +453,13 @@ incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu '
   test -f "$sealed/next/dist/server/dev/browser-logs/file-logger.js"
 ' || die 'Next.js browser log sealing failed'
 incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu '
-  required=/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js
+  required=/opt/self-hosted-ci/overworld-deps/frontend-node_modules/next/dist/server/dev/browser-logs/file-logger.js
   rm -rf /run/self-hosted-ci-profile-build || { echo "build staging cleanup failed" >&2; exit 1; }
   rm -rf /root/.cache /root/.bun || { echo "root cache cleanup failed" >&2; exit 1; }
   rm -rf /tmp/* || { echo "tmp cleanup failed" >&2; exit 1; }
   rm -rf /var/tmp/* || { echo "var-tmp cleanup failed" >&2; exit 1; }
-  target=/opt/self-hosted-ci/overworld-deps/frontend-node-modules
+  target=/opt/self-hosted-ci/overworld-deps/frontend-node_modules
+  legacy="${target%_*}-${target#*_}"
   rm -rf "$target"
   mv /opt/self-hosted-ci/.frontend-node-modules-sealed "$target"
   test ! -e /opt/self-hosted-ci/.frontend-node-modules-sealed || { echo "frontend dependency seal persisted" >&2; exit 1; }
@@ -466,6 +467,7 @@ incus exec "${builder}" --project "${PROJECT}" -- /bin/sh -ceu '
   test ! -e /root/.netrc || { echo "netrc credential file persisted" >&2; exit 1; }
   test ! -e /root/.config/gh/hosts.yml || { echo "GitHub CLI credential file persisted" >&2; exit 1; }
   test -f "$required" || { echo "required Next.js browser log module missing after cleanup" >&2; exit 1; }
+  test ! -e "$legacy" || { echo "legacy frontend dependency path persisted" >&2; exit 1; }
 ' \
   || die 'provisioned image cleanup verification failed'
 inspect_running_sentinels "${builder}" builder-post-cleanup \
@@ -589,7 +591,7 @@ inspect_running_sentinels "${published_verifier}" published-verifier-post-start 
 inspect_running_device_contract "${published_verifier}" \
   || die 'published image boot device verification failed'
 incus exec "${published_verifier}" --project "${PROJECT}" -- /bin/sh -ceu '
-  root=/opt/self-hosted-ci/overworld-deps/frontend-node-modules
+  root=/opt/self-hosted-ci/overworld-deps/frontend-node_modules
   link="$root/.bin/eslint"
   test -d "$root" && test ! -L "$root"
   test -L "$link"
