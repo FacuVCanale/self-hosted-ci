@@ -46,7 +46,8 @@ class IncusArchiveExcludeCompatTests(unittest.TestCase):
     def test_apply_holds_the_canonical_lock_and_requires_zero_runtime(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         for token in (
-            "/usr/local/lib/self-hosted-ci/garm-jit-transaction-lib.sh",
+            'SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+            'TRANSACTION_LIB="${SCRIPT_DIRECTORY}/garm-jit-transaction-lib.sh"',
             'source "${TRANSACTION_LIB}"',
             "acquire_transaction_lock",
             "zero_runtime_state || fail 'GARM scale sets or ci-jit instances remain'",
