@@ -440,6 +440,31 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertLess(lines.index(publish), lines.index(builder_delete))
         self.assertLess(lines.index(builder_delete), lines.index(verifier_init))
 
+    def test_builder_requires_the_versioned_incus_archive_anchor(self) -> None:
+        source = BUILDER.read_text(encoding="utf-8")
+        function = source.split(
+            "assert_incus_archive_exclude_contract(){", 1
+        )[1].split("\n}\nassert_host_dev_null_contract(){", 1)[0]
+        for token in (
+            "6.0.0-1ubuntu0.3",
+            "/etc/systemd/system/incus.service.d/ci-jit-archive-excludes.conf",
+            "/etc/self-hosted-ci/incus-archive-exclude-compat.json",
+            "0:0:644:1",
+            "0:0:600:1",
+            '"nested_dev_canary_passed":true',
+            '"root_dev_exclusion_preserved":true',
+            "Environment=TAR_OPTIONS=--anchored",
+            "property=DropInPaths",
+            "property=Environment",
+            "TAR_OPTIONS=--anchored",
+        ):
+            self.assertIn(token, function)
+        self.assertEqual(1, source.count("\nassert_incus_archive_exclude_contract\n"))
+        self.assertLess(
+            source.index("\nassert_incus_archive_exclude_contract\n"),
+            source.index("acquire_transaction_lock"),
+        )
+
     def test_builder_discriminates_rootfs_persistence_across_publication(self) -> None:
         source = BUILDER.read_text(encoding="utf-8")
         sentinels = (
