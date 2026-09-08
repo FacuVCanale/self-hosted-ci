@@ -569,18 +569,26 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertNotIn("for member in archive", tar_probe)
         self.assertNotRegex(tar_probe, r"\b(?:cat|head|tail)\b")
 
-        device_probe = source.split("inspect_running_device_contract(){", 1)[1].split("\n}\nusage(){", 1)[0]
+        device_probe = source.split("inspect_running_device_contract(){", 1)[1].split(
+            "\n}\nassert_incus_archive_exclude_contract(){", 1
+        )[0]
         for token in (
             "[ -c /dev/null ]",
-            'mode=%a major=%t minor=%T',
-            'uid=0 gid=0 mode=666 major=1 minor=3',
+            "[ ! -L /dev/null ]",
+            'metadata=$(stat -c "uid=%u gid=%g mode=%a major=%t minor=%T" -- /dev/null)',
+            'device_identity=$(stat -c "mode=%a major=%t minor=%T" -- /dev/null)',
+            '"mode=666 major=1 minor=3"',
             'findmnt -rn -T /dev -o TARGET,SOURCE,FSTYPE',
             '[ "${mount%% *}" = /dev ]',
-            "printf probe > /dev/null",
+            '[ "${mount##* }" = tmpfs ]',
+            'runuser -u runner -- /usr/bin/python3 -c "import os; fd = os.open(\\"/dev/null\\", os.O_RDONLY); data = os.read(fd, 1); raise SystemExit(0 if data == b\\"\\" else 1)"',
+            'runuser -u runner -- /bin/sh -ceu "printf probe > /dev/null"',
         ):
             self.assertIn(token, device_probe)
+        self.assertNotIn('uid=0 gid=0 mode=666 major=1 minor=3', device_probe)
         self.assertNotIn("2>/dev/null", device_probe)
         self.assertNotIn("| sed", device_probe)
+        self.assertNotIn("assert os.read", device_probe)
 
         host_device_probe = source.split("assert_host_dev_null_contract(){", 1)[1].split("\n}\nusage(){", 1)[0]
         for token in (
