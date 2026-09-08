@@ -524,6 +524,84 @@ class OutboundWorkerTests(unittest.TestCase):
             self.assertEqual("completed", result["status"])
             self.assertEqual(0, github.dispatches)
 
+    def test_finalized_pilot_resumes_after_package_ttl_without_recovery(self):
+        class Clock:
+            now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+
+            def __call__(self):
+                return self.now
+
+        class Resolver:
+            def resolve(self, repository, pr):
+                return ResolvedApprovalTarget(
+                    "123",
+                    repository,
+                    pr,
+                    "a" * 40,
+                    "main",
+                    f"{repository}/.github/workflows/ci-jit-pilot-child.yml@refs/heads/main",
+                    "b" * 40,
+                    "c" * 40,
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = Clock()
+            source = LocalApprovalStore(
+                root / "approvals.sqlite3",
+                GateStore(root / "gate.sqlite3", clock=clock),
+                Resolver(),
+                PilotWorkRequestBuilder("d" * 64),
+                clock=clock,
+            )
+            approved = source.approve("example-owner/example-repo", 42)
+            request = source.poll()
+            source.claim(approved["request_id"], request, lease_seconds=7200)
+            state = WorkerState(root / "worker.sqlite3")
+            self.assertEqual(
+                "acquired",
+                state.claim(approved["request_id"], request, lease_seconds=7200),
+            )
+            allocation_id = request["reservation"]["allocation_id"]
+            state.record(
+                approved["request_id"],
+                "finalized",
+                run_id=444,
+                job_id=555,
+                reserved={
+                    "allocation_id": allocation_id,
+                    "scale_set_id": "9",
+                    "runner_label": request["pilot_package"]["runner_label"],
+                    "state": "reserved-disabled",
+                },
+                observed={
+                    "run_id": 444,
+                    "run_attempt": 1,
+                    "job_id": 555,
+                    "job_name": "local-quality",
+                    "dispatch_sha": "f" * 40,
+                },
+                finalized={
+                    "allocation_id": allocation_id,
+                    "state": "enabled-awaiting-claim",
+                },
+            )
+            self.assertEqual(1, state.recover_running())
+            clock.now += timedelta(minutes=5)
+            broker = Broker()
+            github = GitHub()
+            github.label = request["pilot_package"]["runner_label"]
+
+            result = PilotWorker(state, source, broker, github, Signer()).run_once()
+
+            self.assertEqual("completed", result["status"])
+            self.assertEqual(0, github.dispatches)
+            self.assertEqual(
+                ["finish", "prove-clean"],
+                [call[0] for call in broker.calls],
+            )
+            self.assertEqual("completed", source.status()[0]["state"])
+
     def test_cleanup_proof_failure_retries_finish_without_dispatch_or_finalize(self):
         now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
 
