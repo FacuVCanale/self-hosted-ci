@@ -588,6 +588,20 @@ inspect_running_sentinels "${published_verifier}" published-verifier-post-start 
   || die 'published image boot sentinel verification failed'
 inspect_running_device_contract "${published_verifier}" \
   || die 'published image boot device verification failed'
+incus exec "${published_verifier}" --project "${PROJECT}" -- /bin/sh -ceu '
+  root=/opt/self-hosted-ci/overworld-deps/frontend-node-modules
+  link="$root/.bin/eslint"
+  test -d "$root" && test ! -L "$root"
+  test -L "$link"
+  target=$(readlink -- "$link")
+  case "$target" in /*) echo "published frontend eslint launcher is absolute" >&2; exit 1;; esac
+  resolved=$(readlink -f -- "$link")
+  case "$resolved" in "$root"/*) ;; *) echo "published frontend eslint launcher escapes its root" >&2; exit 1;; esac
+  test "$resolved" = "$root/eslint/bin/eslint.js"
+  test -f "$resolved" && test ! -L "$resolved"
+  test -f "$root/eslint/package.json" && test ! -L "$root/eslint/package.json"
+  runuser -u runner -- "$link" --version
+' || die 'published image frontend eslint launcher verification failed'
 incus delete "${published_verifier}" --project "${PROJECT}" --force
 if incus list "${published_verifier}" --project "${PROJECT}" --format csv -c n | grep -Fxq "${published_verifier}"; then
   die 'published image verifier cleanup failed'

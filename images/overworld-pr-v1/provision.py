@@ -86,6 +86,32 @@ def normalize_tree_ownership(root: Path) -> None:
             os.chown(parent / name, 0, 0, follow_symlinks=False)
 
 
+def validate_internal_dependency_symlinks(root: Path) -> None:
+    if root.is_symlink() or not root.is_dir():
+        raise SystemExit(f"dependency tree root is unsafe: {root}")
+    canonical_root = root.resolve(strict=True)
+    for path in root.rglob("*"):
+        if not path.is_symlink():
+            continue
+        target = Path(os.readlink(path))
+        if target.is_absolute():
+            raise SystemExit(f"dependency tree contains an absolute symlink: {path}")
+        try:
+            resolved = (path.parent / target).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise SystemExit(f"dependency tree contains a broken symlink: {path}") from exc
+        if not resolved.is_relative_to(canonical_root):
+            raise SystemExit(f"dependency tree symlink escapes its root: {path}")
+        if not (resolved.is_file() or resolved.is_dir()):
+            raise SystemExit(f"dependency tree symlink target is unsupported: {path}")
+
+
+def copy_dependency_tree(source: Path, destination: Path) -> None:
+    validate_internal_dependency_symlinks(source)
+    shutil.copytree(source, destination, symlinks=True)
+    validate_internal_dependency_symlinks(destination)
+
+
 def tree_digest(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
@@ -497,14 +523,10 @@ committed=true
         if component == "backend":
             shutil.move(str(source_modules), target_modules)
         else:
-            target_modules.mkdir()
-            run("cp", "-aL", f"{source_modules}/.", str(target_modules))
-            if source_modules.is_symlink():
-                source_modules.unlink()
-            else:
-                shutil.rmtree(source_modules)
+            copy_dependency_tree(source_modules, target_modules)
+            shutil.rmtree(source_modules)
             sealed_frontend = Path("/opt/self-hosted-ci/.frontend-node-modules-sealed")
-            shutil.copytree(target_modules, sealed_frontend, symlinks=False)
+            copy_dependency_tree(target_modules, sealed_frontend)
             detach_regular_files(sealed_frontend)
             normalize_tree_ownership(sealed_frontend)
             required_next = target_modules / "next/dist/server/dev/browser-logs/file-logger.js"

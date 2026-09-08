@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -240,6 +241,80 @@ class OverworldProfileImageTests(unittest.TestCase):
                 with self.assertRaisesRegex(PermissionError, "scandir denied"):
                     module.normalize_tree_ownership(root)
 
+    def test_dependency_tree_copy_preserves_functional_internal_bin_symlinks(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "overworld_image_provision_dependency_links", PROFILE / "provision.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            eslint = source / "eslint"
+            eslint_bin = eslint / "bin"
+            eslint_bin.mkdir(parents=True)
+            (source / ".bin").mkdir()
+            (eslint / "package.json").write_text(
+                '{"name":"eslint","version":"internal-link-ok"}\n',
+                encoding="utf-8",
+            )
+            (eslint_bin / "eslint.js").write_text(
+                "console.log(require('../package.json').version)\n", encoding="utf-8"
+            )
+            (source / ".bin/eslint").symlink_to("../eslint/bin/eslint.js")
+
+            snapshot = root / "snapshot"
+            sealed = root / "sealed"
+            module.copy_dependency_tree(source, snapshot)
+            module.copy_dependency_tree(snapshot, sealed)
+
+            for copied in (snapshot, sealed):
+                link = copied / ".bin/eslint"
+                self.assertTrue(link.is_symlink())
+                self.assertEqual("../eslint/bin/eslint.js", os.readlink(link))
+                self.assertTrue(link.resolve().is_relative_to(copied.resolve()))
+                node = shutil.which("node")
+                if node:
+                    result = subprocess.run(
+                        [node, str(link)], text=True, capture_output=True, check=False
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual("internal-link-ok", result.stdout.strip())
+
+    def test_dependency_tree_copy_rejects_unsafe_symlinks(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "overworld_image_provision_unsafe_dependency_links",
+            PROFILE / "provision.py",
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside.js"
+            outside.write_text("outside", encoding="utf-8")
+            for kind in ("absolute", "escape", "broken"):
+                with self.subTest(kind=kind):
+                    source = root / f"source-{kind}"
+                    source.mkdir()
+                    link = source / "link"
+                    if kind == "absolute":
+                        link.symlink_to(outside)
+                    elif kind == "escape":
+                        link.symlink_to("../outside.js")
+                    else:
+                        link.symlink_to("missing.js")
+                    destination = root / f"destination-{kind}"
+                    with self.assertRaisesRegex(
+                        SystemExit,
+                        "absolute symlink|escapes its root|broken symlink",
+                    ):
+                        module.copy_dependency_tree(source, destination)
+                    self.assertFalse(destination.exists())
+
     def test_regenerated_modules_cleanup_accepts_only_exact_backend_tree(self) -> None:
         spec = importlib.util.spec_from_file_location("overworld_image_provision", PROFILE / "provision.py")
         assert spec is not None and spec.loader is not None
@@ -316,6 +391,37 @@ class OverworldProfileImageTests(unittest.TestCase):
             module.subprocess, "run", return_value=accessible
         ):
             module.verify_runner_executable(python)
+
+    def test_image_verifier_requires_exact_confined_frontend_eslint_link(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "overworld_image_verify_eslint", PROFILE / "verify.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "frontend-node-modules"
+            eslint = root / "eslint"
+            (root / ".bin").mkdir(parents=True)
+            (eslint / "bin").mkdir(parents=True)
+            (eslint / "package.json").write_text(
+                '{"name":"eslint","version":"9.0.0"}\n', encoding="utf-8"
+            )
+            (eslint / "bin/eslint.js").write_text("payload\n", encoding="utf-8")
+            link = root / ".bin/eslint"
+            link.symlink_to("../eslint/bin/eslint.js")
+            module.verify_frontend_eslint_link(root)
+
+            link.unlink()
+            link.symlink_to(Path(directory) / "outside")
+            with self.assertRaisesRegex(SystemExit, "absolute"):
+                module.verify_frontend_eslint_link(root)
+
+            link.unlink()
+            link.symlink_to("missing")
+            with self.assertRaisesRegex(SystemExit, "broken"):
+                module.verify_frontend_eslint_link(root)
 
     def test_manifest_has_exact_profile_and_immutable_artifact_sources(self) -> None:
         manifest = json.loads((PROFILE / "manifest.json").read_text(encoding="utf-8"))
@@ -668,12 +774,17 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn('next_metadata.get("version") != "16.2.3"', source)
         self.assertIn('shutil.copytree(next_package, installed_next, symlinks=False)', source)
         self.assertIn('detach_regular_files(installed_next)', source)
-        self.assertIn('shutil.copytree(target_modules, sealed_frontend, symlinks=False)', source)
+        self.assertEqual(2, source.count('copy_dependency_tree(') - 1)
+        self.assertIn('copy_dependency_tree(source_modules, target_modules)', source)
+        self.assertIn('copy_dependency_tree(target_modules, sealed_frontend)', source)
         self.assertIn('detach_regular_files(sealed_frontend)', source)
         self.assertIn('normalize_tree_ownership(sealed_frontend)', source)
         self.assertIn('os.replace(temporary, path)', source)
         self.assertNotIn('shutil.copytree(official_browser_logs, installed_browser_logs)', source)
-        self.assertIn('run("cp", "-aL", f"{source_modules}/.", str(target_modules))', source)
+        self.assertNotIn('run("cp", "-aL"', source)
+        self.assertIn('shutil.copytree(source, destination, symlinks=True)', source)
+        self.assertIn('validate_internal_dependency_symlinks(source)', source)
+        self.assertIn('validate_internal_dependency_symlinks(destination)', source)
         self.assertIn('required_next.resolve() != required_next', source)
         self.assertIn('frontend dependency snapshot retained a symlink ancestor', source)
         self.assertIn('if component == "backend":', source)
@@ -686,6 +797,7 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertNotIn('dependencies / "uv-cache"', verifier_source)
         self.assertIn('if any(dependencies.rglob(".git")):', verifier_source)
         self.assertIn('frontend-node_modules/next/dist/server/dev/browser-logs/file-logger.js', verifier_source)
+        self.assertIn('verify_frontend_eslint_link(dependencies / "frontend-node-modules")', verifier_source)
         self.assertNotIn('run("playwright", "install"', source)
         self.assertIn('"UV_PYTHON_INSTALL_DIR": str(uv_python)', source)
         self.assertIn('run("runuser", "-u", "runner", "--", "test", "-x", str(waterfall_python))', source)
@@ -899,9 +1011,17 @@ printf normalized > "$MOCK_CHMOD_MARKER"
         self.assertLess(source.index(stopped), source.index(publish))
         post_cleanup_file_check = "required=/opt/self-hosted-ci/overworld-deps/frontend-node-modules/next/dist/server/dev/browser-logs/file-logger.js"
         boot_check = 'inspect_running_sentinels "${published_verifier}" published-verifier-post-start "${expected_sentinel_digests[@]}"'
+        eslint_check = 'runuser -u runner -- "$link" --version'
+        verifier_cleanup = 'incus delete "${published_verifier}" --project "${PROJECT}" --force'
         self.assertIn(post_cleanup_file_check, source)
         self.assertIn(boot_check, source)
+        self.assertIn(eslint_check, source)
         self.assertLess(source.index(publish), source.index(boot_check))
+        self.assertLess(source.index(boot_check), source.index(eslint_check))
+        self.assertLess(
+            source.index(eslint_check),
+            source.index(verifier_cleanup, source.index(eslint_check)),
+        )
 
     def test_builder_and_profile_are_installed_under_signed_live_contract(self) -> None:
         provision = PROVISION_CONTRACT.read_text(encoding="utf-8")
