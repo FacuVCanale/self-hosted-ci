@@ -1082,13 +1082,15 @@ printf normalized > "$MOCK_CHMOD_MARKER"
         canonical_target = f"target={frontend_modules}"
         legacy_absent = 'test ! -e "$legacy"'
         boot_check = 'inspect_running_sentinels "${published_verifier}" published-verifier-post-start "${expected_sentinel_digests[@]}"'
-        eslint_check = 'runuser -u runner -- "$link" --version'
+        eslint_check = 'runuser -u runner -- bun "$link" --version'
+        direct_eslint_check = 'runuser -u runner -- "$link" --version'
         verifier_cleanup = 'incus delete "${published_verifier}" --project "${PROJECT}" --force'
         self.assertIn(post_cleanup_file_check, source)
         self.assertIn(canonical_target, source)
         self.assertIn(legacy_absent, source)
         self.assertIn(boot_check, source)
         self.assertIn(eslint_check, source)
+        self.assertNotIn(direct_eslint_check, source)
         self.assertLess(source.index(publish), source.index(boot_check))
         self.assertLess(source.index(boot_check), source.index(eslint_check))
         self.assertLess(

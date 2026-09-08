@@ -602,7 +602,7 @@ incus exec "${published_verifier}" --project "${PROJECT}" -- /bin/sh -ceu '
   test "$resolved" = "$root/eslint/bin/eslint.js"
   test -f "$resolved" && test ! -L "$resolved"
   test -f "$root/eslint/package.json" && test ! -L "$root/eslint/package.json"
-  runuser -u runner -- "$link" --version
+  runuser -u runner -- bun "$link" --version
 ' || die 'published image frontend eslint launcher verification failed'
 incus delete "${published_verifier}" --project "${PROJECT}" --force
 if incus list "${published_verifier}" --project "${PROJECT}" --format csv -c n | grep -Fxq "${published_verifier}"; then
