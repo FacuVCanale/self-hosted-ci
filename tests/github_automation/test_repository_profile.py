@@ -120,6 +120,7 @@ class RepositoryProfileTests(unittest.TestCase):
             profile["dependency_snapshots"],
         )
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
+        self.assertEqual("22.23.2", profile["toolchain"]["node"])
         self.assertEqual(SCRIPT, script)
 
     def test_profile_digest_repository_profile_and_script_are_all_bound(self):
@@ -280,6 +281,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn("/opt/ms-playwright/chromium-1217*", text)
         self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright", text)
         self.assertIn('[[ $(uv --version) == "uv 0.8.22" ]]', text)
+        self.assertIn('[[ $(node --version) == v22.23.2 ]]', text)
         self.assertIn('uv --no-config pip check --python "$WATERFALL_ROOT/.venv/bin/python"', text)
         self.assertIn("export UV_OFFLINE=1 UV_NO_SYNC=1", text)
         self.assertNotIn("--runInBand", text)

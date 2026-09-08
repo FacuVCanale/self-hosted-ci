@@ -124,6 +124,7 @@ require_image_contract() {
   [[ $(cat /sys/fs/cgroup/memory.max) == "$EXPECTED_MEMORY_BYTES" ]]
   [[ $(cat /sys/fs/cgroup/memory.high) == "$MEMORY_FIT_LIMIT_BYTES" ]]
   [[ $(bun --version) == 1.4.0 ]]
+  [[ $(node --version) == v22.23.2 ]]
   [[ $(uv --version) == "uv 0.8.22" ]]
   [[ $(python3 --version) == "Python 3.12."* ]]
   [[ $($PG16_BIN/psql --version) == "psql (PostgreSQL) 16."* ]]
@@ -134,7 +135,7 @@ require_image_contract() {
   [[ ${#chromium_candidates[@]} == 1 && -x ${chromium_candidates[0]} ]]
   headless_candidates=(/opt/ms-playwright/chromium_headless_shell-1217*/chrome-headless-shell-linux*/chrome-headless-shell)
   [[ ${#headless_candidates[@]} == 1 && -x ${headless_candidates[0]} ]]
-  command -v minio mc bun uv curl unlink cp sha256sum stat >/dev/null
+  command -v minio mc node bun uv curl unlink cp sha256sum stat >/dev/null
   [[ -x $PG16_BIN/initdb && -x $PG16_BIN/pg_ctl && -x $PG16_BIN/createdb ]]
   [[ -x $PG17_BIN/initdb && -x $PG17_BIN/pg_ctl && -x $PG17_BIN/createdb ]]
 }

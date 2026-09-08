@@ -153,6 +153,7 @@ def require_profile(value: object, waterfall_commit: str) -> dict[str, object]:
         raise SystemExit("repository profile shape drifted")
     expected_toolchain = {
         "bun": "1.4.0", "garm": "0.2.1", "minio": "RELEASE.2025-07-23T15-54-02Z",
+        "node": "22.23.2",
         "playwright": "1.59.1", "postgresql_backend": "16", "postgis_backend": "3.4",
         "postgresql_e2e": "17", "postgis_e2e": "3.5", "python": "3.12", "uv": "0.8.22",
         "waterfall_revision": waterfall_commit,
@@ -212,7 +213,7 @@ def require_manifest(value: object) -> dict[str, object]:
         raise SystemExit("PGDG repository identity drifted")
     artifacts = value["artifacts"]
     if not isinstance(artifacts, dict) or set(artifacts) != {
-        "bun", "uv", "pyright", "playwright", "playwright_core", "next", "chromium",
+        "node", "bun", "uv", "pyright", "playwright", "playwright_core", "next", "chromium",
         "chromium_headless_shell", "minio", "mc"
     }:
         raise SystemExit("profile artifact set drifted")
@@ -401,6 +402,20 @@ committed=true
             target = downloads / name
             fetch(artifact["url"], artifact["sha256"], target)
             downloaded[name] = target
+
+        with tarfile.open(downloaded["node"], "r:xz") as archive:
+            expected_node = "node-v22.23.2-linux-x64/bin/node"
+            candidates = [member for member in archive.getmembers() if member.name.endswith("/bin/node")]
+            if len(candidates) != 1 or candidates[0].name != expected_node or not candidates[0].isfile():
+                raise SystemExit("Node archive lacks the exact runtime executable")
+            source = archive.extractfile(candidates[0])
+            if source is None:
+                raise SystemExit("Node runtime executable cannot be read")
+            with Path("/usr/local/bin/node").open("wb") as output:
+                shutil.copyfileobj(source, output)
+        os.chmod("/usr/local/bin/node", 0o755)
+        if run("node", "--version") != "v22.23.2":
+            raise SystemExit("Node runtime version drifted")
 
         with zipfile.ZipFile(downloaded["bun"]) as archive:
             names = archive.namelist()
@@ -631,7 +646,7 @@ committed=true
 
     manifest_bytes = MANIFEST.read_bytes()
     manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
-    binaries = ["bun", "uv", "uvx", "pyright", "playwright", "minio", "mc", "psql"]
+    binaries = ["node", "bun", "uv", "uvx", "pyright", "playwright", "minio", "mc", "psql"]
     binary_inventory = {}
     for name in binaries:
         resolved = shutil.which(name)
