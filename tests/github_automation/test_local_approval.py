@@ -5,6 +5,7 @@ import tempfile, unittest
 from types import SimpleNamespace
 from github_automation.gatestore import GateStore
 from github_automation.local_approval import (
+    LocalApprovalError,
     LocalApprovalStore,
     PilotWorkRequestBuilder,
     ResolvedApprovalTarget,
@@ -233,9 +234,47 @@ class LocalApprovalTests(unittest.TestCase):
             def workflow(self, token):
                 return {"state": "active"}
 
+            def merge_commit_parents(self, sha, token):
+                return ("d" * 40, "a" * 40)
+
         target = WorkerAuthorityResolver(Client()).resolve(REPO, 42)
         self.assertEqual("d" * 40, target.base_sha)
         self.assertEqual("c" * 40, target.tested_merge_sha)
+
+    def test_worker_resolver_rejects_stale_merge_before_building_work(self):
+        class Client:
+            authority = SimpleNamespace(
+                repository=REPO,
+                repository_id=123,
+                default_branch="main",
+                workflow_path=".github/workflows/ci-jit-pilot-child.yml",
+            )
+
+            def authenticate(self):
+                return "token"
+
+            def repository(self, token):
+                return {"default_branch": "main"}
+
+            def default_branch_head(self, token):
+                return "d" * 40
+
+            def pull_request(self, number, token):
+                return {
+                    "number": number,
+                    "head": {"sha": "a" * 40},
+                    "base": {"sha": "b" * 40, "ref": "main"},
+                    "merge_commit_sha": "c" * 40,
+                }
+
+            def workflow(self, token):
+                return {"state": "active"}
+
+            def merge_commit_parents(self, sha, token):
+                return ("b" * 40, "a" * 40)
+
+        with self.assertRaisesRegex(LocalApprovalError, "merge ref is stale"):
+            WorkerAuthorityResolver(Client()).resolve(REPO, 42)
 
     def test_pilot_builder_preserves_explicit_organization_runner_authority(self):
         builder = PilotWorkRequestBuilder(

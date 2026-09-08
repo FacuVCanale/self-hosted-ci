@@ -144,6 +144,26 @@ class WorkerAuthorityTests(unittest.TestCase):
             body["variables"],
         )
 
+    def test_merge_commit_parents_use_the_fixed_repository_and_exact_sha(self) -> None:
+        merge = "d" * 40
+        client, token, transport, _ = self.authenticate(
+            *auth_responses(),
+            response(
+                200,
+                {
+                    "sha": merge,
+                    "parents": [{"sha": "a" * 40}, {"sha": "b" * 40}],
+                },
+            ),
+        )
+        self.assertEqual(
+            ("a" * 40, "b" * 40), client.merge_commit_parents(merge, token)
+        )
+        self.assertEqual(
+            ("GET", API_ROOT + f"/repos/{REPOSITORY}/git/commits/{merge}"),
+            transport.calls[-1][:2],
+        )
+
     def test_app_installation_and_token_drift_each_fail_closed(self) -> None:
         mutations = (
             {"app": lambda value: value.update(id=999)},

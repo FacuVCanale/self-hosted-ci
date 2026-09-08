@@ -81,6 +81,14 @@ class WorkerAuthorityResolver:
             raise LocalApprovalError(
                 "pull request lacks exact base or tested merge SHA"
             )
+        if self.client.merge_commit_parents(merge, token) != (
+            base,
+            pr["head"]["sha"],
+        ):
+            raise LocalApprovalError(
+                "GitHub merge ref is stale relative to the live default branch; "
+                "update the pull request branch before retrying"
+            )
         return ResolvedApprovalTarget(
             str(authority.repository_id),
             authority.repository,
