@@ -519,14 +519,33 @@ class LocalApprovalStore:
             except Exception:
                 self.fail(row["request_id"], "authority-reresolution-failed")
                 continue
+            package = request.get("pilot_package") or request.get("protocol_package")
+            if not isinstance(package, Mapping):
+                self.fail(row["request_id"], "stored-package-invalid")
+                continue
+            package_branch = package.get("base_branch", package.get("default_branch"))
+            resolved_target_changed = (
+                str(package.get("repository_id")) != current.repository_id
+                or package.get("repository") != current.repository
+                or package.get("pr_number") != current.pr_number
+                or package.get("head_sha") != current.head_sha
+                or package_branch != current.default_branch
+                or request["reservation"].get("workflow_ref")
+                != current.workflow_ref
+                or package.get("base_sha") != current.base_sha
+                or package.get("tested_merge_sha") != current.tested_merge_sha
+            )
             if (
-                current.head_sha != row["head_sha"]
+                resolved_target_changed
+                or current.head_sha != row["head_sha"]
                 or self.gatestore.observe_head(
                     current.repository_id, current.pr_number, current.head_sha
                 )
                 != row["head_generation"]
             ):
-                self._set(row["request_id"], "expired", "head-or-generation-changed")
+                self._set(
+                    row["request_id"], "expired", "resolved-target-or-generation-changed"
+                )
                 continue
             self.current_request = request
             return request

@@ -29,6 +29,8 @@ class Clock:
 class Resolver:
     def __init__(self):
         self.head = "a" * 40
+        self.base = "b" * 40
+        self.merge = "c" * 40
         self.fail = False
         self.calls = []
 
@@ -43,8 +45,8 @@ class Resolver:
             self.head,
             "main",
             f"{REPO}/.github/workflows/ci-gate-child.yml@refs/heads/main",
-            "b" * 40,
-            "c" * 40,
+            self.base,
+            self.merge,
         )
 
 
@@ -133,6 +135,19 @@ class LocalApprovalTests(unittest.TestCase):
         self.resolver.head = "b" * 40
         self.assertIsNone(self.store.poll())
         self.assertEqual("expired", self.store.status(REPO, 42)[0]["state"])
+
+    def test_moved_base_and_merge_expire_before_work_is_returned(self):
+        approved = self.store.approve(REPO, 42)
+        self.resolver.base = "d" * 40
+        self.resolver.merge = "e" * 40
+        self.assertIsNone(self.store.poll())
+        status = self.store.status(REPO, 42)[0]
+        self.assertEqual(approved["request_id"], status["request_id"])
+        self.assertEqual("expired", status["state"])
+        self.assertEqual(
+            "resolved-target-or-generation-changed", status["reason"]
+        )
+        self.assertIsNone(self.store.current_request)
 
     def test_ttl_expiry_never_returns_work(self):
         self.store.approve(REPO, 42)
