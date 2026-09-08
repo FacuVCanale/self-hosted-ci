@@ -574,15 +574,27 @@ committed=true
                 "bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts",
                 cwd=smoke_root / component,
             )
-        if tree_digest(modules) != before:
-            raise SystemExit(f"{component} validation mutated its dependency snapshot")
         if component == "frontend":
+            run(
+                "runuser", "-u", "runner", "--", "env",
+                "HOME=/home/runner", f"XDG_CACHE_HOME={cache}",
+                f"BUN_INSTALL_CACHE_DIR={cache}",
+                f"TMPDIR={temporary}",
+                "HTTPS_PROXY=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",
+                "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
+                "ALL_PROXY=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",
+                "NO_PROXY=", "no_proxy=",
+                "bun", "run", "lint", "--", "--version",
+                cwd=component_root,
+            )
             run(
                 "runuser", "-u", "runner", "--", "env", "HOME=/home/runner",
                 "bun", "-e",
                 'require("./node_modules/next/dist/server/node-environment-extensions/console-file.js")',
                 cwd=component_root,
             )
+        if tree_digest(modules) != before:
+            raise SystemExit(f"{component} validation mutated its dependency snapshot")
     shutil.rmtree(smoke_root)
     pyright_target = overworld / "backend/src/modules/methodology-obligations/waterfall-stage-push-contract.py"
     run(
