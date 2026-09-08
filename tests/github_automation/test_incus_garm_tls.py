@@ -99,7 +99,8 @@ class IncusGarmTlsTests(unittest.TestCase):
         self.assertIn(
             "systemctl is-active --quiet self-hosted-ci-boundary-verify.service", source
         )
-        self.assertIn('rm -f "${TARGET_ROOT}/ACTIVATION_APPROVED"', source)
+        self.assertIn("activation approval appeared during provisioning", source)
+        self.assertNotIn('rm -f "${TARGET_ROOT}/ACTIVATION_APPROVED"', source)
         self.assertIn('enabled_state="$(systemctl is-enabled', source)
         self.assertNotIn('! systemctl is-enabled --quiet "${service}"', source)
         for transaction_script in (
@@ -131,6 +132,7 @@ class IncusGarmTlsTests(unittest.TestCase):
             self.assertIn(required, source)
         provision = PROVISION.read_text()
         self.assertIn('install-wsl-jit-evidence.py"', provision)
+        self.assertIn('preflight-wsl-jit-live-contract.py"', provision)
         self.assertIn('--evidence "${evidence}"', provision)
         self.assertIn('--target-root "${TARGET_ROOT}"', provision)
         self.assertIn('--measurement-root "${TARGET_ROOT}/host-evidence"', provision)
@@ -174,9 +176,20 @@ class IncusGarmTlsTests(unittest.TestCase):
             )
             target = root / "target"
             target.mkdir()
+            records = {
+                "evidence/incus.json": {
+                    "ref": "evidence/incus.json",
+                    "uid": 0,
+                    "gid": 0,
+                    "mode": "0640",
+                    "sha256": "0" * 64,
+                    "size": referenced.stat().st_size,
+                }
+            }
             with (
                 mock.patch.object(installer.os, "geteuid", return_value=0),
                 mock.patch.object(installer.os, "chown"),
+                mock.patch.object(installer, "validate", return_value=({}, records)),
             ):
                 installer.install(bundle, measurement_root, target)
             self.assertEqual(

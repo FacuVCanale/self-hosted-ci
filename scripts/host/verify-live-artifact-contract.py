@@ -46,6 +46,7 @@ REQUIRED_LIVE_TARGETS = {
     "/usr/local/lib/self-hosted-ci/garm-cli-session.py",
     "/usr/local/lib/self-hosted-ci/update-health-heartbeat.py",
     "/usr/local/lib/self-hosted-ci/install-wsl-jit-evidence.py",
+    "/usr/local/lib/self-hosted-ci/preflight-wsl-jit-live-contract.py",
     "/usr/local/lib/self-hosted-ci/prepare-incus-runner-image.sh",
     "/usr/local/lib/self-hosted-ci/build-repository-profile-image.sh",
     "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/manifest.json",

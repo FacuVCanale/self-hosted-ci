@@ -8,6 +8,7 @@ import grp
 import hashlib
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -61,6 +62,13 @@ PUBLIC_ARTIFACTS = (
     (
         "scripts/host/install-wsl-jit-evidence.py",
         "/usr/local/lib/self-hosted-ci/install-wsl-jit-evidence.py",
+        "0755",
+        "script",
+        "garm",
+    ),
+    (
+        "scripts/host/preflight-wsl-jit-live-contract.py",
+        "/usr/local/lib/self-hosted-ci/preflight-wsl-jit-live-contract.py",
         "0755",
         "script",
         "garm",
@@ -626,6 +634,44 @@ TARGET_GROUPS = {
 }
 
 
+def _reset_live_namespace(boundary: dict, measurement_root: Path) -> None:
+    components = boundary.get("components")
+    if not isinstance(components, list):
+        raise ValueError("boundary components must be a list")
+
+    def prune(value: object) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "evidence_refs":
+                    if not isinstance(child, list) or not all(
+                        isinstance(ref, str) for ref in child
+                    ):
+                        raise ValueError("boundary evidence_refs must contain strings")
+                    value[key] = [
+                        ref for ref in child if not ref.startswith("live/")
+                    ]
+                else:
+                    prune(child)
+        elif isinstance(value, list):
+            for child in value:
+                prune(child)
+
+    prune(boundary)
+    if not all(
+        isinstance(component, dict)
+        and isinstance(component.get("evidence_refs"), list)
+        for component in components
+    ):
+        raise ValueError("boundary component evidence_refs must be a list")
+    live_root = measurement_root / "live"
+    if live_root.is_symlink():
+        raise ValueError("existing live measurement root is a symlink")
+    if live_root.exists():
+        if not live_root.is_dir():
+            raise ValueError("existing live measurement root is not a directory")
+        shutil.rmtree(live_root)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-boundary", required=True, type=Path)
@@ -639,6 +685,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         boundary = json.loads(args.input_boundary.read_text(encoding="utf-8"))
         boundary.pop("attestation", None)
+        _reset_live_namespace(boundary, args.measurement_root)
         refs_by_component: dict[str, list[str]] = {}
         records: list[dict] = []
         for index, (relative, target, mode, kind, component) in enumerate(

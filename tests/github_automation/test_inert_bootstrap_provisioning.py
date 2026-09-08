@@ -42,7 +42,7 @@ class InertBootstrapProvisioningTests(unittest.TestCase):
 
     def test_bootstrap_installs_inert_bytes_without_activation_or_registration(self):
         for token in (
-            'bootstrap requires activation approval to be absent',
+            'provisioning requires activation approval to be absent',
             'bootstrap requires runtime-ready state to be absent',
             'make_service_inert "${inert_service}"',
             'make_service_inert "${SERVICE_NAME}"',
@@ -53,9 +53,11 @@ class InertBootstrapProvisioningTests(unittest.TestCase):
             'could not observe enablement state for ${service}',
             '${service} remains active',
             '${service} remains enabled',
-            'rm -f "${TARGET_ROOT}/ACTIVATION_APPROVED"',
+            'activation approval appeared during provisioning',
+            'acquire_transaction_lock',
         ):
             self.assertIn(token, self.source)
+        self.assertNotIn('rm -f "${TARGET_ROOT}/ACTIVATION_APPROVED"', self.source)
         bootstrap_branch = self.source.split(
             'if [[ "${contract_mode}" == "runner-final" ]]; then'
         )[-1]

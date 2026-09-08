@@ -30,13 +30,13 @@ class WslJitLiveContractInstallerTests(unittest.TestCase):
     def test_signed_install_uses_external_reviewer_and_bundle_pins(self):
         for token in (
             "ExpectedReviewerFingerprint",
-            "reviewer fingerprint differs from external pin",
-            '--pinned-fingerprint "$4"',
+            'reviewer_fingerprint="$5"',
+            '--pinned-fingerprint "$reviewer_fingerprint"',
+            '--expected-sha256 "$expected_sha" --expected-bytes "$expected_bytes"',
             "Apply requires the exact lowercase ExpectedInputSha256",
             "Apply requires the exact positive ExpectedInputBytes",
         ):
             self.assertIn(token, self.source)
-        self.assertNotIn('--pinned-fingerprint "$fingerprint"', self.source)
 
     def test_exact_non_admin_service_identity_owns_one_shot(self):
         for token in (
@@ -54,11 +54,12 @@ class WslJitLiveContractInstallerTests(unittest.TestCase):
     def test_bundle_is_content_addressed_and_safely_extracted(self):
         for token in (
             "Assert-NoReparsePath $inputPath $PackageRoot",
-            "live contract bundle sha256 mismatch",
-            'member.issym() or member.islnk() or member.isdev()',
-            'archive.extractall(target, numeric_owner=True, filter="data")',
-            'roots != {"contract"}',
-            "live contract bundle layout is invalid",
+            "preflight-wsl-jit-live-contract.py",
+            '--validated-contract-root "$contract_root"',
+            'result.get("host_mutated") is not False',
+            '"archive-exact-signed-closure-and-size-limits"',
+            'result.get("validated_contract_root") != sys.argv[2]',
+            "live contract preflight returned an invalid result",
         ):
             self.assertIn(token, self.source)
 
@@ -102,6 +103,8 @@ printf payload >"$output"
 printf '{"status":"collected","unsigned_bundle_sha256":"%s","unsigned_bundle_bytes":7}\n' "$(sha256sum "$output" | awk '{print $1}')"
 '''
         envelope = {
+            "acknowledge_external_github_mutation": False,
+            "acknowledge_local_ci_deactivation": False,
             "package_archive_b64": base64.b64encode(archive_bytes).decode("ascii"),
             "package_archive_bytes": len(archive_bytes),
             "package_archive_sha256": hashlib.sha256(archive_bytes).hexdigest(),
@@ -135,6 +138,8 @@ printf '{"status":"collected","unsigned_bundle_sha256":"%s","unsigned_bundle_byt
         archive_bytes = archive_buffer.getvalue()
         payload = b"#!/bin/bash\nexit 0\n"
         envelope = {
+            "acknowledge_external_github_mutation": True,
+            "acknowledge_local_ci_deactivation": True,
             "package_archive_b64": base64.b64encode(archive_bytes).decode("ascii"),
             "package_archive_bytes": len(archive_bytes),
             "package_archive_sha256": hashlib.sha256(archive_bytes).hexdigest(),
@@ -157,16 +162,14 @@ printf '{"status":"collected","unsigned_bundle_sha256":"%s","unsigned_bundle_byt
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("unsafe package archive member", completed.stderr)
 
-    def test_regenerates_verifies_then_provisions_without_activation(self):
-        stage = self.source.index("stage-wsl-jit-live-contract.py")
-        collect = self.source.index("collect-wsl-jit-measurements.py")
-        compare = self.source.index("regenerated live contract differs from signed content")
-        verify = self.source.index("verify-wsl-jit-readiness.py")
+    def test_preflights_then_provisions_without_activation(self):
+        preflight = self.source.index("preflight-wsl-jit-live-contract.py")
+        preflight_result = self.source.index(
+            "live contract preflight returned an invalid result"
+        )
         provision = self.source.index("provision-wsl-jit-contract.sh")
-        self.assertLess(stage, collect)
-        self.assertLess(collect, compare)
-        self.assertLess(compare, verify)
-        self.assertLess(verify, provision)
+        self.assertLess(preflight, preflight_result)
+        self.assertLess(preflight_result, provision)
         for token in (
             "GARM was unexpectedly enabled",
             "activation approval was unexpectedly created",
@@ -178,6 +181,50 @@ printf '{"status":"collected","unsigned_bundle_sha256":"%s","unsigned_bundle_byt
             'runner_registration_performed=$false',
         ):
             self.assertIn(token, self.source)
+
+    def test_preexisting_activation_is_reconciled_by_owning_workflow(self):
+        for token in (
+            "AcknowledgeExternalGitHubMutation",
+            "AcknowledgeLocalCiDeactivation",
+            'if [[ -e /etc/self-hosted-ci/ACTIVATION_APPROVED || -L /etc/self-hosted-ci/ACTIVATION_APPROVED ]]; then',
+            'bash "$package_root/scripts/host/deactivate-garm-jit.sh" --apply',
+            "--acknowledge-external-github-mutation --acknowledge-local-ci-deactivation",
+            "--inherited-transaction-lock",
+            '"zero_scale_sets": True',
+            '"zero_incus_instances": True',
+            "owning deactivation workflow returned an invalid result",
+            "owning deactivation workflow left activation approval present",
+            'activation_reconciled=true',
+        ):
+            self.assertIn(token, self.source)
+        self.assertNotIn("rm -f -- /etc/self-hosted-ci/ACTIVATION_APPROVED", self.source)
+        lock = self.source.index("acquire_transaction_lock")
+        deactivate = self.source.index("deactivate-garm-jit.sh")
+        provision = self.source.index("provision-wsl-jit-contract.sh")
+        self.assertLess(lock, deactivate)
+        self.assertLess(deactivate, provision)
+        self.assertLess(
+            provision,
+            self.source.index("activation approval was unexpectedly created"),
+        )
+
+    def test_signed_install_requires_both_deactivation_acknowledgements(self):
+        self.assertIn(
+            "signed install Apply requires AcknowledgeExternalGitHubMutation",
+            self.source,
+        )
+        self.assertIn(
+            "signed install Apply requires AcknowledgeLocalCiDeactivation",
+            self.source,
+        )
+        self.assertIn(
+            'acknowledge_external_github_mutation=$externalGitHubAckLiteral',
+            self.source,
+        )
+        self.assertIn(
+            'acknowledge_local_ci_deactivation=$localCiDeactivationAckLiteral',
+            self.source,
+        )
 
     def test_password_task_and_staging_are_cleaned_on_success_and_failure(self):
         for token in (

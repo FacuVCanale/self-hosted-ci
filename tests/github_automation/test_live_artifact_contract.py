@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -7,6 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -208,6 +210,146 @@ class LiveArtifactContractTests(unittest.TestCase):
             self.assertIn(token, source)
         self.assertNotIn('"/etc/self-hosted-ci/garm/config.toml",', source)
         self.assertNotIn('incus-client.key",', source)
+
+    def test_stager_prunes_the_owned_live_namespace_and_is_idempotent(self):
+        stager = load_stager()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stale = root / "live/source/stale.sh"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("stale\n", encoding="utf-8")
+            boundary = {
+                "components": [
+                    {
+                        "id": "garm",
+                        "evidence_refs": [
+                            "evidence/keep.json",
+                            "live/source/stale.sh",
+                            "live/live-artifacts-v1.json",
+                        ],
+                    }
+                ],
+                "host_security": {
+                    "checks": [
+                        {
+                            "evidence_refs": [
+                                "evidence/security.json",
+                                "live/source/obsolete-security-check.sh",
+                            ]
+                        }
+                    ]
+                },
+            }
+            expected = copy.deepcopy(boundary)
+            expected["components"][0]["evidence_refs"] = ["evidence/keep.json"]
+            expected["host_security"]["checks"][0]["evidence_refs"] = [
+                "evidence/security.json"
+            ]
+
+            stager._reset_live_namespace(boundary, root)
+            self.assertEqual(boundary, expected)
+            self.assertFalse((root / "live").exists())
+
+            first = copy.deepcopy(boundary)
+            stager._reset_live_namespace(boundary, root)
+            self.assertEqual(boundary, first)
+            self.assertFalse((root / "live").exists())
+
+    def test_stager_rejects_an_unsafe_or_malformed_live_namespace(self):
+        stager = load_stager()
+        for kind in ("symlink", "file"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                live = root / "live"
+                if kind == "symlink":
+                    live.symlink_to(root / "missing")
+                else:
+                    live.write_text("not a directory\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "live measurement root"):
+                    stager._reset_live_namespace({"components": []}, root)
+
+        malformed = {
+            "components": [{"id": "garm", "evidence_refs": ["live/ok", 1]}]
+        }
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaisesRegex(
+            ValueError, "must contain strings"
+        ):
+            stager._reset_live_namespace(malformed, Path(temporary))
+
+    def test_full_staging_is_reproducible_across_reconciliation(self):
+        stager = load_stager()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "runtime.sh"
+            source.write_bytes(b"#!/bin/sh\nexit 0\n")
+            measurement = root / "measurements"
+            stale = measurement / "live/source/stale.sh"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("stale\n", encoding="utf-8")
+            initial = root / "initial.json"
+            first, second = root / "first.json", root / "second.json"
+            initial.write_text(
+                json.dumps(
+                    {
+                        "components": [
+                            {
+                                "id": "garm",
+                                "evidence_refs": ["live/source/stale.sh"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            artifacts = ((
+                "runtime.sh",
+                self.TARGET,
+                "0755",
+                "script",
+                "garm",
+            ),)
+            with (
+                mock.patch.object(stager, "ROOT", root),
+                mock.patch.object(stager, "PUBLIC_ARTIFACTS", artifacts),
+                mock.patch.object(stager, "PINNED_BINARIES", ()),
+                mock.patch.object(stager.os, "geteuid", return_value=0),
+                mock.patch.object(stager.os, "chown"),
+                mock.patch.object(
+                    stager.grp, "getgrnam", return_value=mock.Mock(gr_gid=0)
+                ),
+            ):
+                self.assertEqual(
+                    stager.main([
+                        "--input-boundary", str(initial),
+                        "--output-boundary", str(first),
+                        "--measurement-root", str(measurement),
+                    ]),
+                    0,
+                )
+                snapshot = {
+                    path.relative_to(measurement).as_posix(): (
+                        path.read_bytes(), path.stat().st_mode & 0o7777
+                    )
+                    for path in measurement.rglob("*")
+                    if path.is_file()
+                }
+                self.assertEqual(
+                    stager.main([
+                        "--input-boundary", str(first),
+                        "--output-boundary", str(second),
+                        "--measurement-root", str(measurement),
+                    ]),
+                    0,
+                )
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            self.assertEqual(snapshot, {
+                path.relative_to(measurement).as_posix(): (
+                    path.read_bytes(), path.stat().st_mode & 0o7777
+                )
+                for path in measurement.rglob("*")
+                if path.is_file()
+            })
+            self.assertNotIn("live/source/stale.sh", snapshot)
 
 
 if __name__ == "__main__":

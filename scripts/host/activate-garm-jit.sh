@@ -10,7 +10,7 @@ if [[ "$mode" == plan ]]; then printf '%s\n' '{"mode":"plan","external_calls":"n
 require_exact_distro; acquire_transaction_lock; require_command_contracts; require_canary_production_fence; require_live_artifact_contract; require_real_policy_units
 systemctl start "$BOUNDARY_SERVICE"; systemctl is-active --quiet "$BOUNDARY_SERVICE"||die "boundary verification failed"
 require_base_health; require_health_configuration
-[[ ! -e "$ACTIVATION_SENTINEL" && ! -e "$NETWORK_SENTINEL" ]]||die "prior activation state exists; run deactivation to reconcile it"
+[[ ! -e "$ACTIVATION_SENTINEL" && ! -L "$ACTIVATION_SENTINEL" && ! -e "$NETWORK_SENTINEL" && ! -L "$NETWORK_SENTINEL" ]]||die "prior activation state exists; run deactivation to reconcile it"
 systemctl is-active --quiet "$GARM_SERVICE" && die "GARM must be inactive"; systemctl is-active --quiet "$BROKER_SERVICE" && die "broker must be inactive"; systemctl is-active --quiet "$OUTBOUND_WORKER_SERVICE" && die "outbound worker must be inactive"
 incus_project_empty||die "Incus project is not empty"
 sentinel_created=false; manager_started=false

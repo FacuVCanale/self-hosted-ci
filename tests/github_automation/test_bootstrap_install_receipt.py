@@ -11,7 +11,12 @@ from unittest.mock import patch
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from github_automation.bootstrap_boundary import build_bootstrap_boundary, sign_bootstrap_boundary
+from github_automation.bootstrap_boundary import (
+    PUBLIC_MANIFEST_ARTIFACT_COUNT,
+    PUBLIC_MANIFEST_MAPPING_DIGEST,
+    build_bootstrap_boundary,
+    sign_bootstrap_boundary,
+)
 from github_automation.crypto import canonicalize_jcs, spki_fingerprint
 from tests.github_automation.test_bootstrap_boundary import public_manifest, windows_observation, wsl_observation
 
@@ -83,9 +88,9 @@ class BootstrapInstallReceiptTests(unittest.TestCase):
             bootstrap, installed, receipt, _ = self.fixture(Path(directory))
             with self.root_stat():
                 measured = VERIFIER.measure(bootstrap, installed)
-            self.assertEqual(89, measured["artifact_count"])
+            self.assertEqual(PUBLIC_MANIFEST_ARTIFACT_COUNT, measured["artifact_count"])
             self.assertEqual(
-                "3e932dc191f2d64747e0e6d4d6ce4cce72f9f30226c4500b5c0d764889200773",
+                PUBLIC_MANIFEST_MAPPING_DIGEST,
                 measured["bootstrap_mapping_digest"],
             )
             with (
@@ -97,7 +102,10 @@ class BootstrapInstallReceiptTests(unittest.TestCase):
             with self.root_stat():
                 stored = VERIFIER.verify_receipt(receipt, measured)
             self.assertEqual(64, len(stored["receipt_digest"]))
-            self.assertEqual(89, len(stored["installed_targets"]))
+            self.assertEqual(
+                PUBLIC_MANIFEST_ARTIFACT_COUNT,
+                len(stored["installed_targets"]),
+            )
 
     def test_content_mode_symlink_and_hardlink_drift_fail_closed(self):
         for mutation in ("content", "mode", "symlink", "parent-symlink", "hardlink"):
