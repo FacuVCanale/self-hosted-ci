@@ -139,6 +139,30 @@ class GarmActivationTransactionTests(unittest.TestCase):
         self.assertIn('"$NETWORK_POLICY_SCRIPT" quarantine', library)
         self.assertIn('"$GARM_SESSION_HELPER" run -- --format json', library)
 
+    def test_zero_runtime_can_be_proved_after_canonical_deactivation(self) -> None:
+        library = LIBRARY.read_text(encoding="utf-8")
+        for token in (
+            "configured_scale_sets_empty_offline()",
+            "/var/lib/self-hosted-ci/garm/garm.db",
+            'systemctl is-active "$unit"',
+            '[[ "$state" == inactive ]]',
+            "garm_database_files_safe()",
+            '"$GARM_DATABASE-wal"',
+            '"$GARM_DATABASE-shm"',
+            'runuser -u garm-manager -- /usr/bin/python3',
+            "file:{sys.argv[1]}?mode=ro",
+            'PRAGMA query_only=ON',
+            '"scale_sets","instances"',
+            'SELECT COUNT(*) FROM scale_sets',
+            'SELECT COUNT(*) FROM instances',
+            "configured_runtime_empty()",
+            "zero_runtime_state(){ configured_runtime_empty&&incus_project_empty; }",
+        ):
+            self.assertIn(token, library)
+        self.assertNotIn("INSERT ", library)
+        self.assertNotIn("UPDATE ", library)
+        self.assertNotIn("DELETE FROM", library)
+
     def test_garm_service_forbids_host_wide_incus_admin(self) -> None:
         source = SERVICE.read_text(encoding="utf-8")
         self.assertNotIn("SupplementaryGroups=incus-admin", source)

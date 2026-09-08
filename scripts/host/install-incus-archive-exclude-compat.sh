@@ -5,7 +5,8 @@ export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
 readonly EXPECTED_DISTRO='Ubuntu-24.04-CI'
 readonly EXPECTED_INCUS_PACKAGE='6.0.0-1ubuntu0.3'
-readonly TRANSACTION_LIB='/usr/local/lib/self-hosted-ci/garm-jit-transaction-lib.sh'
+readonly SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly TRANSACTION_LIB="${SCRIPT_DIRECTORY}/garm-jit-transaction-lib.sh"
 readonly PROJECT='ci-jit'
 readonly PROFILE='ci-jit'
 readonly DROPIN_DIRECTORY='/etc/systemd/system/incus.service.d'
@@ -180,7 +181,7 @@ trap cleanup EXIT
 [[ "${EUID}" -eq 0 ]] || fail 'apply requires WSL root'
 [[ "${WSL_DISTRO_NAME:-}" == "${EXPECTED_DISTRO}" ]] || fail 'unexpected WSL distro'
 [[ -d /run/systemd/system ]] || fail 'systemd is unavailable'
-for command in incus dpkg-query systemctl install stat tar python3 cmp flock sha256sum mktemp; do
+for command in incus dpkg-query systemctl install stat tar python3 cmp flock sha256sum mktemp runuser; do
   command -v "${command}" >/dev/null || fail "required command is absent: ${command}"
 done
 [[ -f "${TRANSACTION_LIB}" && ! -L "${TRANSACTION_LIB}" ]] \

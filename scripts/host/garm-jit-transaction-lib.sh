@@ -2,6 +2,7 @@
 readonly GARM_SERVICE=self-hosted-ci-garm.service BROKER_SERVICE=self-hosted-ci-allocation-broker.service OUTBOUND_WORKER_SERVICE=self-hosted-ci-outbound-worker.service BOUNDARY_SERVICE=self-hosted-ci-boundary-verify.service POLICY_SERVICE=self-hosted-ci-network-policy.service PROXY_SERVICE=self-hosted-ci-egress-proxy.service HEALTH_TIMER=self-hosted-ci-health-heartbeat.timer
 readonly ACTIVATION_SENTINEL=/etc/self-hosted-ci/ACTIVATION_APPROVED NETWORK_SENTINEL=/etc/self-hosted-ci/runner-network-v2.enabled HEALTH_STATE=/etc/self-hosted-ci/garm/health-state.json BROKER_CONFIG=/etc/self-hosted-ci/garm/allocation-broker.json BROKER_PUBLIC_KEY=/etc/self-hosted-ci/garm/allocation-authority-public-key.pem
 readonly GARM_CONFIG=/etc/self-hosted-ci/garm/config.toml PROVIDER_CONFIG=/etc/self-hosted-ci/garm/garm-provider-incus.toml GARM_SESSION_HELPER=/usr/local/lib/self-hosted-ci/garm-cli-session.py BROKER_CLI=/usr/local/lib/self-hosted-ci/garm-allocation-broker.py LIVE_JOB_VERIFIER=/usr/local/libexec/self-hosted-ci/github-live-job-verifier.py LIVE_CONTRACT_VERIFIER=/usr/local/lib/self-hosted-ci/verify-live-artifact-contract.py CANARY_MATRIX_CLI=/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py GARM_RUNTIME_HOME=/run/self-hosted-ci/garm-cli NETWORK_POLICY_SCRIPT=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh
+readonly GARM_DATABASE=/var/lib/self-hosted-ci/garm/garm.db
 die(){ printf 'garm-jit transaction blocked: %s\n' "$*" >&2; exit 1; }
 acquire_transaction_lock(){ command -v flock >/dev/null||die "flock is required"; exec 9>/run/self-hosted-ci-garm-jit.lock; flock -n 9||die "another transaction is active"; }
 require_root_regular_file(){ local p="$1" m="$2" a; [[ -f "$p" && ! -L "$p" && "$(stat -c '%u:%h' "$p")" == 0:1 ]]||die "$p metadata unsafe"; a="$(stat -c '%a' "$p")"; (( (8#$a & ~8#$m)==0 ))||die "$p permissions too broad"; }
@@ -31,12 +32,59 @@ import json,sys
 if json.loads(sys.argv[1])!=[]: raise SystemExit()
 PY
 done <<<"$rows"; }
+garm_database_files_safe(){
+  local path metadata expected_owner
+  expected_owner="$(id -u garm-manager):$(id -g garm-manager)"||return 1
+  [[ -d "$(dirname "$GARM_DATABASE")" && ! -L "$(dirname "$GARM_DATABASE")" ]]||return 1
+  [[ "$(stat -c '%u:%g:%a' "$(dirname "$GARM_DATABASE")")" == "$expected_owner:700" ]]||return 1
+  for path in "$GARM_DATABASE" "$GARM_DATABASE-wal" "$GARM_DATABASE-shm"; do
+    [[ -e "$path" ]]||continue
+    [[ -f "$path" && ! -L "$path" ]]||return 1
+    metadata="$(stat -c '%u:%g:%a:%h' "$path")"||return 1
+    [[ "$metadata" == "$expected_owner:600:1" ]]||return 1
+  done
+  [[ -f "$GARM_DATABASE" ]]||return 1
+}
+configured_scale_sets_empty_offline(){
+  local unit state query_status
+  for unit in "$GARM_SERVICE" "$BROKER_SERVICE" "$OUTBOUND_WORKER_SERVICE"; do
+    if state="$(systemctl is-active "$unit" 2>&1)"; then return 1; fi
+    [[ "$state" == inactive ]]||return 1
+  done
+  command -v runuser >/dev/null||return 1
+  garm_database_files_safe||return 1
+  if runuser -u garm-manager -- /usr/bin/python3 - "$GARM_DATABASE" <<'PY'
+import sqlite3,sys
+connection=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro",uri=True)
+try:
+    connection.execute("PRAGMA query_only=ON")
+    tables={row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not {"scale_sets","instances"}.issubset(tables): raise SystemExit(1)
+    if connection.execute("SELECT COUNT(*) FROM scale_sets").fetchone()[0] != 0: raise SystemExit(1)
+    if connection.execute("SELECT COUNT(*) FROM instances").fetchone()[0] != 0: raise SystemExit(1)
+finally:
+    connection.close()
+PY
+  then query_status=0
+  else query_status=$?
+  fi
+  garm_database_files_safe||return 1
+  return "$query_status"
+}
+configured_runtime_empty(){
+  local state
+  if state="$(systemctl is-active "$GARM_SERVICE" 2>&1)"; then
+    [[ "$state" == active ]]&&configured_scale_sets_empty
+  else
+    [[ "$state" == inactive ]]&&configured_scale_sets_empty_offline
+  fi
+}
 incus_project_empty(){ local v; v="$(incus list --project ci-jit --format json)"||return; python3 - "$v" <<'PY'
 import json,sys
 if json.loads(sys.argv[1])!=[]: raise SystemExit()
 PY
 }
-zero_runtime_state(){ configured_scale_sets_empty&&incus_project_empty; }
+zero_runtime_state(){ configured_runtime_empty&&incus_project_empty; }
 recover_allocations(){ GARM_SESSION_FAILURE_QUARANTINE=true "$BROKER_CLI" recover >/dev/null&&zero_runtime_state; }
 durable_write(){ python3 - "$1" "$2" <<'PY'
 import json,os,sys,tempfile
