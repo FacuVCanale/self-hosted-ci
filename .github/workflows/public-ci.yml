@@ -10,6 +10,22 @@ permissions:
   contents: read
 
 jobs:
+  windows-root-acl-roundtrip:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Verify Windows ACL round-trip semantics without root mutation
+        shell: powershell
+        run: |
+          & .\scripts\host\protect-windows-root.ps1 `
+            -ExpectedServiceAccountSid 'S-1-5-21-1-2-3-1000' `
+            -AclRoundTripPreflight
+
   validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
