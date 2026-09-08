@@ -23,6 +23,7 @@ $SshdConfig = "C:\ProgramData\ssh\sshd_config"
 $SshdBackup = Join-Path $ControlRoot "sshd_config.before-health-sftp"
 $SftpBegin = "# BEGIN SELF_HOSTED_CI_HEALTH_SFTP"
 $SftpEnd = "# END SELF_HOSTED_CI_HEALTH_SFTP"
+$UninstallMarkerPath = Join-Path $env:ProgramFiles "self-hosted-ci\transactions\health-supervisor-uninstall-v1.json"
 $PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 function Test-IsAdministrator {
@@ -268,6 +269,7 @@ if (Test-GroupContainsSid $administratorGroup $readerSid.Value $readerVisitedGro
     throw "health reader must be a dedicated non-admin identity so its SFTP access is read-only"
 }
 if (-not (Test-Path -LiteralPath $SourceSupervisor -PathType Leaf)) { throw "supervisor source is missing" }
+if (Test-Path -LiteralPath $UninstallMarkerPath) { throw "health supervisor installation is blocked by an owning uninstall transaction" }
 
 $plan = [ordered]@{
     mode = "plan"; apply_requested = [bool]$Apply; task_name = $TaskName
