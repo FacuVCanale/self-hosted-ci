@@ -584,7 +584,7 @@ committed=true
                 "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
                 "ALL_PROXY=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",
                 "NO_PROXY=", "no_proxy=",
-                "bun", "run", "lint", "--", "--version",
+                "bun", str(modules / ".bin/eslint"), "--version",
                 cwd=component_root,
             )
             run(

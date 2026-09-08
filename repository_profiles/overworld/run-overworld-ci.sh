@@ -299,10 +299,10 @@ phase_backend() {
 }
 
 phase_frontend() {
-  (cd frontend && bun run lint -- --max-warnings 0)
+  (cd frontend && bun ./node_modules/.bin/eslint --max-warnings 0)
   (cd backend && bun run build:types)
-  (cd frontend && bun run typecheck)
-  (cd frontend && bun run test -- --ci)
+  (cd frontend && bun ./node_modules/.bin/tsc --noEmit)
+  (cd frontend && NODE_ENV=test bun ./node_modules/.bin/jest --ci)
 }
 
 phase_e2e() {
@@ -321,7 +321,8 @@ phase_e2e() {
     [[ "$attempt" -lt 90 ]] || return 1
     sleep 2
   done
-  (cd frontend && exec env FRONTEND_PORT=$FRONTEND_PORT BACKEND_URL="http://127.0.0.1:$BACKEND_PORT" bun run dev) >"$STATE_ROOT/frontend.log" 2>&1 &
+  (cd frontend && exec env FRONTEND_PORT=$FRONTEND_PORT BACKEND_URL="http://127.0.0.1:$BACKEND_PORT" \
+    bun ./node_modules/.bin/next dev -p "$FRONTEND_PORT") >"$STATE_ROOT/frontend.log" 2>&1 &
   echo $! > "$STATE_ROOT/frontend.pid"
   for attempt in $(seq 1 60); do
     curl --fail --silent "http://127.0.0.1:$FRONTEND_PORT" >/dev/null && break
@@ -366,8 +367,8 @@ phase_e2e() {
     src/modules/internal/towers/sensor-data/export.pg.test.ts
   )
   for pg_test in "${pg_tests[@]}"; do (cd backend && TEST_DATABASE_URL="$DATABASE_URL" bun test "$pg_test"); done
-  CI=true E2E_BASE_URL="http://localhost:$FRONTEND_PORT" PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
-    bun run --cwd frontend playwright test e2e/auth-flow.spec.ts e2e/a11y.spec.ts --reporter=list
+  (cd frontend && CI=true E2E_BASE_URL="http://localhost:$FRONTEND_PORT" PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
+    bun ./node_modules/.bin/playwright test e2e/auth-flow.spec.ts e2e/a11y.spec.ts --reporter=list)
   stop_local_services
   stop_postgres
 }
