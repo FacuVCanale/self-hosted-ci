@@ -323,16 +323,13 @@ class WorkerGitHubClient:
         parents = value.get("parents")
         if value.get("sha") != sha or not isinstance(parents, list):
             raise WorkerAuthorityError("GitHub merge commit response is invalid")
-        parent_shas = tuple(
-            parent.get("sha") if isinstance(parent, Mapping) else None
-            for parent in parents
-        )
-        if any(
-            not isinstance(parent, str) or not _SHA.fullmatch(parent)
-            for parent in parent_shas
-        ):
-            raise WorkerAuthorityError("GitHub merge commit parents are invalid")
-        return parent_shas
+        parent_shas: list[str] = []
+        for parent in parents:
+            parent_sha = parent.get("sha") if isinstance(parent, Mapping) else None
+            if not isinstance(parent_sha, str) or not _SHA.fullmatch(parent_sha):
+                raise WorkerAuthorityError("GitHub merge commit parents are invalid")
+            parent_shas.append(parent_sha)
+        return tuple(parent_shas)
 
     def workflow(self, token: WorkerInstallationToken) -> Mapping[str, Any]:
         workflow = quote(self.authority.workflow_id, safe="")
