@@ -1363,12 +1363,13 @@ cleanup
             'shutil.rmtree(smoke_root)',
             'before = tree_digest(modules)',
             'if tree_digest(modules) != before:',
-            '"NODE_OPTIONS=--max-old-space-size=1536"',
+            '"NODE_OPTIONS=--max-old-space-size=1024"',
             'str(node_path)',
             'str(modules / "next/dist/bin/next"), "--version"',
             'pinned Next.js Node entrypoint smoke drifted',
         ):
             self.assertIn(offline_smoke_contract, source)
+        self.assertNotIn('"NODE_OPTIONS=--max-old-space-size=1536"', source)
         regenerated_cleanup = source.index(
             'remove_exact_regenerated_modules(overworld, dependencies, backend_snapshot_digest)',
             source.index("def main"),
