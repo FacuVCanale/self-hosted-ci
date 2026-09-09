@@ -610,6 +610,43 @@ class OverworldProfileImageTests(unittest.TestCase):
         ):
             module.verify_runner_executable(python)
 
+    def test_image_verifier_requires_exact_runtime_entrypoint_identity(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "overworld_image_verify_runtime_entrypoint", PROFILE / "verify.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            node = root / "node"
+            node.write_bytes(b"exact-node-runtime")
+            node.chmod(0o755)
+            expected = {
+                "next_node": {
+                    "path": str(node),
+                    "sha256": hashlib.sha256(node.read_bytes()).hexdigest(),
+                    "uid": node.stat().st_uid,
+                    "gid": node.stat().st_gid,
+                    "mode": "0755",
+                }
+            }
+            with mock.patch.object(module, "EXPECTED_RUNTIME_ENTRYPOINTS", expected):
+                module.verify_runtime_entrypoints(expected)
+
+                node.chmod(0o775)
+                with self.assertRaisesRegex(SystemExit, "identity drifted"):
+                    module.verify_runtime_entrypoints(expected)
+                node.chmod(0o755)
+
+                node.write_bytes(b"tampered-node-runtime")
+                with self.assertRaisesRegex(SystemExit, "identity drifted"):
+                    module.verify_runtime_entrypoints(expected)
+
+            with self.assertRaisesRegex(SystemExit, "inventory runtime entrypoints drifted"):
+                module.verify_runtime_entrypoints({})
+
     def test_image_verifier_requires_exact_confined_frontend_eslint_link(self) -> None:
         spec = importlib.util.spec_from_file_location(
             "overworld_image_verify_eslint", PROFILE / "verify.py"
@@ -672,6 +709,25 @@ class OverworldProfileImageTests(unittest.TestCase):
             "d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307",
             manifest["artifacts"]["node"]["sha256"],
         )
+        self.assertEqual(
+            {
+                "next_node": {
+                    "path": "/usr/local/bin/node",
+                    "sha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
+                    "uid": 0,
+                    "gid": 0,
+                    "mode": "0755",
+                }
+            },
+            manifest["runtime_entrypoints"],
+        )
+        for field, drifted in (("path", "/usr/bin/node"), ("sha256", "0" * 64), ("mode", "0775")):
+            changed = json.loads(json.dumps(manifest))
+            changed["runtime_entrypoints"]["next_node"][field] = drifted
+            with self.subTest(field=field), self.assertRaisesRegex(
+                SystemExit, "runtime entrypoint contract drifted"
+            ):
+                module.require_manifest(changed)
         self.assertEqual("1.4.0", manifest["artifacts"]["bun"]["version"])
         self.assertEqual("1.1.408", manifest["artifacts"]["pyright"]["version"])
         self.assertEqual("1.59.1", manifest["artifacts"]["playwright"]["version"])
@@ -1024,7 +1080,9 @@ class OverworldProfileImageTests(unittest.TestCase):
             "dpkg-query",
             "PLAYWRIGHT_BROWSERS_PATH",
             '"bun", "install", "--frozen-lockfile"',
-            'run("node", "--version") != "v22.23.2"',
+            'run(str(node_path), "--version") != "v22.23.2"',
+            'Node runtime executable digest drifted',
+            'os.chown(node_path, int(node_contract["uid"]), int(node_contract["gid"]))',
             '"uv", "sync", "--frozen"',
             'downloaded["chromium"], Path("/opt/ms-playwright/chromium-1217")',
             'str(pyright_wrapper), str(pyright_target)',
@@ -1136,6 +1194,10 @@ class OverworldProfileImageTests(unittest.TestCase):
             'shutil.rmtree(smoke_root)',
             'before = tree_digest(modules)',
             'if tree_digest(modules) != before:',
+            '"NODE_OPTIONS=--max-old-space-size=1536"',
+            'str(node_path)',
+            'str(modules / "next/dist/bin/next"), "--version"',
+            'pinned Next.js Node entrypoint smoke drifted',
         ):
             self.assertIn(offline_smoke_contract, source)
         regenerated_cleanup = source.index(
@@ -1342,6 +1404,9 @@ printf normalized > "$MOCK_CHMOD_MARKER"
             "runner finalizer ownership or mode drifted",
             "Waterfall interpreter resolves through a root-private path",
             "Waterfall interpreter is not executable by runner",
+            "image inventory runtime entrypoints drifted",
+            "runtime entrypoint path is unsafe",
+            "runtime entrypoint identity drifted",
             'runner_groups != {"runner"}',
         ):
             self.assertIn(token, source)

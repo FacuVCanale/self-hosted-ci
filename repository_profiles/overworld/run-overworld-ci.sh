@@ -20,6 +20,8 @@ readonly BACKEND_LOCK_SHA256=b235110fe83b4b3a4eafb337efc0bb8d7424aea33a72f0338b2
 readonly FRONTEND_LOCK_SHA256=6004b42bc89358fc0d83f81f8015658246139ce830e1e569279700850e5d63b3
 readonly BACKEND_MODULES=/opt/self-hosted-ci/overworld-deps/backend-node_modules
 readonly FRONTEND_MODULES=/opt/self-hosted-ci/overworld-deps/frontend-node_modules
+readonly NEXT_NODE=/usr/local/bin/node
+readonly NEXT_NODE_SHA256=3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327
 readonly STATE_ROOT="${RUNNER_TEMP:?RUNNER_TEMP is required}/overworld-ci-v1"
 readonly MEMORY_LOG="$STATE_ROOT/memory.jsonl"
 readonly MEMORY_SUMMARY="$STATE_ROOT/memory-summary.jsonl"
@@ -450,6 +452,14 @@ require_pinned_root_file() {
   [[ $(sha256sum "$path" | awk '{print $1}') == "$expected_sha256" ]] || return 1
 }
 
+require_pinned_root_executable() {
+  local path=$1 expected_sha256=$2 metadata
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  metadata=$(stat -c '%u:%g:%a' "$path") || return 1
+  [[ "$metadata" == 0:0:755 ]] || return 1
+  [[ $(sha256sum "$path" | awk '{print $1}') == "$expected_sha256" ]] || return 1
+}
+
 require_next_font_mock() {
   [[ -d "$NEXT_FONT_ASSET_ROOT" && ! -L "$NEXT_FONT_ASSET_ROOT" ]] || return 1
   [[ $(stat -c '%u:%g:%a' "$NEXT_FONT_ASSET_ROOT") == 0:0:755 ]] || return 1
@@ -463,9 +473,11 @@ require_next_font_mock() {
 
 start_frontend() {
   require_next_font_mock
-  (cd frontend && exec env NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK" \
+  require_pinned_root_executable "$NEXT_NODE" "$NEXT_NODE_SHA256"
+  (cd frontend && exec env NODE_OPTIONS=--max-old-space-size=1536 \
+    NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK" \
     FRONTEND_PORT=$FRONTEND_PORT BACKEND_URL="http://127.0.0.1:$BACKEND_PORT" \
-    bun ./node_modules/.bin/next dev --webpack -p "$FRONTEND_PORT") >"$STATE_ROOT/frontend.log" 2>&1 &
+    "$NEXT_NODE" "$FRONTEND_MODULES/next/dist/bin/next" dev --webpack -p "$FRONTEND_PORT") >"$STATE_ROOT/frontend.log" 2>&1 &
   echo $! > "$STATE_ROOT/frontend.pid"
   for attempt in $(seq 1 60); do
     curl --fail --silent "http://127.0.0.1:$FRONTEND_PORT" >/dev/null && break

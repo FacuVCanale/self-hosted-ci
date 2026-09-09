@@ -23,6 +23,15 @@ EXPECTED_PROFILE_ASSETS = {
     "fonts/Geist[wght].ttf": {"mode": "0644", "sha256": "73894e0448cae90a92b6c2f8732b7bb9acb7b94c418bff559dad4a18e1de9659", "size": 169056},
     "fonts/README.md": {"mode": "0644", "sha256": "1e8cdd235cd6596caaad2fa793795b6ea1fefe496ce5f6d823f0bf982e7cad4e", "size": 947},
 }
+EXPECTED_RUNTIME_ENTRYPOINTS = {
+    "next_node": {
+        "path": "/usr/local/bin/node",
+        "sha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
+        "uid": 0,
+        "gid": 0,
+        "mode": "0755",
+    }
+}
 
 
 def output(*args: str) -> str:
@@ -110,6 +119,23 @@ def verify_profile_assets(inventory: object) -> None:
             raise SystemExit(f"installed profile asset drifted: {relative}")
 
 
+def verify_runtime_entrypoints(inventory: object) -> None:
+    if inventory != EXPECTED_RUNTIME_ENTRYPOINTS:
+        raise SystemExit("image inventory runtime entrypoints drifted")
+    for name, expected in EXPECTED_RUNTIME_ENTRYPOINTS.items():
+        path = Path(expected["path"])
+        if path.is_symlink() or not path.is_file() or path.resolve(strict=True) != path:
+            raise SystemExit(f"runtime entrypoint path is unsafe: {name}")
+        info = path.stat()
+        if (
+            info.st_uid != expected["uid"]
+            or info.st_gid != expected["gid"]
+            or f"{info.st_mode & 0o777:04o}" != expected["mode"]
+            or hashlib.sha256(path.read_bytes()).hexdigest() != expected["sha256"]
+        ):
+            raise SystemExit(f"runtime entrypoint identity drifted: {name}")
+
+
 def main() -> int:
     runner_uid = int(output("id", "-u", "runner"))
     runner_groups = set(output("id", "-nG", "runner").split())
@@ -166,6 +192,7 @@ def main() -> int:
     if inventory.get("repository_profile_digest") != marker["profile_digest"]:
         raise SystemExit("image inventory profile digest drifted")
     verify_profile_assets(inventory.get("profile_assets"))
+    verify_runtime_entrypoints(inventory.get("runtime_entrypoints"))
     checks = {
         "node": ("node", "--version", "v22.23.2"),
         "bun": ("bun", "--version", "1.4.0"),
