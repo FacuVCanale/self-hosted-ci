@@ -125,6 +125,15 @@
     "xfonts-scalable",
     "xvfb"
   ],
+  "runtime_entrypoints": {
+    "next_node": {
+      "path": "/usr/local/bin/node",
+      "sha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
+      "uid": 0,
+      "gid": 0,
+      "mode": "0755"
+    }
+  },
   "marker_path": "/etc/self-hosted-ci/repository-profile-image-v1.json",
   "inventory_path": "/usr/share/doc/self-hosted-ci/overworld-pr-v1-sbom.json"
 }

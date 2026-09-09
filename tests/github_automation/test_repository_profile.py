@@ -122,6 +122,10 @@ class RepositoryProfileTests(unittest.TestCase):
         )
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
         self.assertEqual("22.23.2", profile["toolchain"]["node"])
+        self.assertEqual(
+            "46bc6a9cc56c9ae156908ca141eb8292d0373ae5e692eb88b94475fad158074d",
+            profile["runner_script_sha256"],
+        )
         self.assertEqual(SCRIPT, script)
 
     def test_profile_digest_repository_profile_and_script_are_all_bound(self):
@@ -281,7 +285,10 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn("bun ./node_modules/.bin/eslint --max-warnings 0", text)
         self.assertIn("bun ./node_modules/.bin/tsc --noEmit", text)
         self.assertIn("NODE_ENV=test bun ./node_modules/.bin/jest --ci", text)
-        self.assertIn('bun ./node_modules/.bin/next dev --webpack -p "$FRONTEND_PORT"', text)
+        self.assertIn(
+            '"$NEXT_NODE" "$FRONTEND_MODULES/next/dist/bin/next" dev --webpack -p "$FRONTEND_PORT"',
+            text,
+        )
         self.assertIn("bun ./node_modules/.bin/playwright test", text)
         frontend_and_e2e = text[text.index("phase_frontend()") : text.rindex("\nrequire_image_contract\n")]
         self.assertNotIn("bun run lint", frontend_and_e2e)
@@ -298,7 +305,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn("export UV_OFFLINE=1 UV_NO_SYNC=1", text)
         self.assertNotIn("--runInBand", text)
         self.assertNotIn("bun run build)", text)
-        self.assertIn('bun ./node_modules/.bin/next dev --webpack -p "$FRONTEND_PORT")', text)
+        self.assertNotIn('bun ./node_modules/.bin/next dev --webpack -p "$FRONTEND_PORT")', text)
         self.assertIn("start_postgres 16", text)
         self.assertIn("start_postgres 17", text)
         self.assertEqual(1, text.count('-o "-F -c shared_buffers=32MB -k $PGSOCKET -p $port -h 127.0.0.1"'))
@@ -925,11 +932,28 @@ phase_e2e
 
         runner = SCRIPT.read_text()
         self.assertEqual(1, runner.count("NEXT_FONT_GOOGLE_MOCKED_RESPONSES="))
+        self.assertEqual(1, runner.count("NODE_OPTIONS=--max-old-space-size=1536"))
         frontend = runner[runner.index("start_frontend() {") : runner.index("\nphase_e2e() {")]
         self.assertIn('NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK"', frontend)
         self.assertNotIn("NEXT_FONT_GOOGLE_MOCKED_RESPONSES", runner[: runner.index("start_frontend() {")])
-        self.assertLess(frontend.index("require_next_font_mock"), frontend.index("next dev"))
-        self.assertIn('next dev --webpack -p "$FRONTEND_PORT"', frontend)
+        self.assertLess(frontend.index("require_next_font_mock"), frontend.index('"$NEXT_NODE"'))
+        self.assertIn(
+            'require_pinned_root_executable "$NEXT_NODE" "$NEXT_NODE_SHA256"',
+            frontend,
+        )
+        self.assertIn(
+            'exec env NODE_OPTIONS=--max-old-space-size=1536', frontend
+        )
+        self.assertIn(
+            '"$NEXT_NODE" "$FRONTEND_MODULES/next/dist/bin/next" dev --webpack -p "$FRONTEND_PORT"',
+            frontend,
+        )
+        self.assertNotIn("bun ./node_modules/.bin/next", frontend)
+        self.assertIn('readonly NEXT_NODE=/usr/local/bin/node', runner)
+        self.assertIn(
+            'readonly NEXT_NODE_SHA256=3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327',
+            runner,
+        )
         self.assertIn('readonly NEXT_FONT_ASSET_ROOT=/opt/self-hosted-ci/overworld-profile-assets', runner)
         self.assertIn('[[ -f "$path" && ! -L "$path" ]] || return 1', runner)
         self.assertIn("[[ \"$metadata\" == 0:0:644 ]]", runner)
@@ -978,6 +1002,27 @@ require_pinned_root_file "$CANDIDATE" "$EXPECTED_SHA"
             exact = root / "mock.cjs"
             exact.write_bytes(FONT_MOCK.read_bytes())
             self.assertEqual(0, run_guard(exact).returncode)
+
+            executable = root / "node"
+            executable.write_bytes(b"pinned-node-entrypoint")
+            executable_sha = hashlib.sha256(executable.read_bytes()).hexdigest()
+            executable_guard = f"""
+set -euo pipefail
+stat() {{ printf '%s\n' "$MOCK_METADATA"; }}
+{guard}
+require_pinned_root_executable "$CANDIDATE" "$EXPECTED_SHA"
+"""
+            for metadata, expected_status in (("0:0:755", 0), ("0:0:775", 1), ("1000:1000:755", 1)):
+                result = subprocess.run(
+                    ["bash"], input=executable_guard, capture_output=True, text=True,
+                    env={
+                        **os.environ,
+                        "CANDIDATE": str(executable),
+                        "EXPECTED_SHA": executable_sha,
+                        "MOCK_METADATA": metadata,
+                    },
+                )
+                self.assertEqual(expected_status, result.returncode, (metadata, result.stderr))
             exact.write_bytes(FONT_MOCK.read_bytes() + b"// drift\n")
             self.assertNotEqual(0, run_guard(exact).returncode)
             exact.write_bytes(FONT_MOCK.read_bytes())

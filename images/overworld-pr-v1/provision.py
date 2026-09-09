@@ -269,7 +269,7 @@ def re_full_sha256(value: str) -> bool:
 def require_manifest(value: object) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != {
         "schema_version", "profile", "repository", "architecture", "ubuntu_version",
-        "pgdg", "artifacts", "apt_packages", "marker_path", "inventory_path",
+        "pgdg", "artifacts", "apt_packages", "runtime_entrypoints", "marker_path", "inventory_path",
     }:
         raise SystemExit("profile manifest shape drifted")
     if value["schema_version"] != 1 or value["profile"] != "overworld-pr-v1":
@@ -298,6 +298,16 @@ def require_manifest(value: object) -> dict[str, object]:
         digest = artifact.get("sha256")
         if not isinstance(digest, str) or not re_full_sha256(digest):
             raise SystemExit(f"{name} digest is not lowercase SHA-256")
+    if value["runtime_entrypoints"] != {
+        "next_node": {
+            "path": "/usr/local/bin/node",
+            "sha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
+            "uid": 0,
+            "gid": 0,
+            "mode": "0755",
+        }
+    }:
+        raise SystemExit("runtime entrypoint contract drifted")
     return value
 
 
@@ -479,6 +489,8 @@ committed=true
             fetch(artifact["url"], artifact["sha256"], target)
             downloaded[name] = target
 
+        node_contract = manifest["runtime_entrypoints"]["next_node"]
+        node_path = Path(str(node_contract["path"]))
         with tarfile.open(downloaded["node"], "r:xz") as archive:
             expected_node = "node-v22.23.2-linux-x64/bin/node"
             candidates = [member for member in archive.getmembers() if member.name.endswith("/bin/node")]
@@ -487,10 +499,13 @@ committed=true
             source = archive.extractfile(candidates[0])
             if source is None:
                 raise SystemExit("Node runtime executable cannot be read")
-            with Path("/usr/local/bin/node").open("wb") as output:
+            with node_path.open("wb") as output:
                 shutil.copyfileobj(source, output)
-        os.chmod("/usr/local/bin/node", 0o755)
-        if run("node", "--version") != "v22.23.2":
+        os.chown(node_path, int(node_contract["uid"]), int(node_contract["gid"]))
+        node_path.chmod(int(str(node_contract["mode"]), 8))
+        if hashlib.sha256(node_path.read_bytes()).hexdigest() != node_contract["sha256"]:
+            raise SystemExit("Node runtime executable digest drifted")
+        if run(str(node_path), "--version") != "v22.23.2":
             raise SystemExit("Node runtime version drifted")
 
         with zipfile.ZipFile(downloaded["bun"]) as archive:
@@ -688,6 +703,17 @@ committed=true
                 'require("./node_modules/next/dist/server/node-environment-extensions/console-file.js")',
                 cwd=component_root,
             )
+            if run(
+                "runuser", "-u", "runner", "--", "env",
+                "HOME=/home/runner", "NODE_OPTIONS=--max-old-space-size=1536",
+                "HTTPS_PROXY=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",
+                "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
+                "ALL_PROXY=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",
+                "NO_PROXY=", "no_proxy=", str(node_path),
+                str(modules / "next/dist/bin/next"), "--version",
+                cwd=component_root,
+            ) != "Next.js v16.2.3":
+                raise SystemExit("pinned Next.js Node entrypoint smoke drifted")
         if tree_digest(modules) != before:
             raise SystemExit(f"{component} validation mutated its dependency snapshot")
     shutil.rmtree(smoke_root)
@@ -750,6 +776,7 @@ committed=true
         "manifest_sha256": manifest_sha,
         "artifacts": artifacts,
         "binaries": binary_inventory,
+        "runtime_entrypoints": manifest["runtime_entrypoints"],
         "dpkg": sorted(packages),
         "playwright_chromium_revision": artifacts["playwright"]["chromium_revision"],
         "repository_profile_digest": profile_digest,
