@@ -127,7 +127,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
         self.assertEqual("22.23.2", profile["toolchain"]["node"])
         self.assertEqual(
-            "d71150c856ee4d20d53c5ccbb7f4758356eb662aff26d03d6a3871b551a3e409",
+            "6789de6b434afea00f4107104cd37039102d772e23de8181155ca22b7b56d3c6",
             profile["runner_script_sha256"],
         )
         self.assertEqual(SCRIPT, script)
@@ -453,7 +453,7 @@ class RepositoryProfileTests(unittest.TestCase):
             '"$NEXT_NODE" "$FRONTEND_MODULES/next/dist/bin/next"',
             text,
         )
-        self.assertIn("bun ./node_modules/.bin/playwright test", text)
+        self.assertIn("BUN_OPTIONS=--smol bun --smol ./node_modules/.bin/playwright test", text)
         frontend_and_e2e = text[text.index("phase_frontend()") : text.rindex("\nrequire_image_contract\n")]
         self.assertNotIn("bun run lint", frontend_and_e2e)
         self.assertNotIn("bun run typecheck", frontend_and_e2e)
@@ -970,13 +970,16 @@ test -d {component}/node_modules
 
     def test_e2e_defers_frontend_until_all_pg_regressions_finish(self):
         text = SCRIPT.read_text()
+        playwright_function = text[
+            text.index("run_playwright_e2e() {") : text.index("\nphase_e2e() {")
+        ]
         e2e = text[text.index("phase_e2e() {") : text.index("\nrequire_image_contract\n")]
         first_backend = e2e.index("  start_backend\n")
         initial_backend_stop = e2e.index("  stop_local_service backend\n")
         pg_loop = e2e.index('  for pg_test in "${pg_tests[@]}"; do')
         clean_backend = e2e.index("  start_backend\n", first_backend + 1)
         frontend = e2e.index("  start_frontend\n")
-        playwright = e2e.index("bun ./node_modules/.bin/playwright test")
+        playwright = e2e.index("run_playwright_e2e")
         self.assertEqual(2, e2e.count("  start_backend\n"))
         self.assertLess(first_backend, initial_backend_stop)
         self.assertLess(initial_backend_stop, pg_loop)
@@ -998,6 +1001,7 @@ readonly MINIO_PORT=59002
 readonly BACKEND_PORT=3000
 readonly FRONTEND_PORT=3001
 readonly TRACE={trace}
+{playwright_function}
 {e2e}
 start_postgres() {{ printf 'postgres\n' >> "$TRACE"; }}
 start_minio() {{ printf 'minio\n' >> "$TRACE"; }}
@@ -1006,8 +1010,9 @@ stop_local_service() {{ printf 'stop:%s\n' "$1" >> "$TRACE"; }}
 start_frontend() {{ printf 'frontend\n' >> "$TRACE"; }}
 stop_local_services() {{ printf 'stop:all\n' >> "$TRACE"; }}
 stop_postgres() {{ printf 'stop:postgres\n' >> "$TRACE"; }}
-bun() {{ printf 'bun:%s\n' "$*" >> "$TRACE"; }}
+bun() {{ printf 'bun:%s:%s\n' "${{BUN_OPTIONS-unset}}" "$*" >> "$TRACE"; }}
 phase_e2e
+printf 'after:%s\n' "${{BUN_OPTIONS-unset}}" >> "$TRACE"
 """
             result = subprocess.run(
                 ["bash"],
@@ -1019,13 +1024,76 @@ phase_e2e
             self.assertEqual(0, result.returncode, result.stderr)
             events = trace.read_text().splitlines()
             self.assertEqual(["postgres", "minio", "backend", "stop:backend"], events[:4])
-            pg_events = [event for event in events if event.startswith("bun:test ")]
+            pg_events = [event for event in events if event.startswith("bun:unset:test ")]
             self.assertEqual(len(E2E_PG_TESTS), len(pg_events))
             last_pg = max(events.index(event) for event in pg_events)
             self.assertEqual("backend", events[last_pg + 1])
             self.assertEqual("frontend", events[last_pg + 2])
-            self.assertTrue(events[last_pg + 3].startswith("bun:./node_modules/.bin/playwright test "))
-            self.assertEqual(["stop:all", "stop:postgres"], events[-2:])
+            self.assertTrue(events[last_pg + 3].startswith("bun:--smol:--smol ./node_modules/.bin/playwright test "))
+            self.assertEqual(["stop:all", "stop:postgres", "after:unset"], events[-3:])
+
+    def test_playwright_smol_contract_is_executable_and_propagates_exit_status(self):
+        runner = SCRIPT.read_text()
+        playwright = runner[
+            runner.index("run_playwright_e2e() {") : runner.index("\nphase_e2e() {")
+        ]
+        self.assertEqual(1, runner.count("BUN_OPTIONS=--smol"))
+        self.assertEqual(1, runner.count("bun --smol ./node_modules/.bin/playwright"))
+
+        for expected_status in (0, 23):
+            with self.subTest(expected_status=expected_status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "frontend").mkdir()
+                trace = root / "trace"
+                fake_bun = root / "bun"
+                fake_bun.write_text(
+                    "#!/bin/sh\n"
+                    "printf 'BUN_OPTIONS=%s\\n' \"$BUN_OPTIONS\" > \"$TRACE\"\n"
+                    "printf 'CI=%s\\n' \"$CI\" >> \"$TRACE\"\n"
+                    "printf 'E2E_BASE_URL=%s\\n' \"$E2E_BASE_URL\" >> \"$TRACE\"\n"
+                    "printf 'PLAYWRIGHT_BROWSERS_PATH=%s\\n' \"$PLAYWRIGHT_BROWSERS_PATH\" >> \"$TRACE\"\n"
+                    "printf 'ARGV=%s\\n' \"$*\" >> \"$TRACE\"\n"
+                    "exit \"$FAKE_BUN_EXIT\"\n",
+                    encoding="utf-8",
+                )
+                fake_bun.chmod(0o755)
+                command = f"""
+set -uo pipefail
+readonly FRONTEND_PORT=3001
+{playwright}
+run_playwright_e2e
+status=$?
+printf 'BUN_OPTIONS_AFTER=%s\n' "${{BUN_OPTIONS-unset}}"
+printf 'STATUS=%s\n' "$status"
+"""
+                result = subprocess.run(
+                    ["bash"],
+                    cwd=root,
+                    input=command,
+                    capture_output=True,
+                    text=True,
+                    env={
+                        **os.environ,
+                        "PATH": f"{root}:/usr/bin:/bin",
+                        "TRACE": str(trace),
+                        "FAKE_BUN_EXIT": str(expected_status),
+                    },
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(
+                    f"BUN_OPTIONS_AFTER=unset\nSTATUS={expected_status}\n",
+                    result.stdout,
+                )
+                self.assertEqual(
+                    [
+                        "BUN_OPTIONS=--smol",
+                        "CI=true",
+                        "E2E_BASE_URL=http://localhost:3001",
+                        "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright",
+                        "ARGV=--smol ./node_modules/.bin/playwright test e2e/auth-flow.spec.ts e2e/a11y.spec.ts --reporter=list",
+                    ],
+                    trace.read_text(encoding="utf-8").splitlines(),
+                )
 
     def test_runner_uses_only_the_baked_root_owned_font_asset_path(self):
         runner = SCRIPT.read_text()
@@ -1096,7 +1164,8 @@ phase_e2e
 
         runner = SCRIPT.read_text()
         self.assertEqual(1, runner.count("NEXT_FONT_GOOGLE_MOCKED_RESPONSES="))
-        self.assertEqual(1, runner.count("NODE_OPTIONS=--max-old-space-size=1024"))
+        self.assertEqual(1, runner.count("NODE_OPTIONS=--max-old-space-size=1152"))
+        self.assertNotIn("NODE_OPTIONS=--max-old-space-size=1024", runner)
         self.assertNotIn("NODE_OPTIONS=--max-old-space-size=1536", runner)
         frontend = runner[runner.index("start_frontend() {") : runner.index("\nphase_e2e() {")]
         self.assertIn('NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK"', frontend)
@@ -1107,7 +1176,7 @@ phase_e2e
             frontend,
         )
         self.assertIn(
-            'exec env NODE_OPTIONS=--max-old-space-size=1024', frontend
+            'exec env NODE_OPTIONS=--max-old-space-size=1152', frontend
         )
         self.assertIn(
             '"$NEXT_NODE" ./node_modules/next/dist/bin/next dev --webpack -p "$FRONTEND_PORT"',
@@ -1157,7 +1226,7 @@ cat "$STATE_ROOT/frontend.log"
                 },
             )
             self.assertEqual(0, result.returncode, result.stderr)
-            self.assertIn("NODE_OPTIONS=--max-old-space-size=1024", result.stdout)
+            self.assertIn("NODE_OPTIONS=--max-old-space-size=1152", result.stdout)
             self.assertIn(
                 "ARGV=./node_modules/next/dist/bin/next dev --webpack -p 3000",
                 result.stdout,

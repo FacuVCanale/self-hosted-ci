@@ -1363,12 +1363,17 @@ cleanup
             'shutil.rmtree(smoke_root)',
             'before = tree_digest(modules)',
             'if tree_digest(modules) != before:',
-            '"NODE_OPTIONS=--max-old-space-size=1024"',
+            '"NODE_OPTIONS=--max-old-space-size=1152"',
             'str(node_path)',
             'str(modules / "next/dist/bin/next"), "--version"',
             'pinned Next.js Node entrypoint smoke drifted',
+            '"HOME=/home/runner", "BUN_OPTIONS=--smol"',
+            '"NO_PROXY=", "no_proxy=", "bun", "--smol"',
+            'str(modules / ".bin/playwright"), "--version"',
+            'pinned Playwright Bun --smol entrypoint smoke drifted',
         ):
             self.assertIn(offline_smoke_contract, source)
+        self.assertNotIn('"NODE_OPTIONS=--max-old-space-size=1024"', source)
         self.assertNotIn('"NODE_OPTIONS=--max-old-space-size=1536"', source)
         regenerated_cleanup = source.index(
             'remove_exact_regenerated_modules(overworld, dependencies, backend_snapshot_digest)',
@@ -1421,6 +1426,26 @@ cleanup
         self.assertIn("bun', str(modules / '.bin/eslint'), '--version", frontend_body)
         self.assertNotIn("bun', 'run', 'lint", frontend_body)
         self.assertIn("node-environment-extensions/console-file.js", frontend_body)
+        smol_smokes = [
+            node
+            for node in ast.walk(frontend_branch)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "run"
+            and any(
+                isinstance(argument, ast.Constant)
+                and argument.value == "BUN_OPTIONS=--smol"
+                for argument in node.args
+            )
+        ]
+        self.assertEqual(1, len(smol_smokes))
+        smol_smoke = ast.unparse(smol_smokes[0])
+        for same_call_contract in (
+            "'BUN_OPTIONS=--smol'",
+            "'bun', '--smol'",
+            "str(modules / '.bin/playwright'), '--version'",
+        ):
+            self.assertIn(same_call_contract, smol_smoke)
         self.assertLess(smoke_loop.body.index(frontend_branch), smoke_loop.body.index(digest_guard))
         self.assertFalse(
             any(
