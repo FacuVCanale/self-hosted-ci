@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from github_automation.coordinator import ReservePartialFailure
 from github_automation.crypto import spki_fingerprint
@@ -21,6 +22,7 @@ from github_automation.runner_jit_broker import (
     AllocationBroker,
     ExternalLiveWorkflowJobVerifier,
     GarmCliAllocationDriver,
+    JobStartedDenial,
     JobStartedContext,
     utc_now,
 )
@@ -43,6 +45,8 @@ def root_file(path: Path, maximum_size: int) -> bytes:
 def load_broker() -> AllocationBroker:
     config = json.loads(root_file(CONFIG, 65536))
     public_key = serialization.load_pem_public_key(root_file(PUBLIC_KEY, 4096))
+    if not isinstance(public_key, ed25519.Ed25519PublicKey):
+        raise RunnerJitError("allocation authority public key must be Ed25519")
     fingerprint = spki_fingerprint(public_key)
     configured_fingerprint = config.pop("allocation_signer_fingerprint", None)
     live_job_verifier = config.pop("live_job_verifier", None)
@@ -94,42 +98,93 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             self._worker_slots.release()
 
 
-def serve(broker: AllocationBroker) -> None:
+def job_started_handler(broker: AllocationBroker):
     class Handler(BaseHTTPRequestHandler):
         server_version = "self-hosted-ci-allocation-broker/1"
 
-        def log_message(self, fmt, *args):
+        def log_message(self, format, *args):
             return
 
+        def deny(self, phase, error_code, mismatched_fields=()):
+            denial = {
+                "error_code": error_code,
+                "mismatched_fields": list(mismatched_fields),
+                "phase": phase,
+            }
+            body = json.dumps(
+                denial,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+            print(
+                json.dumps(
+                    {"event": "job_started_denied", **denial},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_POST(self):
+            denial = None
             try:
                 if (
                     self.path != "/v1/job-started"
                     or self.headers.get("Content-Type") != "application/json"
                 ):
-                    raise RunnerJitError("unknown broker operation")
+                    denial = ("request", "unknown-operation", ())
+                    return
                 length = self.headers.get("Content-Length", "")
                 if not length.isdigit() or not 1 <= int(length) <= 16384:
-                    raise RunnerJitError("invalid broker request length")
-                value = json.loads(self.rfile.read(int(length)))
+                    denial = ("request", "invalid-length", ())
+                    return
+                try:
+                    value = json.loads(self.rfile.read(int(length)))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    denial = ("request", "invalid-json", ())
+                    return
                 if not isinstance(value, dict) or set(value) != {
                     "allocation_id",
                     "context",
                 }:
-                    raise RunnerJitError("job-started request requires exact fields")
+                    denial = ("request", "invalid-envelope", ())
+                    return
+                try:
+                    context = JobStartedContext.from_mapping(value["context"])
+                except RunnerJitError:
+                    denial = ("request", "invalid-context", ())
+                    return
                 broker.job_started(
                     value["allocation_id"],
-                    JobStartedContext.from_mapping(value["context"]),
+                    context,
                     now=utc_now(),
                 )
                 self.send_response(204)
                 self.end_headers()
-            except (OSError, ValueError, RunnerJitError, json.JSONDecodeError):
-                self.send_response(403)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
+            except JobStartedDenial as exc:
+                denial = (exc.phase, exc.error_code, exc.mismatched_fields)
+            except (OSError, ValueError, RunnerJitError):
+                denial = ("broker", "operation-denied", ())
+            except Exception:
+                denial = ("broker", "internal-error", ())
+            finally:
+                if denial is not None:
+                    self.deny(*denial)
 
-    server = BoundedThreadingHTTPServer(("10.254.0.1", 8079), Handler, max_workers=4)
+    return Handler
+
+
+def serve(broker: AllocationBroker) -> None:
+    handler = job_started_handler(broker)
+
+    server = BoundedThreadingHTTPServer(("10.254.0.1", 8079), handler, max_workers=4)
     server.serve_forever()
 
 

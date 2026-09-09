@@ -32,6 +32,49 @@ RUNNER_HOOK_SAFETY_MARGIN_SECONDS = 5
 RUNNER_CLAIM_ASSERT_ATTEMPTS = 3
 RUNNER_CLAIM_ASSERT_RETRY_SECONDS = 1
 RUNNER_CLAIM_ASSERT_BUDGET_SECONDS = 8
+SIGNED_CONTEXT_FIELDS = frozenset(
+    {
+        "repository_id",
+        "repository",
+        "dispatch_sha",
+        "tested_sha",
+        "workflow_ref",
+        "run_id",
+        "run_attempt",
+        "job_name",
+        "scale_set_name",
+    }
+)
+JOB_STARTED_ERROR_CODES = {
+    "request": frozenset({"invalid-context"}),
+    "allocation": frozenset({"binding-unavailable"}),
+    "signed-context": frozenset({"context-mismatch"}),
+    "runner-claim": frozenset({"claim-not-observed"}),
+    "live-job": frozenset({"job-not-verified"}),
+    "ledger-claim": frozenset({"claim-transition-denied"}),
+    "runner-disable": frozenset({"disable-failed"}),
+    "ledger-start": frozenset({"start-transition-denied"}),
+}
+
+
+class JobStartedDenial(RunnerJitError):
+    """Closed, value-free diagnostic for a rejected job-started request."""
+
+    def __init__(
+        self,
+        phase: str,
+        error_code: str,
+        *,
+        mismatched_fields: tuple[str, ...] = (),
+    ) -> None:
+        if error_code not in JOB_STARTED_ERROR_CODES.get(phase, ()):
+            raise ValueError("job-started diagnostic phase/code is not allowed")
+        if any(field not in SIGNED_CONTEXT_FIELDS for field in mismatched_fields):
+            raise ValueError("job-started diagnostic field is not allowed")
+        self.phase = phase
+        self.error_code = error_code
+        self.mismatched_fields = tuple(sorted(set(mismatched_fields)))
+        super().__init__(error_code)
 
 
 @dataclass(frozen=True)
@@ -80,12 +123,12 @@ class GarmAllocationDriver(Protocol):
 
     def assert_no_persistent_scale_set(self) -> None: ...
 
-    def ensure_disabled_scale_set(self, reservation: Mapping[str, Any]) -> str: ...
+    def ensure_disabled_scale_set(self, payload: Mapping[str, Any]) -> str: ...
 
     def bind_signed_allocation(
         self,
         scale_set_id: str,
-        reservation: Mapping[str, Any],
+        payload: Mapping[str, Any],
         envelope: Mapping[str, Any],
     ) -> None: ...
 
@@ -234,8 +277,18 @@ class AllocationBroker:
         """Called by ACTIONS_RUNNER_HOOK_JOB_STARTED before any workflow step."""
 
         if isinstance(context, Mapping):
-            context = JobStartedContext.from_mapping(context)
-        payload = self.ledger.payload(allocation_id)
+            try:
+                context = JobStartedContext.from_mapping(context)
+            except RunnerJitError as exc:
+                raise JobStartedDenial(
+                    "request", "invalid-context"
+                ) from exc
+        try:
+            payload = self.ledger.payload(allocation_id)
+        except RunnerJitError as exc:
+            raise JobStartedDenial(
+                "allocation", "binding-unavailable"
+            ) from exc
         expected = {
             "repository_id": payload["repository_id"],
             "repository": payload["repository"],
@@ -248,20 +301,55 @@ class AllocationBroker:
             "scale_set_name": payload["scale_set_name"],
         }
         observed = {field: getattr(context, field) for field in expected}
-        if observed != expected:
-            raise RunnerJitError(
-                "job-started context crossed the signed allocation binding"
-            )
-        scale_set_name, scale_set_id = self.ledger.scale_set_binding(allocation_id)
-        self._assert_runner_claim(
-            scale_set_id, scale_set_name, context.runner_name, payload
+        mismatched_fields = tuple(
+            field for field in expected if observed[field] != expected[field]
         )
-        self.live_job_verifier.verify(payload, context)
-        self.ledger.transition(allocation_id, "claim", now=now)
+        if mismatched_fields:
+            raise JobStartedDenial(
+                "signed-context",
+                "context-mismatch",
+                mismatched_fields=mismatched_fields,
+            )
+        try:
+            scale_set_name, scale_set_id = self.ledger.scale_set_binding(allocation_id)
+        except RunnerJitError as exc:
+            raise JobStartedDenial(
+                "allocation", "binding-unavailable"
+            ) from exc
+        try:
+            self._assert_runner_claim(
+                scale_set_id, scale_set_name, context.runner_name, payload
+            )
+        except RunnerJitError as exc:
+            raise JobStartedDenial(
+                "runner-claim", "claim-not-observed"
+            ) from exc
+        try:
+            self.live_job_verifier.verify(payload, context)
+        except (OSError, ValueError, RunnerJitError) as exc:
+            raise JobStartedDenial(
+                "live-job", "job-not-verified"
+            ) from exc
+        try:
+            self.ledger.transition(allocation_id, "claim", now=now)
+        except RunnerJitError as exc:
+            raise JobStartedDenial(
+                "ledger-claim", "claim-transition-denied"
+            ) from exc
         # Disabling immediately after the unique runner claims the job prevents
         # a second registration/job while allowing the claimed job to proceed.
-        self.driver.disable_scale_set(scale_set_id, scale_set_name)
-        self.ledger.transition(allocation_id, "start", now=now)
+        try:
+            self.driver.disable_scale_set(scale_set_id, scale_set_name)
+        except (OSError, ValueError, RunnerJitError) as exc:
+            raise JobStartedDenial(
+                "runner-disable", "disable-failed"
+            ) from exc
+        try:
+            self.ledger.transition(allocation_id, "start", now=now)
+        except RunnerJitError as exc:
+            raise JobStartedDenial(
+                "ledger-start", "start-transition-denied"
+            ) from exc
 
     def finish(
         self,
