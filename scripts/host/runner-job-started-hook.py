@@ -16,6 +16,39 @@ BROKER_URL = "http://10.254.0.1:8079/v1/job-started"
 ALLOCATION_ID_FILE = Path("/etc/self-hosted-ci/allocation-id")
 SCALE_SET_NAME_FILE = Path("/etc/self-hosted-ci/scale-set-name")
 ALLOCATION_FILE = Path("/etc/self-hosted-ci/allocation.json")
+DIAGNOSTIC_FIELDS = frozenset(
+    {
+        "repository_id",
+        "repository",
+        "dispatch_sha",
+        "tested_sha",
+        "workflow_ref",
+        "run_id",
+        "run_attempt",
+        "job_name",
+        "scale_set_name",
+    }
+)
+DIAGNOSTIC_COMPONENT = re.compile(r"[a-z][a-z0-9-]{0,31}")
+DIAGNOSTIC_CODES = {
+    "request": frozenset(
+        {
+            "unknown-operation",
+            "invalid-length",
+            "invalid-json",
+            "invalid-envelope",
+            "invalid-context",
+        }
+    ),
+    "allocation": frozenset({"binding-unavailable"}),
+    "signed-context": frozenset({"context-mismatch"}),
+    "runner-claim": frozenset({"claim-not-observed"}),
+    "live-job": frozenset({"job-not-verified"}),
+    "ledger-claim": frozenset({"claim-transition-denied"}),
+    "runner-disable": frozenset({"disable-failed"}),
+    "ledger-start": frozenset({"start-transition-denied"}),
+    "broker": frozenset({"operation-denied", "internal-error"}),
+}
 
 
 def read_root_binding(path: Path, pattern: str) -> str:
@@ -52,6 +85,43 @@ def read_tested_sha() -> str:
     if not isinstance(tested_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", tested_sha):
         raise ValueError("allocation binding tested merge SHA is invalid")
     return tested_sha
+
+
+def denial_diagnostic(raw: bytes) -> str:
+    if not raw or len(raw) > 4096:
+        raise ValueError("invalid denial response")
+    value = json.loads(raw)
+    if not isinstance(value, dict) or set(value) != {
+        "error_code",
+        "mismatched_fields",
+        "phase",
+    }:
+        raise ValueError("invalid denial response")
+    phase = value["phase"]
+    error_code = value["error_code"]
+    fields = value["mismatched_fields"]
+    if (
+        not isinstance(phase, str)
+        or DIAGNOSTIC_COMPONENT.fullmatch(phase) is None
+        or not isinstance(error_code, str)
+        or DIAGNOSTIC_COMPONENT.fullmatch(error_code) is None
+        or error_code not in DIAGNOSTIC_CODES.get(phase, ())
+        or not isinstance(fields, list)
+        or any(not isinstance(field, str) for field in fields)
+        or fields != sorted(set(fields))
+        or any(field not in DIAGNOSTIC_FIELDS for field in fields)
+    ):
+        raise ValueError("invalid denial response")
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":")).encode(
+        "ascii"
+    )
+    if raw != canonical:
+        raise ValueError("invalid denial response")
+    field_names = ",".join(fields) if fields else "none"
+    return (
+        f"phase={phase} error_code={error_code} "
+        f"mismatched_fields={field_names}"
+    )
 
 
 def main() -> int:
@@ -98,9 +168,33 @@ def main() -> int:
             response_body = response.read(4097)
             if response.status != 204 or response_body:
                 raise ValueError("allocation broker returned an unexpected response")
-    except (OSError, ValueError, UnicodeError, urllib.error.URLError) as exc:
+    except urllib.error.HTTPError as exc:
+        diagnostic = "phase=transport error_code=broker-http-error mismatched_fields=none"
+        if exc.code == 403:
+            try:
+                diagnostic = denial_diagnostic(exc.read(4097))
+            except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+                diagnostic = (
+                    "phase=transport error_code=invalid-denial-response "
+                    "mismatched_fields=none"
+                )
         print(
-            f"self-hosted-ci job-started hook blocked execution: {exc}", file=sys.stderr
+            f"self-hosted-ci job-started hook blocked execution: {diagnostic}",
+            file=sys.stderr,
+        )
+        return 1
+    except urllib.error.URLError:
+        print(
+            "self-hosted-ci job-started hook blocked execution: "
+            "phase=transport error_code=broker-unavailable mismatched_fields=none",
+            file=sys.stderr,
+        )
+        return 1
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+        print(
+            "self-hosted-ci job-started hook blocked execution: "
+            "phase=hook error_code=local-validation-failed mismatched_fields=none",
+            file=sys.stderr,
         )
         return 1
     return 0

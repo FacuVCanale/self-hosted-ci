@@ -3,12 +3,20 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stderr
 from unittest import mock
 import base64
+import http.client
+import http.server
+import importlib.util
+import io
 import json
+from email.message import Message
 import subprocess
 import tempfile
+import threading
 import unittest
+import urllib.error
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
@@ -25,6 +33,7 @@ from github_automation.runner_jit_broker import (
     GARM_CLI_COMMAND_TIMEOUT_SECONDS,
     GARM_RECOVERY_END_TO_END_SECONDS,
     GarmCliAllocationDriver,
+    JobStartedDenial,
     JobStartedContext,
     RUNNER_CLAIM_ASSERT_ATTEMPTS,
     RUNNER_CLAIM_ASSERT_BUDGET_SECONDS,
@@ -36,6 +45,23 @@ from tests.github_automation.test_runner_jit import payload, reservation
 
 
 NOW = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def load_script(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+BROKER_ENTRY = load_script(
+    "garm_allocation_broker_entry", ROOT / "scripts/host/garm-allocation-broker.py"
+)
+HOOK_ENTRY = load_script(
+    "runner_job_started_hook_entry", ROOT / "scripts/host/runner-job-started-hook.py"
+)
 
 
 class FakeGarm:
@@ -47,46 +73,55 @@ class FakeGarm:
     def assert_no_persistent_scale_set(self):
         self.events.append("assert-zero-persistent")
 
-    def ensure_disabled_scale_set(self, value):
+    def ensure_disabled_scale_set(self, payload):
         self.events.append("create-disabled")
-        self.scales[value["scale_set_name"]] = {"id": "41", "enabled": False}
+        self.scales[payload["scale_set_name"]] = {"id": "41", "enabled": False}
         return "41"
 
-    def bind_signed_allocation(self, scale_id, value, envelope):
+    def bind_signed_allocation(self, scale_set_id, payload, envelope):
         self.events.append("bind-signed")
 
-    def find_scale_set(self, name):
-        return self.scales.get(name, {}).get("id")
+    def find_scale_set(self, scale_set_name):
+        return self.scales.get(scale_set_name, {}).get("id")
 
-    def enable_scale_set(self, scale_id, name):
+    def enable_scale_set(self, scale_set_id, scale_set_name):
         self.events.append("enable")
-        self.scales[name]["enabled"] = True
+        self.scales[scale_set_name]["enabled"] = True
 
     def assert_runner_claim(
-        self, scale_id, name, runner_name, payload, *, timeout_seconds
+        self,
+        scale_set_id,
+        scale_set_name,
+        runner_name,
+        payload,
+        *,
+        timeout_seconds,
     ):
         self.events.append("claim")
-        if runner_name != self.runner_name or not self.scales[name]["enabled"]:
+        if (
+            runner_name != self.runner_name
+            or not self.scales[scale_set_name]["enabled"]
+        ):
             raise AssertionError
 
-    def disable_scale_set(self, scale_id, name):
+    def disable_scale_set(self, scale_set_id, scale_set_name):
         self.events.append("disable")
-        self.scales[name]["enabled"] = False
+        self.scales[scale_set_name]["enabled"] = False
 
-    def drain_scale_set(self, scale_id, name):
+    def drain_scale_set(self, scale_set_id, scale_set_name):
         self.events.append("drain")
 
-    def delete_scale_set(self, scale_id, name):
+    def delete_scale_set(self, scale_set_id, scale_set_name):
         self.events.append("delete")
-        self.scales.pop(name)
+        self.scales.pop(scale_set_name)
 
-    def assert_scale_set_absent(self, name):
+    def assert_scale_set_absent(self, scale_set_name):
         self.events.append("absent")
-        if name in self.scales:
+        if scale_set_name in self.scales:
             raise AssertionError
 
-    def measure_cleanup(self, allocation_id, name):
-        if name in self.scales:
+    def measure_cleanup(self, allocation_id, scale_set_name):
+        if scale_set_name in self.scales:
             raise AssertionError
         return {
             "registration_removed": True,
@@ -115,13 +150,13 @@ class DelayedCleanupGarm(FakeGarm):
         super().__init__()
         self.cleanup_measurements = 0
 
-    def measure_cleanup(self, allocation_id, name):
+    def measure_cleanup(self, allocation_id, scale_set_name):
         self.cleanup_measurements += 1
         if self.cleanup_measurements == 1:
             from github_automation.runner_jit import RunnerJitError
 
             raise RunnerJitError("allocation Incus instance survived cleanup")
-        return super().measure_cleanup(allocation_id, name)
+        return super().measure_cleanup(allocation_id, scale_set_name)
 
 
 class AllocationBrokerTests(unittest.TestCase):
@@ -168,6 +203,39 @@ class AllocationBrokerTests(unittest.TestCase):
         }
         value.update(changes)
         return JobStartedContext.from_mapping(value)
+
+    def context_mapping(self, **changes):
+        context = self.context(**changes)
+        return {
+            field: getattr(context, field)
+            for field in JobStartedContext.__dataclass_fields__
+        }
+
+    def post_job_started(self, broker, body):
+        server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), BROKER_ENTRY.job_started_handler(broker)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=2
+            )
+            with mock.patch.object(BROKER_ENTRY, "utc_now", return_value=NOW):
+                connection.request(
+                    "POST",
+                    "/v1/job-started",
+                    body=body,
+                    headers={"Content-Type": "application/json"},
+                )
+                response = connection.getresponse()
+                value = response.status, dict(response.headers), response.read()
+            connection.close()
+            return value
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_exact_transient_lifecycle_has_no_persistent_scale_set(self):
         prepared = self.broker.reserve(self.reservation, now=NOW)
@@ -282,7 +350,9 @@ class AllocationBrokerTests(unittest.TestCase):
             hook,
         )
         calls = []
-        driver._run = lambda *args: calls.append(args) or ([] if args[1] == "list" else {"id": 41})
+        driver._run = lambda *args, timeout_seconds=None: calls.append(args) or (
+            [] if args[1] == "list" else {"id": 41}
+        )
         self.assertEqual("41", driver.ensure_disabled_scale_set(org_payload))
         self.assertEqual(
             ("scaleset", "list", "--org", "12345678-1234-4123-8123-123456789abc"),
@@ -321,7 +391,7 @@ class AllocationBrokerTests(unittest.TestCase):
         )
         observed = {}
 
-        def run(*args):
+        def run(*args, timeout_seconds=None):
             if args[:2] == ("scaleset", "update"):
                 path = Path(args[args.index("--extra-specs-file") + 1])
                 observed["extra_specs"] = json.loads(path.read_text(encoding="utf-8"))
@@ -330,7 +400,9 @@ class AllocationBrokerTests(unittest.TestCase):
         driver._run = run
         show_calls = 0
 
-        def show_exact(*_args):
+        def show_exact(
+            scale_set_id, scale_set_name, enabled=None, *, timeout_seconds=None
+        ):
             nonlocal show_calls
             show_calls += 1
             return {"id": "1", "name": "jit"} if show_calls == 1 else dict(observed)
@@ -654,12 +726,210 @@ class AllocationBrokerTests(unittest.TestCase):
     def test_job_started_cross_binding_fails_before_disable_or_start(self):
         self.broker.reserve(self.reservation, now=NOW)
         self.broker.finalize(self.envelope, now=NOW)
-        with self.assertRaisesRegex(ValueError, "crossed"):
+        with self.assertRaisesRegex(JobStartedDenial, "context-mismatch"):
             self.broker.job_started(
                 self.payload["allocation_id"], self.context(run_id="999"), now=NOW
             )
         self.assertEqual("issued", self.ledger.get(self.payload["allocation_id"]).state)
         self.assertTrue(self.driver.scales[self.payload["scale_set_name"]]["enabled"])
+
+    def test_http_signed_context_mismatch_reports_only_field_names(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        mismatches = {
+            "repository_id": "sensitive-repository-id",
+            "repository": "sensitive/repository",
+            "dispatch_sha": "0" * 40,
+            "tested_sha": "1" * 40,
+            "workflow_ref": "sensitive/workflow-ref",
+            "run_id": "999999999",
+            "run_attempt": 999999999,
+            "job_name": "sensitive-job-name",
+            "scale_set_name": "sensitive-scale-set-name",
+        }
+
+        for field, sensitive_value in mismatches.items():
+            with self.subTest(field=field):
+                request = {
+                    "allocation_id": self.payload["allocation_id"],
+                    "context": self.context_mapping(**{field: sensitive_value}),
+                }
+                with redirect_stderr(io.StringIO()):
+                    status, headers, body = self.post_job_started(
+                        self.broker,
+                        json.dumps(request, separators=(",", ":")).encode(),
+                    )
+                self.assertEqual(403, status)
+                self.assertEqual("application/json", headers["Content-Type"])
+                self.assertLessEqual(len(body), 4096)
+                self.assertEqual(
+                    {
+                        "error_code": "context-mismatch",
+                        "mismatched_fields": [field],
+                        "phase": "signed-context",
+                    },
+                    json.loads(body),
+                )
+                self.assertEqual(
+                    json.dumps(
+                        json.loads(body), sort_keys=True, separators=(",", ":")
+                    ).encode("ascii"),
+                    body,
+                )
+                self.assertNotIn(str(sensitive_value).encode(), body)
+
+    def test_http_valid_job_started_is_204_without_denial(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        request = {
+            "allocation_id": self.payload["allocation_id"],
+            "context": self.context_mapping(),
+        }
+
+        status, headers, body = self.post_job_started(
+            self.broker, json.dumps(request, separators=(",", ":")).encode()
+        )
+
+        self.assertEqual(204, status)
+        self.assertEqual(b"", body)
+        self.assertNotIn("Content-Type", headers)
+
+    def test_http_invalid_json_and_generic_error_are_closed_and_redacted(self):
+        with redirect_stderr(io.StringIO()):
+            status, _, body = self.post_job_started(self.broker, b'{"secret":')
+        self.assertEqual(403, status)
+        self.assertEqual(
+            {
+                "error_code": "invalid-json",
+                "mismatched_fields": [],
+                "phase": "request",
+            },
+            json.loads(body),
+        )
+        self.assertNotIn(b"secret", body)
+
+        class BrokenBroker:
+            def job_started(self, allocation_id, context, *, now):
+                raise RuntimeError("sensitive-token-and-path-/root/private")
+
+        request = {
+            "allocation_id": self.payload["allocation_id"],
+            "context": self.context_mapping(),
+        }
+        with redirect_stderr(io.StringIO()):
+            status, _, body = self.post_job_started(
+                BrokenBroker(), json.dumps(request, separators=(",", ":")).encode()
+            )
+        self.assertEqual(403, status)
+        self.assertEqual(
+            {
+                "error_code": "internal-error",
+                "mismatched_fields": [],
+                "phase": "broker",
+            },
+            json.loads(body),
+        )
+        self.assertNotIn(b"sensitive", body)
+
+    def test_http_denial_logs_one_canonical_value_free_journal_line(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        sensitive_value = "sensitive-run-id-123456"
+        request = {
+            "allocation_id": self.payload["allocation_id"],
+            "context": self.context_mapping(run_id=sensitive_value),
+        }
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            status, _, _ = self.post_job_started(
+                self.broker,
+                json.dumps(request, separators=(",", ":")).encode(),
+            )
+
+        self.assertEqual(403, status)
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(1, len(lines))
+        self.assertEqual(
+            {
+                "error_code": "context-mismatch",
+                "event": "job_started_denied",
+                "mismatched_fields": ["run_id"],
+                "phase": "signed-context",
+            },
+            json.loads(lines[0]),
+        )
+        self.assertEqual(
+            json.dumps(
+                json.loads(lines[0]), sort_keys=True, separators=(",", ":")
+            ),
+            lines[0],
+        )
+        self.assertNotIn(sensitive_value, lines[0])
+        self.assertNotIn(self.payload["allocation_id"], lines[0])
+
+    def test_http_success_emits_no_denial_journal_line(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        request = {
+            "allocation_id": self.payload["allocation_id"],
+            "context": self.context_mapping(),
+        }
+        stderr = io.StringIO()
+
+        with redirect_stderr(stderr):
+            status, _, _ = self.post_job_started(
+                self.broker,
+                json.dumps(request, separators=(",", ":")).encode(),
+            )
+
+        self.assertEqual(204, status)
+        self.assertEqual("", stderr.getvalue())
+
+    def test_hook_prints_only_canonical_broker_denial(self):
+        body = json.dumps(
+            {
+                "error_code": "context-mismatch",
+                "mismatched_fields": ["run_id"],
+                "phase": "signed-context",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        failure = urllib.error.HTTPError(
+            HOOK_ENTRY.BROKER_URL,
+            403,
+            "sensitive-reason",
+            Message(),
+            io.BytesIO(body),
+        )
+        stderr = io.StringIO()
+
+        def required(name):
+            if name == "GITHUB_RUN_ATTEMPT":
+                return "1"
+            return "safe"
+
+        with (
+            mock.patch.object(
+                HOOK_ENTRY, "read_root_binding", side_effect=["a" * 36, "wsl-jit-" + "a" * 32]
+            ),
+            mock.patch.object(HOOK_ENTRY, "read_tested_sha", return_value="a" * 40),
+            mock.patch.object(HOOK_ENTRY, "required_env", side_effect=required),
+            mock.patch.object(HOOK_ENTRY.urllib.request, "urlopen", side_effect=failure),
+            redirect_stderr(stderr),
+        ):
+            self.assertEqual(1, HOOK_ENTRY.main())
+
+        output = stderr.getvalue()
+        failure.close()
+        self.assertIn(
+            "phase=signed-context error_code=context-mismatch "
+            "mismatched_fields=run_id",
+            output,
+        )
+        self.assertNotIn("sensitive", output)
+        self.assertNotIn(HOOK_ENTRY.BROKER_URL, output)
 
     def test_job_started_retries_only_transient_pre_transition_claim_assertion(self):
         class TransientClaimGarm(FakeGarm):
@@ -668,13 +938,22 @@ class AllocationBrokerTests(unittest.TestCase):
                 self.claim_attempts = 0
 
             def assert_runner_claim(
-                self, scale_id, name, runner_name, payload, *, timeout_seconds
+                self,
+                scale_set_id,
+                scale_set_name,
+                runner_name,
+                payload,
+                *,
+                timeout_seconds,
             ):
                 self.events.append("claim")
                 self.claim_attempts += 1
                 if self.claim_attempts == 1:
                     raise RunnerJitError("GARM claim is not visible yet")
-                if runner_name != self.runner_name or not self.scales[name]["enabled"]:
+                if (
+                    runner_name != self.runner_name
+                    or not self.scales[scale_set_name]["enabled"]
+                ):
                     raise AssertionError
 
         driver = TransientClaimGarm()
@@ -717,7 +996,13 @@ class AllocationBrokerTests(unittest.TestCase):
                 self.claim_attempts = 0
 
             def assert_runner_claim(
-                self, scale_id, name, runner_name, payload, *, timeout_seconds
+                self,
+                scale_set_id,
+                scale_set_name,
+                runner_name,
+                payload,
+                *,
+                timeout_seconds,
             ):
                 self.events.append("claim")
                 self.claim_attempts += 1
@@ -740,7 +1025,7 @@ class AllocationBrokerTests(unittest.TestCase):
             mock.patch.object(
                 self.ledger, "transition", wraps=self.ledger.transition
             ) as transition,
-            self.assertRaisesRegex(RunnerJitError, "remains absent"),
+            self.assertRaisesRegex(JobStartedDenial, "claim-not-observed"),
         ):
             broker.job_started(self.payload["allocation_id"], context, now=NOW)
 
@@ -768,7 +1053,13 @@ class AllocationBrokerTests(unittest.TestCase):
                 self.timeouts = []
 
             def assert_runner_claim(
-                self, scale_id, name, runner_name, payload, *, timeout_seconds
+                self,
+                scale_set_id,
+                scale_set_name,
+                runner_name,
+                payload,
+                *,
+                timeout_seconds,
             ):
                 self.events.append("claim")
                 self.timeouts.append(timeout_seconds)
@@ -797,7 +1088,7 @@ class AllocationBrokerTests(unittest.TestCase):
             mock.patch.object(
                 self.ledger, "transition", wraps=self.ledger.transition
             ) as transition,
-            self.assertRaisesRegex(RunnerJitError, "exceeded its budget"),
+            self.assertRaisesRegex(JobStartedDenial, "claim-not-observed"),
         ):
             broker.job_started(self.payload["allocation_id"], context, now=NOW)
 
