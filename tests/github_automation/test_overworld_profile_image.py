@@ -1151,7 +1151,18 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn("APT sources were not upgraded to HTTPS", source)
         self.assertIn('"apt-daily.timer", "apt-daily-upgrade.timer"', source)
         self.assertIn('"unattended-upgrades.service"', source)
-        self.assertLess(source.index('"unattended-upgrades.service"'), source.index('run("apt-get", "clean")'))
+        main = source[source.index("def main() -> int:") :]
+        self.assertEqual(1, main.count("stop_automatic_apt()"))
+        self.assertLess(main.index("stop_automatic_apt()"), main.index('apt_get("update"'))
+        self.assertEqual(4, main.count('apt_get("update"') + main.count('apt_get("install"'))
+        self.assertEqual(1, main.count('apt_get("clean")'))
+        self.assertEqual(1, source.count('run("apt-get"'))
+        self.assertNotIn("/var/lib/dpkg/lock", source)
+        self.assertNotIn("/var/lib/apt/lists", source)
+        self.assertNotIn('run("kill"', source)
+        self.assertNotIn('run("pkill"', source)
+        self.assertNotIn('shutil.rmtree("/var/lib/apt', source)
+        self.assertNotIn('Path("/var/lib/apt', source)
         self.assertIn('downloads = tx / "downloads"', source)
         self.assertIn("target = downloads / name", source)
         self.assertNotIn("target = tx / name", source)
@@ -1168,6 +1179,7 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn('copy_dependency_tree(backend_snapshot, backend)', source)
         self.assertIn('copy_dependency_tree(source_modules, target_modules)', source)
         self.assertIn('copy_dependency_tree(target_modules, sealed_frontend)', source)
+
         self.assertIn('detach_regular_files(sealed_frontend)', source)
         self.assertIn('normalize_tree_ownership(sealed_frontend)', source)
         self.assertIn('os.replace(temporary, path)', source)
@@ -1319,6 +1331,48 @@ class OverworldProfileImageTests(unittest.TestCase):
             "exit 125",
         ):
             self.assertIn(rollback_contract, source)
+
+    def test_apt_arbitration_stops_automatic_units_and_bounds_every_operation(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "overworld_image_provision_apt", PROFILE / "provision.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        calls: list[tuple[tuple[str, ...], object]] = []
+
+        def capture(*args: str, env: object = None, cwd: object = None) -> str:
+            self.assertIsNone(cwd)
+            calls.append((args, env))
+            return ""
+
+        setattr(module, "run", capture)
+        environment = {"DEBIAN_FRONTEND": "noninteractive"}
+        module.stop_automatic_apt()
+        module.apt_get("update", env=environment)
+        module.apt_get("install", "-y", "package", env=environment)
+        module.apt_get("clean")
+
+        self.assertEqual(
+            [
+                ((
+                    "/usr/bin/timeout", "--signal=TERM", "--kill-after=5s", "300s",
+                    "systemctl", "stop", "apt-daily.timer", "apt-daily-upgrade.timer",
+                ), None),
+                ((
+                    "/usr/bin/timeout", "--signal=TERM", "--kill-after=5s", "300s",
+                    "systemctl", "stop", "apt-daily.service",
+                    "apt-daily-upgrade.service", "unattended-upgrades.service",
+                ), None),
+                (("apt-get", "-o", "DPkg::Lock::Timeout=300", "update"), environment),
+                ((
+                    "apt-get", "-o", "DPkg::Lock::Timeout=300",
+                    "install", "-y", "package",
+                ), environment),
+                (("apt-get", "-o", "DPkg::Lock::Timeout=300", "clean"), None),
+            ],
+            calls,
+        )
 
     def test_runner_finalizer_rollback_rejects_unproven_systemd_state(self) -> None:
         source = (PROFILE / "provision.py").read_text(encoding="utf-8")
