@@ -474,7 +474,7 @@ require_next_font_mock() {
 start_frontend() {
   require_next_font_mock
   require_pinned_root_executable "$NEXT_NODE" "$NEXT_NODE_SHA256"
-  (cd frontend && exec env NODE_OPTIONS=--max-old-space-size=1024 \
+  (cd frontend && exec env NODE_OPTIONS=--max-old-space-size=1152 \
     NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK" \
     FRONTEND_PORT=$FRONTEND_PORT BACKEND_URL="http://127.0.0.1:$BACKEND_PORT" \
     "$NEXT_NODE" ./node_modules/next/dist/bin/next dev --webpack -p "$FRONTEND_PORT") >"$STATE_ROOT/frontend.log" 2>&1 &
@@ -484,6 +484,11 @@ start_frontend() {
     [[ "$attempt" -lt 60 ]] || return 1
     sleep 2
   done
+}
+
+run_playwright_e2e() {
+  (cd frontend && CI=true E2E_BASE_URL="http://localhost:$FRONTEND_PORT" PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
+    BUN_OPTIONS=--smol bun --smol ./node_modules/.bin/playwright test e2e/auth-flow.spec.ts e2e/a11y.spec.ts --reporter=list)
 }
 
 phase_e2e() {
@@ -537,8 +542,7 @@ phase_e2e() {
   for pg_test in "${pg_tests[@]}"; do (cd backend && TEST_DATABASE_URL="$DATABASE_URL" bun test "$pg_test"); done
   start_backend
   start_frontend
-  (cd frontend && CI=true E2E_BASE_URL="http://localhost:$FRONTEND_PORT" PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
-    bun ./node_modules/.bin/playwright test e2e/auth-flow.spec.ts e2e/a11y.spec.ts --reporter=list)
+  run_playwright_e2e
   stop_local_services
   stop_postgres
 }

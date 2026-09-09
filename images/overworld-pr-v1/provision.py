@@ -716,7 +716,7 @@ committed=true
             )
             if run(
                 "runuser", "-u", "runner", "--", "env",
-                "HOME=/home/runner", "NODE_OPTIONS=--max-old-space-size=1024",
+                "HOME=/home/runner", "NODE_OPTIONS=--max-old-space-size=1152",
                 "HTTPS_PROXY=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",
                 "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
                 "ALL_PROXY=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",
@@ -725,6 +725,17 @@ committed=true
                 cwd=component_root,
             ) != "Next.js v16.2.3":
                 raise SystemExit("pinned Next.js Node entrypoint smoke drifted")
+            if run(
+                "runuser", "-u", "runner", "--", "env",
+                "HOME=/home/runner", "BUN_OPTIONS=--smol",
+                "HTTPS_PROXY=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",
+                "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
+                "ALL_PROXY=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",
+                "NO_PROXY=", "no_proxy=", "bun", "--smol",
+                str(modules / ".bin/playwright"), "--version",
+                cwd=component_root,
+            ) != "Version 1.59.1":
+                raise SystemExit("pinned Playwright Bun --smol entrypoint smoke drifted")
         if tree_digest(modules) != before:
             raise SystemExit(f"{component} validation mutated its dependency snapshot")
     shutil.rmtree(smoke_root)
