@@ -186,12 +186,30 @@ def tree_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
-def remove_exact_regenerated_modules(overworld: Path, dependencies: Path) -> None:
+def seed_backend_snapshot_for_frontend(overworld: Path, dependencies: Path) -> str:
     backend = overworld / "backend/node_modules"
     backend_snapshot = dependencies / "backend-node_modules"
+    if backend.exists() or backend.is_symlink():
+        raise SystemExit("backend dependency seed destination is not absent")
+    expected_digest = tree_digest(backend_snapshot)
+    copy_dependency_tree(backend_snapshot, backend)
+    if tree_digest(backend_snapshot) != expected_digest:
+        raise SystemExit("backend dependency snapshot mutated while seeding frontend")
+    if tree_digest(backend) != expected_digest:
+        raise SystemExit("frontend received a drifted backend dependency seed")
+    return expected_digest
+
+
+def remove_exact_regenerated_modules(
+    overworld: Path, dependencies: Path, expected_backend_digest: str
+) -> None:
+    backend = overworld / "backend/node_modules"
+    backend_snapshot = dependencies / "backend-node_modules"
+    if tree_digest(backend_snapshot) != expected_backend_digest:
+        raise SystemExit("backend dependency snapshot mutated during frontend install")
     if backend.is_symlink() or not backend.is_dir():
         raise SystemExit("expected exact regenerated backend dependency tree")
-    if tree_digest(backend) != tree_digest(backend_snapshot):
+    if tree_digest(backend) != expected_backend_digest:
         raise SystemExit("regenerated backend dependency tree drifted")
     shutil.rmtree(backend)
     if backend.exists() or backend.is_symlink():
@@ -576,6 +594,7 @@ committed=true
     bun_cache = dependencies / "bun-cache"
     snapshots = profile["dependency_snapshots"]
     assert isinstance(snapshots, dict)
+    backend_snapshot_digest = ""
     for component in ("backend", "frontend"):
         component_root = overworld / component
         snapshot = snapshots[component]
@@ -595,6 +614,7 @@ committed=true
         target_modules = dependencies / f"{component}-node_modules"
         if component == "backend":
             shutil.move(str(source_modules), target_modules)
+            backend_snapshot_digest = seed_backend_snapshot_for_frontend(overworld, dependencies)
         else:
             copy_dependency_tree(source_modules, target_modules)
             shutil.rmtree(source_modules)
@@ -611,9 +631,11 @@ committed=true
                     raise SystemExit("frontend dependency snapshot retained a symlink ancestor")
                 current = current.parent
     shutil.rmtree(next_package)
-    # Frontend's postinstall recreates the exact backend dependency tree while
-    # emitting the shared type bridge. Accept only that observed byproduct.
-    remove_exact_regenerated_modules(overworld, dependencies)
+    # Frontend's postinstall emits the shared type bridge through the exact
+    # backend snapshot seed. Reject mutation of either the seed or its source.
+    if not backend_snapshot_digest:
+        raise SystemExit("backend dependency snapshot was not seeded for frontend")
+    remove_exact_regenerated_modules(overworld, dependencies, backend_snapshot_digest)
     for path in dependencies.rglob("*"):
         if path.is_dir():
             path.chmod((path.stat().st_mode & ~0o022) | 0o055)
