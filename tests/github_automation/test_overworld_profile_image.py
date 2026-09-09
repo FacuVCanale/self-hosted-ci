@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import tarfile
 import tempfile
@@ -241,6 +242,61 @@ class OverworldProfileImageTests(unittest.TestCase):
             with mock.patch.object(module.os, "chown"), mock.patch.object(module.os, "walk", side_effect=fail_walk):
                 with self.assertRaisesRegex(PermissionError, "scandir denied"):
                     module.normalize_tree_ownership(root)
+
+    def test_profile_assets_are_installed_with_exact_inventory_and_modes(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "overworld_image_profile_assets", PROFILE / "provision.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "installed"
+            with mock.patch.object(
+                module, "PROFILE_ASSETS", PROFILE / "profile-assets"
+            ), mock.patch.object(
+                module, "PROFILE_ASSET_ROOT", destination
+            ), mock.patch.object(module.os, "chown"):
+                previous_umask = os.umask(0o077)
+                try:
+                    inventory = module.install_profile_assets()
+                finally:
+                    os.umask(previous_umask)
+
+            self.assertEqual(set(module.PROFILE_ASSET_FILES), set(inventory))
+            self.assertEqual(0o755, destination.stat().st_mode & 0o777)
+            self.assertEqual(0o755, (destination / "fonts").stat().st_mode & 0o777)
+            for relative, (size, sha256) in module.PROFILE_ASSET_FILES.items():
+                installed = destination / relative
+                self.assertEqual(0o644, installed.stat().st_mode & 0o777)
+                self.assertEqual(size, installed.stat().st_size)
+                self.assertEqual(sha256, hashlib.sha256(installed.read_bytes()).hexdigest())
+                self.assertEqual(
+                    {"mode": "0644", "sha256": sha256, "size": size},
+                    inventory[relative],
+                )
+
+    def test_profile_asset_drift_fails_before_destination_creation(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "overworld_image_profile_asset_drift", PROFILE / "provision.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            shutil.copytree(PROFILE / "profile-assets", source)
+            (source / "fonts/README.md").write_text("drift\n", encoding="utf-8")
+            destination = root / "installed"
+            with mock.patch.object(module, "PROFILE_ASSETS", source), mock.patch.object(
+                module, "PROFILE_ASSET_ROOT", destination
+            ), self.assertRaisesRegex(SystemExit, "profile asset identity drifted"):
+                module.install_profile_assets()
+            self.assertFalse(destination.exists())
 
     def test_dependency_tree_copy_preserves_functional_internal_bin_symlinks(self) -> None:
         spec = importlib.util.spec_from_file_location(
@@ -703,9 +759,24 @@ class OverworldProfileImageTests(unittest.TestCase):
             f"{frontend_modules}/next/package.json",
             f"{frontend_modules}/next/dist/server/dev/browser-logs/receive-logs.js",
             f"{frontend_modules}/next/dist/server/dev/browser-logs/file-logger.js",
+            "/opt/self-hosted-ci/overworld-profile-assets/next-font-google-mocked-responses.cjs",
+            "/opt/self-hosted-ci/overworld-profile-assets/fonts/FragmentMono-OFL.txt",
+            "/opt/self-hosted-ci/overworld-profile-assets/fonts/FragmentMono-Regular.ttf",
+            "/opt/self-hosted-ci/overworld-profile-assets/fonts/Geist-OFL.txt",
+            "/opt/self-hosted-ci/overworld-profile-assets/fonts/GeistMono-OFL.txt",
+            "/opt/self-hosted-ci/overworld-profile-assets/fonts/GeistMono[wght].ttf",
+            "/opt/self-hosted-ci/overworld-profile-assets/fonts/Geist[wght].ttf",
+            "/opt/self-hosted-ci/overworld-profile-assets/fonts/README.md",
         )
         sentinel_block = source.split("readonly PUBLISH_SENTINELS=(", 1)[1].split(")", 1)[0]
-        self.assertEqual(sentinels, tuple(line.strip() for line in sentinel_block.splitlines() if line.strip()))
+        self.assertEqual(
+            sentinels,
+            tuple(
+                shlex.split(line.strip())[0]
+                for line in sentinel_block.splitlines()
+                if line.strip()
+            ),
+        )
         builder_without_seal = source.replace(".frontend-node-modules-sealed", "")
         self.assertNotIn("frontend-node-modules", builder_without_seal)
         cleanup = source.split(
@@ -1292,6 +1363,23 @@ printf normalized > "$MOCK_CHMOD_MARKER"
         ):
             self.assertIn(target, stager)
             self.assertIn(target, verifier)
+        profile_assets = (
+            "next-font-google-mocked-responses.cjs",
+            "fonts/FragmentMono-OFL.txt",
+            "fonts/FragmentMono-Regular.ttf",
+            "fonts/Geist-OFL.txt",
+            "fonts/GeistMono-OFL.txt",
+            "fonts/GeistMono[wght].ttf",
+            "fonts/Geist[wght].ttf",
+            "fonts/README.md",
+        )
+        asset_target_root = "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/profile-assets"
+        self.assertIn(asset_target_root, provision)
+        for relative in profile_assets:
+            target = f"{asset_target_root}/{relative}"
+            self.assertIn(target, stager)
+            self.assertIn(target, verifier)
+            self.assertIn(relative, provision)
 
 
 if __name__ == "__main__":

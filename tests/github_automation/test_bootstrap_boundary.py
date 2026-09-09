@@ -529,6 +529,19 @@ class BootstrapBoundaryTests(unittest.TestCase):
 
     def test_public_manifest_binds_exact_mapping_and_current_bytes(self):
         manifest = public_manifest()
+        mapped_sources = {artifact["source"] for artifact in manifest["artifacts"]}
+        self.assertTrue(
+            {
+                "images/overworld-pr-v1/profile-assets/next-font-google-mocked-responses.cjs",
+                "images/overworld-pr-v1/profile-assets/fonts/FragmentMono-OFL.txt",
+                "images/overworld-pr-v1/profile-assets/fonts/FragmentMono-Regular.ttf",
+                "images/overworld-pr-v1/profile-assets/fonts/Geist-OFL.txt",
+                "images/overworld-pr-v1/profile-assets/fonts/GeistMono-OFL.txt",
+                "images/overworld-pr-v1/profile-assets/fonts/GeistMono[wght].ttf",
+                "images/overworld-pr-v1/profile-assets/fonts/Geist[wght].ttf",
+                "images/overworld-pr-v1/profile-assets/fonts/README.md",
+            }.issubset(mapped_sources)
+        )
         changed = copy.deepcopy(manifest)
         changed["artifacts"].pop()
         with self.assertRaisesRegex(BootstrapBoundaryError, "public-manifest"):

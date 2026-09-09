@@ -194,6 +194,22 @@ install -d -o root -g root -m 0755 "/usr/local/share/self-hosted-ci/images/overw
 for profile_config in manifest.json squid-build.conf; do
   install -o root -g root -m 0644 "${repo_root}/images/overworld-pr-v1/${profile_config}" "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/${profile_config}"
 done
+install -d -o root -g root -m 0755 \
+  "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/profile-assets" \
+  "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/profile-assets/fonts"
+for profile_asset in \
+  next-font-google-mocked-responses.cjs \
+  fonts/FragmentMono-OFL.txt \
+  fonts/FragmentMono-Regular.ttf \
+  fonts/Geist-OFL.txt \
+  fonts/GeistMono-OFL.txt \
+  'fonts/GeistMono[wght].ttf' \
+  'fonts/Geist[wght].ttf' \
+  fonts/README.md; do
+  install -o root -g root -m 0644 \
+    "${repo_root}/images/overworld-pr-v1/profile-assets/${profile_asset}" \
+    "/usr/local/share/self-hosted-ci/images/overworld-pr-v1/profile-assets/${profile_asset}"
+done
 install -d -o root -g root -m 0755 "/usr/local/share/self-hosted-ci/repository-profiles/overworld"
 install -o root -g root -m 0644 "${repo_root}/repository_profiles/overworld/profile.json" "/usr/local/share/self-hosted-ci/repository-profiles/overworld/profile.json"
 for profile_script in provision.py verify.py; do

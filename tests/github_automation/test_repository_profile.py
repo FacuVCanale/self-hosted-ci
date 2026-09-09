@@ -24,6 +24,7 @@ from github_automation.repository_profile import (
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "repository_profiles/overworld/profile.json"
 SCRIPT = ROOT / "repository_profiles/overworld/run-overworld-ci.sh"
+FONT_MOCK = ROOT / "images/overworld-pr-v1/profile-assets/next-font-google-mocked-responses.cjs"
 REPOSITORY = "alethia-earth/Overworld"
 PROFILE_ID = "overworld-ci-v1"
 INVENTORY_TESTS = {
@@ -269,7 +270,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn("bun ./node_modules/.bin/eslint --max-warnings 0", text)
         self.assertIn("bun ./node_modules/.bin/tsc --noEmit", text)
         self.assertIn("NODE_ENV=test bun ./node_modules/.bin/jest --ci", text)
-        self.assertIn('bun ./node_modules/.bin/next dev -p "$FRONTEND_PORT"', text)
+        self.assertIn('bun ./node_modules/.bin/next dev --webpack -p "$FRONTEND_PORT"', text)
         self.assertIn("bun ./node_modules/.bin/playwright test", text)
         frontend_and_e2e = text[text.index("phase_frontend()") : text.rindex("\nrequire_image_contract\n")]
         self.assertNotIn("bun run lint", frontend_and_e2e)
@@ -286,7 +287,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn("export UV_OFFLINE=1 UV_NO_SYNC=1", text)
         self.assertNotIn("--runInBand", text)
         self.assertNotIn("bun run build)", text)
-        self.assertIn('bun ./node_modules/.bin/next dev -p "$FRONTEND_PORT")', text)
+        self.assertIn('bun ./node_modules/.bin/next dev --webpack -p "$FRONTEND_PORT")', text)
         self.assertIn("start_postgres 16", text)
         self.assertIn("start_postgres 17", text)
         self.assertIn("PG16_DATA", text)
@@ -398,6 +399,257 @@ test -d {component}/node_modules
         inventory_block = inventory_block.split("local pg_test", 1)[0]
         self.assertEqual(INVENTORY_TESTS, set(re.findall(r"src/[A-Za-z0-9_./-]+\.pg\.test\.ts", inventory_block)))
         self.assertEqual(1, text.count("export INVENTORY_REPORT_CONTRACT=true"))
+
+    def test_e2e_defers_frontend_until_all_pg_regressions_finish(self):
+        text = SCRIPT.read_text()
+        e2e = text[text.index("phase_e2e() {") : text.index("\nrequire_image_contract\n")]
+        first_backend = e2e.index("  start_backend\n")
+        initial_backend_stop = e2e.index("  stop_local_service backend\n")
+        pg_loop = e2e.index('  for pg_test in "${pg_tests[@]}"; do')
+        clean_backend = e2e.index("  start_backend\n", first_backend + 1)
+        frontend = e2e.index("  start_frontend\n")
+        playwright = e2e.index("bun ./node_modules/.bin/playwright test")
+        self.assertEqual(2, e2e.count("  start_backend\n"))
+        self.assertLess(first_backend, initial_backend_stop)
+        self.assertLess(initial_backend_stop, pg_loop)
+        self.assertLess(pg_loop, clean_backend)
+        self.assertLess(clean_backend, frontend)
+        self.assertLess(frontend, playwright)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "backend").mkdir()
+            (root / "frontend").mkdir()
+            trace = root / "trace"
+            command = f"""
+set -euo pipefail
+readonly STATE_ROOT={root / 'state'}
+readonly PG17_DATA={root / 'pg17'}
+readonly E2E_PGPORT=55433
+readonly MINIO_PORT=59002
+readonly BACKEND_PORT=3000
+readonly FRONTEND_PORT=3001
+readonly TRACE={trace}
+{e2e}
+start_postgres() {{ printf 'postgres\n' >> "$TRACE"; }}
+start_minio() {{ printf 'minio\n' >> "$TRACE"; }}
+start_backend() {{ printf 'backend\n' >> "$TRACE"; }}
+stop_local_service() {{ printf 'stop:%s\n' "$1" >> "$TRACE"; }}
+start_frontend() {{ printf 'frontend\n' >> "$TRACE"; }}
+stop_local_services() {{ printf 'stop:all\n' >> "$TRACE"; }}
+stop_postgres() {{ printf 'stop:postgres\n' >> "$TRACE"; }}
+bun() {{ printf 'bun:%s\n' "$*" >> "$TRACE"; }}
+phase_e2e
+"""
+            result = subprocess.run(
+                ["bash"],
+                cwd=root,
+                input=command,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            events = trace.read_text().splitlines()
+            self.assertEqual(["postgres", "minio", "backend", "stop:backend"], events[:4])
+            pg_events = [event for event in events if event.startswith("bun:test ")]
+            self.assertEqual(len(E2E_PG_TESTS), len(pg_events))
+            last_pg = max(events.index(event) for event in pg_events)
+            self.assertEqual("backend", events[last_pg + 1])
+            self.assertEqual("frontend", events[last_pg + 2])
+            self.assertTrue(events[last_pg + 3].startswith("bun:./node_modules/.bin/playwright test "))
+            self.assertEqual(["stop:all", "stop:postgres"], events[-2:])
+
+    def test_runner_uses_only_the_baked_root_owned_font_asset_path(self):
+        runner = SCRIPT.read_text()
+        self.assertIn(
+            "readonly NEXT_FONT_ASSET_ROOT=/opt/self-hosted-ci/overworld-profile-assets",
+            runner,
+        )
+        self.assertNotIn("SCRIPT_DIR", runner)
+        self.assertNotIn("repository_profiles/overworld/fonts", runner)
+
+    def test_next_font_mock_is_exact_scoped_and_fails_closed_on_drift(self):
+        expected_urls = {
+            "https://fonts.googleapis.com/css2?family=Fragment+Mono:wght@400&display=swap",
+            "https://fonts.googleapis.com/css2?family=Geist:wght@100..900&display=swap",
+            "https://fonts.googleapis.com/css2?family=Geist+Mono:wght@100..900&display=swap",
+        }
+        responses = json.loads(
+            subprocess.check_output(
+                [
+                    "node",
+                    "-e",
+                    "process.stdout.write(JSON.stringify(require(process.argv[1])))",
+                    str(FONT_MOCK),
+                ],
+                text=True,
+            )
+        )
+        self.assertEqual(expected_urls, set(responses))
+        expected_fonts = {
+            "FragmentMono-Regular.ttf": "0fe011f425873c2e0fc73a189e394e340ad48d2b9a99a576bdeec75cee000460",
+            "Geist[wght].ttf": "73894e0448cae90a92b6c2f8732b7bb9acb7b94c418bff559dad4a18e1de9659",
+            "GeistMono[wght].ttf": "d00e590b8eb3a59acc329b2d044fd143ae935090b7da33199ebee27cc7de8196",
+        }
+        observed_fonts = set()
+        for css in responses.values():
+            lines = css.splitlines()
+            self.assertIn("/* latin */", lines)
+            self.assertEqual(1, lines.count("  font-display: swap;"))
+            matches = [re.search(r"src: url\((.+?)\)", line) for line in lines]
+            font_paths = [Path(match.group(1)) for match in matches if match]
+            self.assertEqual(1, len(font_paths))
+            font = font_paths[0]
+            self.assertTrue(font.is_absolute())
+            self.assertEqual(FONT_MOCK.parent / "fonts", font.parent)
+            observed_fonts.add(font.name)
+        self.assertEqual(set(expected_fonts), observed_fonts)
+
+        provenance = (FONT_MOCK.parent / "fonts/README.md").read_text()
+        self.assertIn("0cf764bb712367b6079cbb4fd2353e6f54ec6850", provenance)
+        for name, expected_sha in expected_fonts.items():
+            font = FONT_MOCK.parent / "fonts" / name
+            self.assertTrue(font.is_file())
+            self.assertFalse(font.is_symlink())
+            self.assertEqual(0, font.stat().st_mode & 0o022)
+            self.assertEqual(expected_sha, hashlib.sha256(font.read_bytes()).hexdigest())
+            self.assertIn(name, provenance)
+            self.assertIn(expected_sha, provenance)
+        for upstream_path in (
+            "ofl/geist/Geist[wght].ttf",
+            "ofl/geistmono/GeistMono[wght].ttf",
+            "ofl/fragmentmono/FragmentMono-Regular.ttf",
+        ):
+            self.assertIn(upstream_path, provenance)
+        for license_name in ("Geist-OFL.txt", "GeistMono-OFL.txt", "FragmentMono-OFL.txt"):
+            license_text = (FONT_MOCK.parent / "fonts" / license_name).read_text()
+            self.assertIn("SIL OPEN FONT LICENSE Version 1.1", license_text)
+            self.assertIn(license_name, provenance)
+
+        runner = SCRIPT.read_text()
+        self.assertEqual(1, runner.count("NEXT_FONT_GOOGLE_MOCKED_RESPONSES="))
+        frontend = runner[runner.index("start_frontend() {") : runner.index("\nphase_e2e() {")]
+        self.assertIn('NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK"', frontend)
+        self.assertNotIn("NEXT_FONT_GOOGLE_MOCKED_RESPONSES", runner[: runner.index("start_frontend() {")])
+        self.assertLess(frontend.index("require_next_font_mock"), frontend.index("next dev"))
+        self.assertIn('next dev --webpack -p "$FRONTEND_PORT"', frontend)
+        self.assertIn('readonly NEXT_FONT_ASSET_ROOT=/opt/self-hosted-ci/overworld-profile-assets', runner)
+        self.assertIn('[[ -f "$path" && ! -L "$path" ]] || return 1', runner)
+        self.assertIn("[[ \"$metadata\" == 0:0:644 ]]", runner)
+        self.assertNotIn("$SCRIPT_DIR/next-font-google", runner)
+
+        guard = runner[
+            runner.index("require_pinned_root_file() {") : runner.index("\nstart_frontend() {")
+        ]
+        expected_sha = hashlib.sha256(FONT_MOCK.read_bytes()).hexdigest()
+        self.assertIn(f"NEXT_FONT_MOCK_SHA256={expected_sha}", runner)
+        for expected_font_sha in expected_fonts.values():
+            self.assertIn(expected_font_sha, runner)
+        for path_variable, sha_variable in (
+            ("NEXT_FONT_MOCK", "NEXT_FONT_MOCK_SHA256"),
+            ("GEIST_FONT", "GEIST_FONT_SHA256"),
+            ("GEIST_MONO_FONT", "GEIST_MONO_FONT_SHA256"),
+            ("FRAGMENT_MONO_FONT", "FRAGMENT_MONO_FONT_SHA256"),
+        ):
+            self.assertIn(
+                f'require_pinned_root_file "${path_variable}" "${sha_variable}"',
+                guard,
+            )
+
+        def run_guard(candidate: Path, metadata: str = "0:0:644") -> subprocess.CompletedProcess[str]:
+            command = f"""
+set -euo pipefail
+stat() {{ printf '%s\n' "$MOCK_METADATA"; }}
+{guard}
+require_pinned_root_file "$CANDIDATE" "$EXPECTED_SHA"
+"""
+            return subprocess.run(
+                ["bash"],
+                input=command,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "CANDIDATE": str(candidate),
+                    "EXPECTED_SHA": expected_sha,
+                    "MOCK_METADATA": metadata,
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            exact = root / "mock.cjs"
+            exact.write_bytes(FONT_MOCK.read_bytes())
+            self.assertEqual(0, run_guard(exact).returncode)
+            exact.write_bytes(FONT_MOCK.read_bytes() + b"// drift\n")
+            self.assertNotEqual(0, run_guard(exact).returncode)
+            exact.write_bytes(FONT_MOCK.read_bytes())
+            self.assertNotEqual(0, run_guard(exact, "0:0:664").returncode)
+            self.assertNotEqual(0, run_guard(exact, "1000:1000:644").returncode)
+            link = root / "link.cjs"
+            link.symlink_to(exact)
+            self.assertNotEqual(0, run_guard(link).returncode)
+            self.assertNotEqual(0, run_guard(root).returncode)
+
+    def test_next_16_font_loader_smoke_when_package_is_available(self):
+        configured = os.environ.get("SELF_HOSTED_CI_NEXT_NODE_MODULES")
+        candidates = [Path(configured)] if configured else []
+        candidates.append(Path("/opt/self-hosted-ci/overworld-deps/frontend-node_modules"))
+        node_modules = next(
+            (
+                candidate
+                for candidate in candidates
+                if (candidate / "next/package.json").is_file()
+                and json.loads((candidate / "next/package.json").read_text()).get("version")
+                == "16.2.3"
+            ),
+            None,
+        )
+        if node_modules is None:
+            self.skipTest("Next 16.2.3 node_modules is not available")
+        script = r"""
+const crypto = require('node:crypto');
+const path = require('node:path');
+const modules = process.argv[1];
+const mockPath = process.argv[2];
+const { fetchCSSFromGoogleFonts } = require(path.join(modules, 'next/dist/compiled/@next/font/dist/google/fetch-css-from-google-fonts.js'));
+const { findFontFilesInCss } = require(path.join(modules, 'next/dist/compiled/@next/font/dist/google/find-font-files-in-css.js'));
+const { fetchFontFile } = require(path.join(modules, 'next/dist/compiled/@next/font/dist/google/fetch-font-file.js'));
+const responses = require(mockPath);
+(async () => {
+  const result = [];
+  for (const url of Object.keys(responses)) {
+    const css = await fetchCSSFromGoogleFonts(url, 'reviewed font', true);
+    const files = findFontFilesInCss(css, ['latin']);
+    if (files.length !== 1 || !files[0].preloadFontFile || !path.isAbsolute(files[0].googleFontFileUrl)) process.exit(2);
+    const bytes = await fetchFontFile(files[0].googleFontFileUrl, true);
+    result.push({
+      name: path.basename(files[0].googleFontFileUrl),
+      sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+    });
+  }
+  process.stdout.write(JSON.stringify(result));
+})().catch(() => process.exit(3));
+"""
+        result = subprocess.run(
+            ["node", "-e", script, str(node_modules), str(FONT_MOCK)],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "NODE_PATH": str(node_modules),
+                "NEXT_FONT_GOOGLE_MOCKED_RESPONSES": str(FONT_MOCK),
+            },
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            {
+                ("FragmentMono-Regular.ttf", "0fe011f425873c2e0fc73a189e394e340ad48d2b9a99a576bdeec75cee000460"),
+                ("Geist[wght].ttf", "73894e0448cae90a92b6c2f8732b7bb9acb7b94c418bff559dad4a18e1de9659"),
+                ("GeistMono[wght].ttf", "d00e590b8eb3a59acc329b2d044fd143ae935090b7da33199ebee27cc7de8196"),
+            },
+            {(item["name"], item["sha256"]) for item in json.loads(result.stdout)},
+        )
 
     def test_workflow_order_is_validator_checkout_scrub_then_pinned_profile_action(self):
         text = (ROOT / "templates/workflows/ci-jit-pilot-child.yml").read_text()
