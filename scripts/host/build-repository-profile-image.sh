@@ -351,29 +351,50 @@ source "${TRANSACTION_LIB}"
 acquire_transaction_lock
 zero_runtime_state||die 'GARM scale sets and ci-jit instances must both be empty'
 
+declare -A was_active
+for service in "${FENCED_SERVICES[@]}"; do
+  observed_state="$(systemctl show "${service}" --property=ActiveState --value)" \
+    || die "initial service state cannot be observed: ${service}"
+  case "${observed_state}" in
+    active|inactive) was_active["${service}"]="${observed_state}" ;;
+    *) die "initial service state is not exact: ${service}" ;;
+  esac
+done
+
 install -d -o root -g root -m 0700 /var/lib/self-hosted-ci/profile-image-build
 workdir="$(mktemp -d /var/lib/self-hosted-ci/profile-image-build/transaction.XXXXXX)"
 chmod 0700 "${workdir}"
 builder="overworld-image-builder-${RANDOM}${RANDOM}"
 published_verifier="${builder}-published"
 published_fingerprint=''; alias_published=false; transaction_succeeded=false
-declare -A was_active
-for service in "${FENCED_SERVICES[@]}"; do
-  if systemctl is-active --quiet "${service}"; then was_active["${service}"]=true; else was_active["${service}"]=false; fi
-done
+
+emit_built_receipt(){
+  printf '{"status":"built","project":"%s","profile":"overworld-pr-v1","base_fingerprint":"%s","manifest_sha256":"%s","candidate_alias":"%s","fingerprint":"%s","builder_privileged":false,"builder_nesting":false,"credentials_persisted":false,"alias_moved":false}\n' \
+    "${PROJECT}" "${base_fingerprint}" "${manifest_sha}" "${candidate_alias}" "${published_fingerprint}"
+}
 
 cleanup(){
-  local status=$?
+  local status=$? instance_inventory listeners observed_state observer_status service
   trap - ERR EXIT
   set +e
-  if incus list "${builder}" --project "${PROJECT}" --format csv -c n 2>/dev/null | grep -Fxq "${builder}"; then
-    incus delete "${builder}" --project "${PROJECT}" --force >/dev/null 2>&1||status=1
-  fi
-  if incus list "${builder}" --project "${PROJECT}" --format csv -c n 2>/dev/null | grep -Fxq "${builder}"; then status=1; fi
-  if incus list "${published_verifier}" --project "${PROJECT}" --format csv -c n 2>/dev/null | grep -Fxq "${published_verifier}"; then
-    incus delete "${published_verifier}" --project "${PROJECT}" --force >/dev/null 2>&1||status=1
-  fi
-  if incus list "${published_verifier}" --project "${PROJECT}" --format csv -c n 2>/dev/null | grep -Fxq "${published_verifier}"; then status=1; fi
+  for service in "${builder}" "${published_verifier}"; do
+    instance_inventory="$(incus list "${service}" --project "${PROJECT}" --format csv -c n 2>/dev/null)"
+    observer_status=$?
+    if [[ "${observer_status}" -ne 0 ]]; then
+      status=1
+      continue
+    fi
+    if printf '%s\n' "${instance_inventory}" | grep -Fxq "${service}"; then
+      incus delete "${service}" --project "${PROJECT}" --force >/dev/null 2>&1||status=1
+    fi
+    instance_inventory="$(incus list "${service}" --project "${PROJECT}" --format csv -c n 2>/dev/null)"
+    observer_status=$?
+    if [[ "${observer_status}" -ne 0 ]]; then
+      status=1
+    elif printf '%s\n' "${instance_inventory}" | grep -Fxq "${service}"; then
+      status=1
+    fi
+  done
   if [[ "${transaction_succeeded}" != true && "${alias_published}" == true ]]; then
     if [[ -z "${published_fingerprint}" ]]; then
       published_fingerprint="$(python3 - "${candidate_alias}" "$(incus image alias list --project "${PROJECT}" --format json 2>/dev/null)" <<'PY' 2>/dev/null
@@ -395,18 +416,34 @@ PY
     fi
   fi
   systemctl stop "${BUILD_PROXY_UNIT}" >/dev/null 2>&1||status=1
-  systemctl is-active --quiet "${BUILD_PROXY_UNIT}" && status=1
-  if ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq '(^|:)8079$'; then status=1; fi
+  observed_state="$(systemctl show "${BUILD_PROXY_UNIT}" --property=ActiveState --value 2>/dev/null)"
+  observer_status=$?
+  if [[ "${observer_status}" -ne 0 || "${observed_state}" != inactive ]]; then status=1; fi
+  listeners="$(ss -H -ltn 2>/dev/null)"
+  observer_status=$?
+  if [[ "${observer_status}" -ne 0 ]]; then
+    status=1
+  elif printf '%s\n' "${listeners}" | awk '{print $4}' | grep -Eq '(^|:)8079$'; then
+    status=1
+  fi
   systemctl reset-failed "${BUILD_PROXY_UNIT}" >/dev/null 2>&1||true
   for service in "${FENCED_SERVICES[@]}"; do
-    if [[ "${was_active[${service}]}" == true ]]; then
+    if [[ "${was_active[${service}]}" == active ]]; then
       systemctl start "${service}" >/dev/null 2>&1||status=1
-      systemctl is-active --quiet "${service}"||status=1
     else
-      systemctl is-active --quiet "${service}" && status=1
+      systemctl stop "${service}" >/dev/null 2>&1||status=1
     fi
+    observed_state="$(systemctl show "${service}" --property=ActiveState --value 2>/dev/null)"
+    observer_status=$?
+    if [[ "${observer_status}" -ne 0 || "${observed_state}" != "${was_active[${service}]}" ]]; then status=1; fi
   done
-  rm -rf --one-file-system "${workdir}"
+  rm -rf --one-file-system "${workdir}"||status=1
+  [[ ! -e "${workdir}" ]]||status=1
+  if [[ "${status}" -eq 0 && "${transaction_succeeded}" == true ]]; then
+    emit_built_receipt||status=1
+  elif [[ "${status}" -eq 0 ]]; then
+    status=1
+  fi
   exit "${status}"
 }
 trap cleanup EXIT
@@ -643,5 +680,3 @@ if incus list "${published_verifier}" --project "${PROJECT}" --format csv -c n |
   die 'published image verifier cleanup failed'
 fi
 transaction_succeeded=true
-printf '{"status":"built","project":"%s","profile":"overworld-pr-v1","base_fingerprint":"%s","manifest_sha256":"%s","candidate_alias":"%s","fingerprint":"%s","builder_privileged":false,"builder_nesting":false,"credentials_persisted":false,"alias_moved":false}\n' \
-  "${PROJECT}" "${base_fingerprint}" "${manifest_sha}" "${candidate_alias}" "${published_fingerprint}"
