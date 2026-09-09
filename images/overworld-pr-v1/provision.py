@@ -716,7 +716,7 @@ committed=true
             )
             if run(
                 "runuser", "-u", "runner", "--", "env",
-                "HOME=/home/runner", "NODE_OPTIONS=--max-old-space-size=1536",
+                "HOME=/home/runner", "NODE_OPTIONS=--max-old-space-size=1024",
                 "HTTPS_PROXY=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",
                 "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
                 "ALL_PROXY=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",

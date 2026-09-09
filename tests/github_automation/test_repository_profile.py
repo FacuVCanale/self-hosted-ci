@@ -123,7 +123,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
         self.assertEqual("22.23.2", profile["toolchain"]["node"])
         self.assertEqual(
-            "0b3915d873e5d93778cc1f658a7a62054add7ce8dd83e971f2f627bb4ecb3869",
+            "d71150c856ee4d20d53c5ccbb7f4758356eb662aff26d03d6a3871b551a3e409",
             profile["runner_script_sha256"],
         )
         self.assertEqual(SCRIPT, script)
@@ -936,7 +936,8 @@ phase_e2e
 
         runner = SCRIPT.read_text()
         self.assertEqual(1, runner.count("NEXT_FONT_GOOGLE_MOCKED_RESPONSES="))
-        self.assertEqual(1, runner.count("NODE_OPTIONS=--max-old-space-size=1536"))
+        self.assertEqual(1, runner.count("NODE_OPTIONS=--max-old-space-size=1024"))
+        self.assertNotIn("NODE_OPTIONS=--max-old-space-size=1536", runner)
         frontend = runner[runner.index("start_frontend() {") : runner.index("\nphase_e2e() {")]
         self.assertIn('NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK"', frontend)
         self.assertNotIn("NEXT_FONT_GOOGLE_MOCKED_RESPONSES", runner[: runner.index("start_frontend() {")])
@@ -946,7 +947,7 @@ phase_e2e
             frontend,
         )
         self.assertIn(
-            'exec env NODE_OPTIONS=--max-old-space-size=1536', frontend
+            'exec env NODE_OPTIONS=--max-old-space-size=1024', frontend
         )
         self.assertIn(
             '"$NEXT_NODE" ./node_modules/next/dist/bin/next dev --webpack -p "$FRONTEND_PORT"',
@@ -954,6 +955,53 @@ phase_e2e
         )
         self.assertNotIn('$FRONTEND_MODULES/next/dist/bin/next', frontend)
         self.assertNotIn("bun ./node_modules/.bin/next", frontend)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "frontend").mkdir()
+            state = root / "state"
+            state.mkdir()
+            fake_node = root / "pinned-node"
+            fake_node.write_text(
+                "#!/bin/sh\n"
+                "printf 'NODE_OPTIONS=%s\\n' \"$NODE_OPTIONS\"\n"
+                "printf 'ARGV=%s\\n' \"$*\"\n"
+            )
+            fake_node.chmod(0o755)
+            command = f"""
+set -euo pipefail
+require_next_font_mock() {{ :; }}
+require_pinned_root_executable() {{ :; }}
+curl() {{ return 0; }}
+NEXT_NODE="$FAKE_NODE"
+NEXT_NODE_SHA256=unused-by-fake-guard
+NEXT_FONT_MOCK=/unused/font-mock.cjs
+FRONTEND_PORT=3000
+BACKEND_PORT=3001
+STATE_ROOT="$FAKE_STATE_ROOT"
+{frontend}
+start_frontend
+wait "$(cat "$STATE_ROOT/frontend.pid")"
+cat "$STATE_ROOT/frontend.log"
+"""
+            result = subprocess.run(
+                ["bash"],
+                cwd=root,
+                input=command,
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "FAKE_NODE": str(fake_node),
+                    "FAKE_STATE_ROOT": str(state),
+                },
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("NODE_OPTIONS=--max-old-space-size=1024", result.stdout)
+            self.assertIn(
+                "ARGV=./node_modules/next/dist/bin/next dev --webpack -p 3000",
+                result.stdout,
+            )
         self.assertIn('readonly NEXT_NODE=/usr/local/bin/node', runner)
         self.assertIn(
             'readonly NEXT_NODE_SHA256=3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327',
