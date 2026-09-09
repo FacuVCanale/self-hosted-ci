@@ -9,12 +9,16 @@ import subprocess
 import tempfile
 import unittest
 import re
+import signal
 import sys
+import time
+from unittest import mock
 
 from jsonschema import Draft202012Validator
 
 from github_automation.repository_profile import (
     RepositoryProfileError,
+    _run_profile,
     load_profile,
     verify_image_marker,
     verify_source_workflow,
@@ -222,6 +226,162 @@ class RepositoryProfileTests(unittest.TestCase):
             changed["source_workflow_sha256"] = "0" * 64
             with self.assertRaisesRegex(RepositoryProfileError, "differs"):
                 verify_source_workflow(changed, base_sha=sha, workspace=workspace)
+
+    def test_profile_action_replaces_shell_and_supervisor_preserves_launch_contract(self):
+        action = (ROOT / "actions/run-repository-profile/action.yml").read_text()
+        self.assertIn('run: exec python3 "$GITHUB_ACTION_PATH/run.py"', action)
+        self.assertNotIn('run: python3 "$GITHUB_ACTION_PATH/run.py"', action)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            script = root / "profile.py"
+            script.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                "print(json.dumps({"
+                "'pid': os.getpid(), 'argv': sys.argv, 'cwd': os.getcwd(), "
+                "'sentinel': os.environ.get('EXACT_SENTINEL')}))\n"
+                "raise SystemExit(7)\n"
+            )
+            script.chmod(0o755)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; "
+                    "from github_automation.repository_profile import _run_profile; "
+                    f"raise SystemExit(_run_profile(Path({str(script)!r}), "
+                    f"workspace=Path({str(workspace)!r}), "
+                    "environment={'EXACT_SENTINEL': 'preserved'}))",
+                ],
+                cwd=ROOT,
+                env={**os.environ, "PYTHONPATH": str(ROOT)},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(7, result.returncode, result.stderr)
+            observed = json.loads(result.stdout)
+            self.assertEqual([str(script)], observed["argv"])
+            self.assertEqual(str(workspace.resolve()), observed["cwd"])
+            self.assertEqual("preserved", observed["sentinel"])
+
+    def test_profile_supervisor_preserves_exact_spawn_contract_and_restores_handlers_on_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            script = workspace / "profile.sh"
+            environment = {"PROFILE_TESTED_MERGE_SHA": "a" * 40, "EXACT": "value"}
+            previous_handlers = {
+                signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
+            }
+
+            with mock.patch(
+                "github_automation.repository_profile.subprocess.Popen",
+                side_effect=OSError("spawn blocked for test"),
+            ) as popen:
+                with self.assertRaisesRegex(OSError, "spawn blocked"):
+                    _run_profile(script, workspace=workspace, environment=environment)
+
+            popen.assert_called_once_with(
+                [str(script)],
+                cwd=workspace,
+                env=environment,
+                shell=False,
+                start_new_session=True,
+            )
+            self.assertEqual(
+                previous_handlers,
+                {
+                    signum: signal.getsignal(signum)
+                    for signum in (signal.SIGINT, signal.SIGTERM)
+                },
+            )
+
+    def test_profile_supervisor_forwards_pre_spawn_signal_after_process_group_exists(self):
+        class Process:
+            pid = 424242
+
+            @staticmethod
+            def wait() -> int:
+                return -signal.SIGTERM
+
+        def spawn(*_args: object, **_kwargs: object) -> Process:
+            signal.raise_signal(signal.SIGTERM)
+            return Process()
+
+        def observe_group(process_group: int, signum: int) -> None:
+            self.assertEqual(424242, process_group)
+            if signum == 0:
+                raise ProcessLookupError
+
+        with mock.patch(
+            "github_automation.repository_profile.subprocess.Popen", side_effect=spawn
+        ), mock.patch(
+            "github_automation.repository_profile.os.killpg", side_effect=observe_group
+        ) as killpg:
+            status = _run_profile(
+                Path("/profile.sh"), workspace=Path("/workspace"), environment={}
+            )
+
+        self.assertEqual(143, status)
+        self.assertEqual(
+            [mock.call(424242, signal.SIGTERM), mock.call(424242, 0)],
+            killpg.call_args_list,
+        )
+
+    def test_profile_supervisor_cancellation_runs_trap_and_removes_process_group(self):
+        for signum, expected_status in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
+            with self.subTest(signal=signum), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                ready = root / "ready"
+                cleanup = root / "cleanup"
+                script = root / "profile.sh"
+                script.write_text(
+                    "#!/bin/bash\n"
+                    "set -u\n"
+                    "cleanup() { printf '%s' \"$1\" > \"$CLEANUP_PATH\"; }\n"
+                    "trap 'cleanup 130; exit 130' INT\n"
+                    "trap 'cleanup 143; exit 143' TERM\n"
+                    "/bin/sleep 300 &\n"
+                    "grandchild=$!\n"
+                    "printf '%s %s\\n' \"$$\" \"$grandchild\" > \"$READY_PATH\"\n"
+                    "wait \"$grandchild\"\n"
+                )
+                script.chmod(0o755)
+                command = (
+                    "from pathlib import Path; "
+                    "from github_automation.repository_profile import _run_profile; "
+                    f"raise SystemExit(_run_profile(Path({str(script)!r}), "
+                    f"workspace=Path({str(root)!r}), environment={{"
+                    f"'READY_PATH': {str(ready)!r}, 'CLEANUP_PATH': {str(cleanup)!r}}}))"
+                )
+                entry = subprocess.Popen(
+                    [sys.executable, "-c", command],
+                    cwd=ROOT,
+                    env={**os.environ, "PYTHONPATH": str(ROOT)},
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                for _ in range(500):
+                    if ready.is_file():
+                        break
+                    time.sleep(0.01)
+                else:
+                    entry.kill()
+                    self.fail("profile child and grandchild did not become ready")
+                leader, grandchild = (int(value) for value in ready.read_text().split())
+                os.kill(entry.pid, signum)
+                stdout, stderr = entry.communicate(timeout=10)
+                self.assertEqual(expected_status, entry.returncode, (stdout, stderr))
+                self.assertEqual(str(expected_status), cleanup.read_text())
+                for process in (leader, grandchild):
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(process, 0)
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(leader, 0)
 
     def test_runner_has_fixed_phases_memory_instrumentation_and_no_privileged_installers(self):
         text = SCRIPT.read_text()
