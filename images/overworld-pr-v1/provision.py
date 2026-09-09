@@ -38,6 +38,23 @@ def run(*args: str, env: dict[str, str] | None = None, cwd: Path | None = None) 
     return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, env=env, cwd=cwd).stdout.strip()
 
 
+def apt_get(*args: str, env: dict[str, str] | None = None) -> str:
+    return run("apt-get", "-o", "DPkg::Lock::Timeout=300", *args, env=env)
+
+
+def stop_automatic_apt() -> None:
+    run(
+        "/usr/bin/timeout", "--signal=TERM", "--kill-after=5s", "300s",
+        "systemctl", "stop", "apt-daily.timer", "apt-daily-upgrade.timer",
+    )
+    run(
+        "/usr/bin/timeout", "--signal=TERM", "--kill-after=5s", "300s",
+        "systemctl", "stop",
+        "apt-daily.service", "apt-daily-upgrade.service",
+        "unattended-upgrades.service",
+    )
+
+
 def fetch(url: str, digest: str, target: Path) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "self-hosted-ci-image-builder/1"})
     with urllib.request.urlopen(request, timeout=180) as response, target.open("wb") as output:
@@ -437,6 +454,7 @@ committed=true
     )
     finalizer.chmod(0o700)
     env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+    stop_automatic_apt()
     sources = Path("/etc/apt/sources.list.d/ubuntu.sources")
     if sources.exists():
         text = sources.read_text(encoding="utf-8")
@@ -449,8 +467,8 @@ committed=true
         ]
         if not active_source_lines or any("http://" in line for line in active_source_lines):
             raise SystemExit("APT sources were not upgraded to HTTPS")
-    run("apt-get", "update", env=env)
-    run("apt-get", "install", "-y", "--no-install-recommends", "gnupg", env=env)
+    apt_get("update", env=env)
+    apt_get("install", "-y", "--no-install-recommends", "gnupg", env=env)
     pgdg = manifest["pgdg"]
     assert isinstance(pgdg, dict)
     with tempfile.TemporaryDirectory(prefix="pgdg-key-") as key_temp:
@@ -465,8 +483,8 @@ committed=true
         f'deb [signed-by=/usr/share/keyrings/postgresql-pgdg.gpg] {pgdg["repository"]} {pgdg["suite"]} main\n',
         encoding="utf-8",
     )
-    run("apt-get", "update", env=env)
-    run("apt-get", "install", "-y", "--no-install-recommends", *manifest["apt_packages"], env=env)
+    apt_get("update", env=env)
+    apt_get("install", "-y", "--no-install-recommends", *manifest["apt_packages"], env=env)
     for package, prefix in (
         ("postgresql-16-postgis-3", "3.4."),
         ("postgresql-17-postgis-3", "3.5."),
@@ -566,14 +584,7 @@ committed=true
         browser_contract = Path("/opt/self-hosted-ci/browsers")
         browser_contract.mkdir(parents=True, exist_ok=False)
         (browser_contract / "chromium").symlink_to(chromium.parent)
-    run(
-        "systemctl", "stop",
-        "apt-daily.timer", "apt-daily-upgrade.timer",
-        "apt-daily.service", "apt-daily-upgrade.service",
-        "unattended-upgrades.service",
-    )
-    run("apt-get", "clean")
-    shutil.rmtree("/var/lib/apt/lists", ignore_errors=True)
+    apt_get("clean")
 
     dependencies = Path("/opt/self-hosted-ci/overworld-deps")
     dependencies.mkdir(parents=True, exist_ok=False)
