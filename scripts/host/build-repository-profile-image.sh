@@ -5,6 +5,16 @@ readonly PROJECT=ci-jit
 readonly FENCED_SERVICES=(self-hosted-ci-garm.service self-hosted-ci-allocation-broker.service self-hosted-ci-outbound-worker.service)
 readonly BUILD_PROXY_UNIT=self-hosted-ci-profile-build-proxy.service
 readonly TRANSACTION_LIB=/usr/local/lib/self-hosted-ci/garm-jit-transaction-lib.sh
+readonly PROFILE_ASSETS=(
+  next-font-google-mocked-responses.cjs
+  fonts/FragmentMono-OFL.txt
+  fonts/FragmentMono-Regular.ttf
+  fonts/Geist-OFL.txt
+  fonts/GeistMono-OFL.txt
+  'fonts/GeistMono[wght].ttf'
+  'fonts/Geist[wght].ttf'
+  fonts/README.md
+)
 readonly PUBLISH_SENTINELS=(
   /etc/self-hosted-ci/repository-profile-image-v1.json
   /usr/local/bin/node
@@ -13,6 +23,14 @@ readonly PUBLISH_SENTINELS=(
   /opt/self-hosted-ci/overworld-deps/frontend-node_modules/next/package.json
   /opt/self-hosted-ci/overworld-deps/frontend-node_modules/next/dist/server/dev/browser-logs/receive-logs.js
   /opt/self-hosted-ci/overworld-deps/frontend-node_modules/next/dist/server/dev/browser-logs/file-logger.js
+  /opt/self-hosted-ci/overworld-profile-assets/next-font-google-mocked-responses.cjs
+  /opt/self-hosted-ci/overworld-profile-assets/fonts/FragmentMono-OFL.txt
+  /opt/self-hosted-ci/overworld-profile-assets/fonts/FragmentMono-Regular.ttf
+  /opt/self-hosted-ci/overworld-profile-assets/fonts/Geist-OFL.txt
+  /opt/self-hosted-ci/overworld-profile-assets/fonts/GeistMono-OFL.txt
+  '/opt/self-hosted-ci/overworld-profile-assets/fonts/GeistMono[wght].ttf'
+  '/opt/self-hosted-ci/overworld-profile-assets/fonts/Geist[wght].ttf'
+  /opt/self-hosted-ci/overworld-profile-assets/fonts/README.md
 )
 
 die(){ printf 'repository-profile image build blocked: %s\n' "$*" >&2; exit 1; }
@@ -430,6 +448,11 @@ incus start "${builder}" --project "${PROJECT}"
 wait_for_cloud_init_readiness "${builder}" || die 'builder cloud-init readiness guard failed'
 for file in manifest.json provision.py verify.py; do
   incus file push "${profile_dir}/${file}" "${builder}/run/self-hosted-ci-profile-build/${file}" --project "${PROJECT}" --create-dirs --mode=0700
+done
+for profile_asset in "${PROFILE_ASSETS[@]}"; do
+  incus file push "${profile_dir}/profile-assets/${profile_asset}" \
+    "${builder}/run/self-hosted-ci-profile-build/profile-assets/${profile_asset}" \
+    --project "${PROJECT}" --create-dirs --mode=0600
 done
 incus file push "${repository_profile}" "${builder}/run/self-hosted-ci-profile-build/profile.json" --project "${PROJECT}" --create-dirs --mode=0600
 incus file push "${overworld_bundle}" "${builder}/run/self-hosted-ci-profile-build/overworld.bundle" --project "${PROJECT}" --create-dirs --mode=0600

@@ -20,6 +20,18 @@ ROOT = Path("/run/self-hosted-ci-profile-build")
 MANIFEST = ROOT / "manifest.json"
 PROFILE = ROOT / "profile.json"
 BUNDLE_INPUTS = ROOT / "bundle-inputs.json"
+PROFILE_ASSETS = ROOT / "profile-assets"
+PROFILE_ASSET_ROOT = Path("/opt/self-hosted-ci/overworld-profile-assets")
+PROFILE_ASSET_FILES = {
+    "next-font-google-mocked-responses.cjs": (1071, "c137ca4b0b65cea2c2f37f202ce2d174d0db55c36755ff43540bd24f98cf67ff"),
+    "fonts/FragmentMono-OFL.txt": (4405, "ef14426248ca0404eae1ae65e61802b1627b5ec33aab117fb36edf401a81636e"),
+    "fonts/FragmentMono-Regular.ttf": (125368, "0fe011f425873c2e0fc73a189e394e340ad48d2b9a99a576bdeec75cee000460"),
+    "fonts/Geist-OFL.txt": (4387, "1781d2806a07d91c4edf4740b88449fab7d0eadad53f7c351b94cd4d4eb8c00f"),
+    "fonts/GeistMono-OFL.txt": (4387, "1781d2806a07d91c4edf4740b88449fab7d0eadad53f7c351b94cd4d4eb8c00f"),
+    "fonts/GeistMono[wght].ttf": (171948, "d00e590b8eb3a59acc329b2d044fd143ae935090b7da33199ebee27cc7de8196"),
+    "fonts/Geist[wght].ttf": (169056, "73894e0448cae90a92b6c2f8732b7bb9acb7b94c418bff559dad4a18e1de9659"),
+    "fonts/README.md": (947, "1e8cdd235cd6596caaad2fa793795b6ea1fefe496ce5f6d823f0bf982e7cad4e"),
+}
 
 
 def run(*args: str, env: dict[str, str] | None = None, cwd: Path | None = None) -> str:
@@ -55,6 +67,51 @@ def output_commit(repository: Path) -> str:
 
 def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def install_profile_assets() -> dict[str, dict[str, object]]:
+    if PROFILE_ASSETS.is_symlink() or not PROFILE_ASSETS.is_dir():
+        raise SystemExit("profile asset staging root is unsafe")
+    expected = set(PROFILE_ASSET_FILES)
+    observed = {
+        path.relative_to(PROFILE_ASSETS).as_posix()
+        for path in PROFILE_ASSETS.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+    if observed != expected:
+        raise SystemExit("profile asset staging inventory drifted")
+    if any(path.is_symlink() for path in PROFILE_ASSETS.rglob("*")):
+        raise SystemExit("profile asset staging contains a symlink")
+    payloads: dict[str, bytes] = {}
+    for relative, (expected_size, expected_sha256) in PROFILE_ASSET_FILES.items():
+        source = PROFILE_ASSETS / relative
+        if source.is_symlink() or not source.is_file():
+            raise SystemExit(f"profile asset is absent or unsafe: {relative}")
+        payload = source.read_bytes()
+        if len(payload) != expected_size or hashlib.sha256(payload).hexdigest() != expected_sha256:
+            raise SystemExit(f"profile asset identity drifted: {relative}")
+        payloads[relative] = payload
+    if PROFILE_ASSET_ROOT.exists() or PROFILE_ASSET_ROOT.is_symlink():
+        raise SystemExit("profile asset destination already exists")
+    PROFILE_ASSET_ROOT.mkdir(parents=True, mode=0o755)
+    PROFILE_ASSET_ROOT.chmod(0o755)
+    os.chown(PROFILE_ASSET_ROOT, 0, 0, follow_symlinks=False)
+    fonts = PROFILE_ASSET_ROOT / "fonts"
+    fonts.mkdir(mode=0o755)
+    fonts.chmod(0o755)
+    os.chown(fonts, 0, 0, follow_symlinks=False)
+    inventory: dict[str, dict[str, object]] = {}
+    for relative, (expected_size, expected_sha256) in PROFILE_ASSET_FILES.items():
+        destination = PROFILE_ASSET_ROOT / relative
+        destination.write_bytes(payloads[relative])
+        os.chown(destination, 0, 0, follow_symlinks=False)
+        destination.chmod(0o644)
+        inventory[relative] = {
+            "mode": "0644",
+            "sha256": expected_sha256,
+            "size": expected_size,
+        }
+    return inventory
 
 
 def detach_regular_files(root: Path) -> None:
@@ -275,6 +332,7 @@ def main() -> int:
     profile = require_profile(
         json.loads(PROFILE.read_text(encoding="utf-8")), str(bundle_inputs["waterfall_commit"])
     )
+    profile_assets = install_profile_assets()
     os_release = Path("/etc/os-release").read_text(encoding="utf-8")
     if 'ID=ubuntu' not in os_release or 'VERSION_ID="24.04"' not in os_release:
         raise SystemExit("Ubuntu 24.04 is required")
@@ -673,6 +731,7 @@ committed=true
         "dpkg": sorted(packages),
         "playwright_chromium_revision": artifacts["playwright"]["chromium_revision"],
         "repository_profile_digest": profile_digest,
+        "profile_assets": profile_assets,
         "source_bundles": bundle_inputs,
     }
     inventory_path = Path(str(manifest["inventory_path"]))

@@ -29,6 +29,15 @@ readonly MINIO_DATA="$STATE_ROOT/minio"
 readonly MINIO_PORT=59002
 readonly BACKEND_PORT=3000
 readonly FRONTEND_PORT=3001
+readonly NEXT_FONT_ASSET_ROOT=/opt/self-hosted-ci/overworld-profile-assets
+readonly NEXT_FONT_MOCK="$NEXT_FONT_ASSET_ROOT/next-font-google-mocked-responses.cjs"
+readonly NEXT_FONT_MOCK_SHA256=c137ca4b0b65cea2c2f37f202ce2d174d0db55c36755ff43540bd24f98cf67ff
+readonly GEIST_FONT="$NEXT_FONT_ASSET_ROOT/fonts/Geist[wght].ttf"
+readonly GEIST_FONT_SHA256=73894e0448cae90a92b6c2f8732b7bb9acb7b94c418bff559dad4a18e1de9659
+readonly GEIST_MONO_FONT="$NEXT_FONT_ASSET_ROOT/fonts/GeistMono[wght].ttf"
+readonly GEIST_MONO_FONT_SHA256=d00e590b8eb3a59acc329b2d044fd143ae935090b7da33199ebee27cc7de8196
+readonly FRAGMENT_MONO_FONT="$NEXT_FONT_ASSET_ROOT/fonts/FragmentMono-Regular.ttf"
+readonly FRAGMENT_MONO_FONT_SHA256=0fe011f425873c2e0fc73a189e394e340ad48d2b9a99a576bdeec75cee000460
 readonly TESTED_MERGE_SHA="${PROFILE_TESTED_MERGE_SHA:?PROFILE_TESTED_MERGE_SHA is required}"
 export GIT_NO_REPLACE_OBJECTS=1 GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
@@ -212,16 +221,19 @@ stop_postgres() {
   ACTIVE_PGBIN=
 }
 
+stop_local_service() {
+  local name=$1 pid
+  if [[ -f "$STATE_ROOT/$name.pid" ]]; then
+    pid=$(cat "$STATE_ROOT/$name.pid")
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    unlink "$STATE_ROOT/$name.pid" 2>/dev/null || true
+  fi
+}
+
 stop_local_services() {
-  local name pid
-  for name in frontend backend minio; do
-    if [[ -f "$STATE_ROOT/$name.pid" ]]; then
-      pid=$(cat "$STATE_ROOT/$name.pid")
-      kill "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-      unlink "$STATE_ROOT/$name.pid" 2>/dev/null || true
-    fi
-  done
+  local name
+  for name in frontend backend minio; do stop_local_service "$name"; done
 }
 
 cleanup() {
@@ -306,6 +318,48 @@ phase_frontend() {
   (cd frontend && NODE_ENV=test bun ./node_modules/.bin/jest --ci)
 }
 
+start_backend() {
+  (cd backend && exec env PORT=$BACKEND_PORT bun run src/index.ts) >"$STATE_ROOT/backend.log" 2>&1 &
+  echo $! > "$STATE_ROOT/backend.pid"
+  for attempt in $(seq 1 90); do
+    curl --fail --silent "http://127.0.0.1:$BACKEND_PORT/ready" >/dev/null && break
+    [[ "$attempt" -lt 90 ]] || return 1
+    sleep 2
+  done
+}
+
+require_pinned_root_file() {
+  local path=$1 expected_sha256=$2 metadata
+  [[ -f "$path" && ! -L "$path" ]] || return 1
+  metadata=$(stat -c '%u:%g:%a' "$path") || return 1
+  [[ "$metadata" == 0:0:644 ]] || return 1
+  [[ $(sha256sum "$path" | awk '{print $1}') == "$expected_sha256" ]] || return 1
+}
+
+require_next_font_mock() {
+  [[ -d "$NEXT_FONT_ASSET_ROOT" && ! -L "$NEXT_FONT_ASSET_ROOT" ]] || return 1
+  [[ $(stat -c '%u:%g:%a' "$NEXT_FONT_ASSET_ROOT") == 0:0:755 ]] || return 1
+  [[ -d "$NEXT_FONT_ASSET_ROOT/fonts" && ! -L "$NEXT_FONT_ASSET_ROOT/fonts" ]] || return 1
+  [[ $(stat -c '%u:%g:%a' "$NEXT_FONT_ASSET_ROOT/fonts") == 0:0:755 ]] || return 1
+  require_pinned_root_file "$NEXT_FONT_MOCK" "$NEXT_FONT_MOCK_SHA256"
+  require_pinned_root_file "$GEIST_FONT" "$GEIST_FONT_SHA256"
+  require_pinned_root_file "$GEIST_MONO_FONT" "$GEIST_MONO_FONT_SHA256"
+  require_pinned_root_file "$FRAGMENT_MONO_FONT" "$FRAGMENT_MONO_FONT_SHA256"
+}
+
+start_frontend() {
+  require_next_font_mock
+  (cd frontend && exec env NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK" \
+    FRONTEND_PORT=$FRONTEND_PORT BACKEND_URL="http://127.0.0.1:$BACKEND_PORT" \
+    bun ./node_modules/.bin/next dev --webpack -p "$FRONTEND_PORT") >"$STATE_ROOT/frontend.log" 2>&1 &
+  echo $! > "$STATE_ROOT/frontend.pid"
+  for attempt in $(seq 1 60); do
+    curl --fail --silent "http://127.0.0.1:$FRONTEND_PORT" >/dev/null && break
+    [[ "$attempt" -lt 60 ]] || return 1
+    sleep 2
+  done
+}
+
 phase_e2e() {
   start_postgres 17 "$PG17_DATA" "$E2E_PGPORT" 3.5 overworld
   start_minio
@@ -315,21 +369,8 @@ phase_e2e() {
   export APP_URL="http://localhost:$FRONTEND_PORT" ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD=123321
   export S3_BUCKET=overworld-e2e S3_REGION=us-east-1 S3_ENDPOINT="http://127.0.0.1:$MINIO_PORT"
   export S3_PUBLIC_ENDPOINT="http://127.0.0.1:$MINIO_PORT" AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin
-  (cd backend && exec env PORT=$BACKEND_PORT bun run src/index.ts) >"$STATE_ROOT/backend.log" 2>&1 &
-  echo $! > "$STATE_ROOT/backend.pid"
-  for attempt in $(seq 1 90); do
-    curl --fail --silent "http://127.0.0.1:$BACKEND_PORT/ready" >/dev/null && break
-    [[ "$attempt" -lt 90 ]] || return 1
-    sleep 2
-  done
-  (cd frontend && exec env FRONTEND_PORT=$FRONTEND_PORT BACKEND_URL="http://127.0.0.1:$BACKEND_PORT" \
-    bun ./node_modules/.bin/next dev -p "$FRONTEND_PORT") >"$STATE_ROOT/frontend.log" 2>&1 &
-  echo $! > "$STATE_ROOT/frontend.pid"
-  for attempt in $(seq 1 60); do
-    curl --fail --silent "http://127.0.0.1:$FRONTEND_PORT" >/dev/null && break
-    [[ "$attempt" -lt 60 ]] || return 1
-    sleep 2
-  done
+  start_backend
+  stop_local_service backend
   local pg_test
   local pg_tests=(
     src/modules/organization/invitations/service.pg.test.ts
@@ -368,6 +409,8 @@ phase_e2e() {
     src/modules/internal/towers/sensor-data/export.pg.test.ts
   )
   for pg_test in "${pg_tests[@]}"; do (cd backend && TEST_DATABASE_URL="$DATABASE_URL" bun test "$pg_test"); done
+  start_backend
+  start_frontend
   (cd frontend && CI=true E2E_BASE_URL="http://localhost:$FRONTEND_PORT" PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
     bun ./node_modules/.bin/playwright test e2e/auth-flow.spec.ts e2e/a11y.spec.ts --reporter=list)
   stop_local_services

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,17 @@ import subprocess
 
 
 MARKER = Path("/etc/self-hosted-ci/repository-profile-image-v1.json")
+PROFILE_ASSET_ROOT = Path("/opt/self-hosted-ci/overworld-profile-assets")
+EXPECTED_PROFILE_ASSETS = {
+    "next-font-google-mocked-responses.cjs": {"mode": "0644", "sha256": "c137ca4b0b65cea2c2f37f202ce2d174d0db55c36755ff43540bd24f98cf67ff", "size": 1071},
+    "fonts/FragmentMono-OFL.txt": {"mode": "0644", "sha256": "ef14426248ca0404eae1ae65e61802b1627b5ec33aab117fb36edf401a81636e", "size": 4405},
+    "fonts/FragmentMono-Regular.ttf": {"mode": "0644", "sha256": "0fe011f425873c2e0fc73a189e394e340ad48d2b9a99a576bdeec75cee000460", "size": 125368},
+    "fonts/Geist-OFL.txt": {"mode": "0644", "sha256": "1781d2806a07d91c4edf4740b88449fab7d0eadad53f7c351b94cd4d4eb8c00f", "size": 4387},
+    "fonts/GeistMono-OFL.txt": {"mode": "0644", "sha256": "1781d2806a07d91c4edf4740b88449fab7d0eadad53f7c351b94cd4d4eb8c00f", "size": 4387},
+    "fonts/GeistMono[wght].ttf": {"mode": "0644", "sha256": "d00e590b8eb3a59acc329b2d044fd143ae935090b7da33199ebee27cc7de8196", "size": 171948},
+    "fonts/Geist[wght].ttf": {"mode": "0644", "sha256": "73894e0448cae90a92b6c2f8732b7bb9acb7b94c418bff559dad4a18e1de9659", "size": 169056},
+    "fonts/README.md": {"mode": "0644", "sha256": "1e8cdd235cd6596caaad2fa793795b6ea1fefe496ce5f6d823f0bf982e7cad4e", "size": 947},
+}
 
 
 def output(*args: str) -> str:
@@ -63,6 +75,39 @@ def verify_frontend_eslint_link(frontend_modules: Path) -> None:
         package_metadata.get("version"), str
     ):
         raise SystemExit("frontend eslint package identity drifted")
+
+
+def verify_profile_assets(inventory: object) -> None:
+    if inventory != EXPECTED_PROFILE_ASSETS:
+        raise SystemExit("image inventory profile assets drifted")
+    if PROFILE_ASSET_ROOT.is_symlink() or not PROFILE_ASSET_ROOT.is_dir():
+        raise SystemExit("profile asset root is unsafe")
+    fonts = PROFILE_ASSET_ROOT / "fonts"
+    for directory in (PROFILE_ASSET_ROOT, fonts):
+        info = directory.stat()
+        if info.st_uid != 0 or info.st_gid != 0 or (info.st_mode & 0o777) != 0o755:
+            raise SystemExit("profile asset directory ownership or mode drifted")
+    observed = {
+        path.relative_to(PROFILE_ASSET_ROOT).as_posix()
+        for path in PROFILE_ASSET_ROOT.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+    if observed != set(EXPECTED_PROFILE_ASSETS):
+        raise SystemExit("installed profile asset inventory drifted")
+    if any(path.is_symlink() for path in PROFILE_ASSET_ROOT.rglob("*")):
+        raise SystemExit("installed profile assets contain a symlink")
+    for relative, expected in EXPECTED_PROFILE_ASSETS.items():
+        path = PROFILE_ASSET_ROOT / relative
+        info = path.stat()
+        if (
+            not path.is_file()
+            or info.st_uid != 0
+            or info.st_gid != 0
+            or (info.st_mode & 0o777) != 0o644
+            or info.st_size != expected["size"]
+            or hashlib.sha256(path.read_bytes()).hexdigest() != expected["sha256"]
+        ):
+            raise SystemExit(f"installed profile asset drifted: {relative}")
 
 
 def main() -> int:
@@ -120,6 +165,7 @@ def main() -> int:
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     if inventory.get("repository_profile_digest") != marker["profile_digest"]:
         raise SystemExit("image inventory profile digest drifted")
+    verify_profile_assets(inventory.get("profile_assets"))
     checks = {
         "node": ("node", "--version", "v22.23.2"),
         "bun": ("bun", "--version", "1.4.0"),
