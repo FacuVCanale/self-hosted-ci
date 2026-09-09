@@ -30,4 +30,4 @@ runs:
         PROFILE_IMAGE_MARKER: ${{ inputs.image-marker }}
         PROFILE_BASE_SHA: ${{ inputs.base-sha }}
         PROFILE_TESTED_MERGE_SHA: ${{ inputs.tested-merge-sha }}
-      run: python3 "$GITHUB_ACTION_PATH/run.py"
+      run: exec python3 "$GITHUB_ACTION_PATH/run.py"

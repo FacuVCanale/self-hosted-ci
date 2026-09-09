@@ -7,7 +7,9 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import signal
 import subprocess
+import time
 from typing import Any, Mapping
 
 
@@ -212,6 +214,81 @@ def verify_source_workflow(profile: Mapping[str, Any], *, base_sha: str, workspa
         raise RepositoryProfileError("base workflow differs from the reviewed profile source")
 
 
+def _process_group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _kill_residual_process_group(process_group: int) -> None:
+    if not _process_group_exists(process_group):
+        return
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 5.0
+    while _process_group_exists(process_group):
+        if time.monotonic() >= deadline:
+            raise RepositoryProfileError("repository profile process group did not terminate")
+        time.sleep(0.01)
+
+
+def _run_profile(
+    script: Path,
+    *,
+    workspace: Path,
+    environment: Mapping[str, str],
+) -> int:
+    child: subprocess.Popen[bytes] | None = None
+    pending_signals: list[int] = []
+    cancellation_signal: int | None = None
+
+    def forward_signal(signum: int, _frame: object) -> None:
+        nonlocal cancellation_signal
+        if cancellation_signal is None:
+            cancellation_signal = signum
+        if child is None:
+            pending_signals.append(signum)
+            return
+        try:
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
+
+    handled_signals = (signal.SIGINT, signal.SIGTERM)
+    previous_handlers = {signum: signal.getsignal(signum) for signum in handled_signals}
+    try:
+        for signum in handled_signals:
+            signal.signal(signum, forward_signal)
+        child = subprocess.Popen(
+            [str(script)],
+            cwd=workspace,
+            env=dict(environment),
+            shell=False,
+            start_new_session=True,
+        )
+        for signum in pending_signals:
+            try:
+                os.killpg(child.pid, signum)
+            except ProcessLookupError:
+                pass
+        returncode = child.wait()
+        if cancellation_signal is not None:
+            _kill_residual_process_group(child.pid)
+            return 128 + cancellation_signal
+        if returncode < 0:
+            return 128 - returncode
+        return returncode
+    finally:
+        for signum, previous_handler in previous_handlers.items():
+            signal.signal(signum, previous_handler)
+
+
 def run_from_environment(environment: Mapping[str, str] | None = None) -> int:
     env = os.environ if environment is None else environment
     try:
@@ -234,9 +311,7 @@ def run_from_environment(environment: Mapping[str, str] | None = None) -> int:
         tested_merge_sha = env.get("PROFILE_TESTED_MERGE_SHA", "")
         if not FULL_SHA.fullmatch(tested_merge_sha):
             raise RepositoryProfileError("tested merge SHA is invalid")
-        result = subprocess.run([str(script)], cwd=workspace, check=False)
-        if result.returncode:
-            raise RepositoryProfileError(f"repository profile failed with exit code {result.returncode}")
+        return _run_profile(script, workspace=workspace, environment=env)
     except (KeyError, OSError, RepositoryProfileError) as exc:
         print(f"repository command profile rejected: {exc}", file=os.sys.stderr)
         return 2
