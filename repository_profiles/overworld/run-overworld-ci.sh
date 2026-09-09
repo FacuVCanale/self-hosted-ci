@@ -8,11 +8,12 @@ readonly EXPECTED_MEMORY_BYTES=4294967296
 # Incus/cgroup v2 stores memory.high at page granularity. This is the
 # page-aligned value observed for the configured 90% of the 4 GiB hard limit.
 readonly MEMORY_FIT_LIMIT_BYTES=3865468928
-# The healthy frontend crossed memory.high by 2,306,048 bytes and recorded
-# 6,669 high events. The failed e2e crossed by 8,888,320 bytes with 101,680
-# events, so these bounds admit the former while rejecting sustained reclaim.
+# The peak bound rejects material memory.high overshoot. Reclaim pressure is
+# evaluated separately as time-normalized PSI stall budgets per phase because
+# memory.events high counts reclaim attempts, not their duration or severity.
 readonly MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES=4194304
-readonly MEMORY_HIGH_EVENTS_TOLERANCE=8192
+readonly MEMORY_PRESSURE_SOME_LIMIT_PERCENT=10
+readonly MEMORY_PRESSURE_FULL_LIMIT_PERCENT=5
 readonly WATERFALL_REVISION=6df90210830b2ebe36eda6b96d91237914d000e4
 readonly WATERFALL_ROOT=/opt/self-hosted-ci/overworld-deps/waterfall
 readonly BACKEND_LOCK_SHA256=b235110fe83b4b3a4eafb337efc0bb8d7424aea33a72f0338b2192892ce79fdb
@@ -56,6 +57,7 @@ ACTIVE_HIGH=0
 ACTIVE_MAX=0
 ACTIVE_PRESSURE_SOME=0
 ACTIVE_PRESSURE_FULL=0
+ACTIVE_STARTED_MONOTONIC_USEC=0
 ACTIVE_PGDATA=
 ACTIVE_PGBIN=
 
@@ -89,6 +91,33 @@ read_memory_pressure_total() {
   printf '%s' "$total"
 }
 
+read_monotonic_usec() {
+  local line seconds fraction fraction_usec
+  line=$(awk 'NR == 1 { line = $0; next } { extra = 1 } END { if (NR != 1 || extra) exit 1; print line }' \
+    /proc/uptime) || return 1
+  [[ "$line" =~ ^([0-9]+)\.([0-9]{2})\ ([0-9]+)\.([0-9]{2})$ ]] || return 1
+  seconds=${BASH_REMATCH[1]}
+  fraction=${BASH_REMATCH[2]}
+  while [[ ${#seconds} -gt 1 && ${seconds:0:1} == 0 ]]; do seconds=${seconds:1}; done
+  if [[ ${#seconds} -gt 13 || ( ${#seconds} -eq 13 && "$seconds" > 9223372036854 ) ]]; then return 1; fi
+  fraction_usec=$((10#$fraction * 10000))
+  if [[ "$seconds" == 9223372036854 ]] && (( fraction_usec > 775807 )); then return 1; fi
+  printf '%s' "$((10#$seconds * 1000000 + fraction_usec))"
+}
+
+reset_phase_measurement_state() {
+  ACTIVE_PHASE=
+  ACTIVE_SAMPLER_PID=
+  ACTIVE_SAMPLER_SENTINEL=
+  ACTIVE_OOM=0
+  ACTIVE_OOM_KILL=0
+  ACTIVE_HIGH=0
+  ACTIVE_MAX=0
+  ACTIVE_PRESSURE_SOME=0
+  ACTIVE_PRESSURE_FULL=0
+  ACTIVE_STARTED_MONOTONIC_USEC=0
+}
+
 memory_sampler() {
   local phase=$1 sentinel=$2 current peak swap_current swap_peak pids oom oom_kill high max pressure_some pressure_full
   while [[ -e "$sentinel" ]]; do
@@ -110,51 +139,79 @@ memory_sampler() {
 }
 
 start_phase_measurement() {
-  local phase=$1
+  local phase=$1 oom oom_kill high max pressure_some pressure_full started_monotonic_usec sentinel sampler_pid
   [[ -z "$ACTIVE_PHASE" ]]
+  if ! oom=$(read_memory_event oom); then return 1; fi
+  if ! oom_kill=$(read_memory_event oom_kill); then return 1; fi
+  if ! high=$(read_memory_event high); then return 1; fi
+  if ! max=$(read_memory_event max); then return 1; fi
+  if ! pressure_some=$(read_memory_pressure_total some); then return 1; fi
+  if ! pressure_full=$(read_memory_pressure_total full); then return 1; fi
+  if ! started_monotonic_usec=$(read_monotonic_usec); then return 1; fi
+  sentinel="$STATE_ROOT/memory-$phase.running"
+  if ! : > "$sentinel"; then return 1; fi
+  memory_sampler "$phase" "$sentinel" &
+  sampler_pid=$!
   ACTIVE_PHASE=$phase
-  ACTIVE_OOM=$(read_memory_event oom)
-  ACTIVE_OOM_KILL=$(read_memory_event oom_kill)
-  ACTIVE_HIGH=$(read_memory_event high)
-  ACTIVE_MAX=$(read_memory_event max)
-  ACTIVE_PRESSURE_SOME=$(read_memory_pressure_total some)
-  ACTIVE_PRESSURE_FULL=$(read_memory_pressure_total full)
-  ACTIVE_SAMPLER_SENTINEL="$STATE_ROOT/memory-$phase.running"
-  : > "$ACTIVE_SAMPLER_SENTINEL"
-  memory_sampler "$phase" "$ACTIVE_SAMPLER_SENTINEL" &
-  ACTIVE_SAMPLER_PID=$!
+  ACTIVE_OOM=$oom
+  ACTIVE_OOM_KILL=$oom_kill
+  ACTIVE_HIGH=$high
+  ACTIVE_MAX=$max
+  ACTIVE_PRESSURE_SOME=$pressure_some
+  ACTIVE_PRESSURE_FULL=$pressure_full
+  ACTIVE_STARTED_MONOTONIC_USEC=$started_monotonic_usec
+  ACTIVE_SAMPLER_SENTINEL=$sentinel
+  ACTIVE_SAMPLER_PID=$sampler_pid
 }
 
 finish_phase_measurement() {
-  local phase=$1 oom_after oom_kill_after high_after max_after pressure_some_after pressure_full_after
-  local phase_peak phase_swap_peak oom_delta oom_kill_delta high_delta max_delta pressure_some_delta pressure_full_delta sampler_status=0
+  local phase=$1 oom_after oom_kill_after high_after max_after pressure_some_after pressure_full_after finished_monotonic_usec
+  local oom_before oom_kill_before high_before max_before pressure_some_before pressure_full_before started_monotonic_usec
+  local phase_peak phase_swap_peak oom_delta oom_kill_delta high_delta max_delta pressure_some_delta pressure_full_delta
+  local elapsed_usec pressure_some_budget pressure_full_budget pressure_some_ratio_basis_points pressure_full_ratio_basis_points
+  local read_status=0 finalizer_status=0 sampler_status=0 sampler_pid sentinel
   [[ "$ACTIVE_PHASE" == "$phase" ]]
-  unlink "$ACTIVE_SAMPLER_SENTINEL" 2>/dev/null || true
-  wait "$ACTIVE_SAMPLER_PID" 2>/dev/null || sampler_status=$?
-  oom_after=$(read_memory_event oom)
-  oom_kill_after=$(read_memory_event oom_kill)
-  high_after=$(read_memory_event high)
-  max_after=$(read_memory_event max)
-  pressure_some_after=$(read_memory_pressure_total some)
-  pressure_full_after=$(read_memory_pressure_total full)
-  oom_delta=$((oom_after - ACTIVE_OOM))
-  oom_kill_delta=$((oom_kill_after - ACTIVE_OOM_KILL))
-  high_delta=$((high_after - ACTIVE_HIGH))
-  max_delta=$((max_after - ACTIVE_MAX))
-  pressure_some_delta=$((pressure_some_after - ACTIVE_PRESSURE_SOME))
-  pressure_full_delta=$((pressure_full_after - ACTIVE_PRESSURE_FULL))
+  sampler_pid=$ACTIVE_SAMPLER_PID
+  sentinel=$ACTIVE_SAMPLER_SENTINEL
+  oom_before=$ACTIVE_OOM
+  oom_kill_before=$ACTIVE_OOM_KILL
+  high_before=$ACTIVE_HIGH
+  max_before=$ACTIVE_MAX
+  pressure_some_before=$ACTIVE_PRESSURE_SOME
+  pressure_full_before=$ACTIVE_PRESSURE_FULL
+  started_monotonic_usec=$ACTIVE_STARTED_MONOTONIC_USEC
+  if ! oom_after=$(read_memory_event oom); then read_status=1; fi
+  if ! oom_kill_after=$(read_memory_event oom_kill); then read_status=1; fi
+  if ! high_after=$(read_memory_event high); then read_status=1; fi
+  if ! max_after=$(read_memory_event max); then read_status=1; fi
+  if ! pressure_some_after=$(read_memory_pressure_total some); then read_status=1; fi
+  if ! pressure_full_after=$(read_memory_pressure_total full); then read_status=1; fi
+  if ! finished_monotonic_usec=$(read_monotonic_usec); then read_status=1; fi
+  if ! phase_peak=$(read_cgroup_value memory.peak); then read_status=1; fi
+  if ! phase_swap_peak=$(read_cgroup_value memory.swap.peak); then read_status=1; fi
+  if ! unlink "$sentinel" 2>/dev/null; then finalizer_status=1; fi
+  wait "$sampler_pid" 2>/dev/null || sampler_status=$?
+  reset_phase_measurement_state
+  (( read_status == 0 && finalizer_status == 0 )) || return 1
+  oom_delta=$((oom_after - oom_before))
+  oom_kill_delta=$((oom_kill_after - oom_kill_before))
+  high_delta=$((high_after - high_before))
+  max_delta=$((max_after - max_before))
+  pressure_some_delta=$((pressure_some_after - pressure_some_before))
+  pressure_full_delta=$((pressure_full_after - pressure_full_before))
+  elapsed_usec=$((finished_monotonic_usec - started_monotonic_usec))
+  (( elapsed_usec > 0 && pressure_some_delta >= 0 && pressure_full_delta >= 0 )) || return 1
+  pressure_some_budget=$((elapsed_usec * MEMORY_PRESSURE_SOME_LIMIT_PERCENT / 100))
+  pressure_full_budget=$((elapsed_usec * MEMORY_PRESSURE_FULL_LIMIT_PERCENT / 100))
+  pressure_some_ratio_basis_points=$(((pressure_some_delta * 10000 + elapsed_usec - 1) / elapsed_usec))
+  pressure_full_ratio_basis_points=$(((pressure_full_delta * 10000 + elapsed_usec - 1) / elapsed_usec))
   # Enforce the limit from root-owned cgroup counters. JSONL is diagnostic
   # only: untrusted workload code may share the runner UID and mutate it.
-  phase_peak=$(read_cgroup_value memory.peak)
-  phase_swap_peak=$(read_cgroup_value memory.swap.peak)
-  printf '{"phase":"%s","memory_peak_bytes":%s,"memory_swap_peak_bytes":%s,"oom_delta":%s,"oom_kill_delta":%s,"memory_high_events_delta":%s,"memory_max_events_delta":%s,"memory_pressure_some_delta_usec":%s,"memory_pressure_full_delta_usec":%s,"fit_limit_bytes":%s,"memory_high_overshoot_tolerance_bytes":%s,"memory_high_events_tolerance":%s}\n' \
-    "$phase" "$phase_peak" "$phase_swap_peak" "$oom_delta" "$oom_kill_delta" "$high_delta" "$max_delta" "$pressure_some_delta" "$pressure_full_delta" "$MEMORY_FIT_LIMIT_BYTES" "$MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES" "$MEMORY_HIGH_EVENTS_TOLERANCE" | tee -a "$MEMORY_SUMMARY"
-  ACTIVE_PHASE=
-  ACTIVE_SAMPLER_PID=
-  ACTIVE_SAMPLER_SENTINEL=
+  printf '{"phase":"%s","memory_peak_bytes":%s,"memory_swap_peak_bytes":%s,"oom_delta":%s,"oom_kill_delta":%s,"memory_high_events_delta":%s,"memory_max_events_delta":%s,"memory_pressure_some_delta_usec":%s,"memory_pressure_full_delta_usec":%s,"phase_elapsed_monotonic_usec":%s,"memory_pressure_some_budget_usec":%s,"memory_pressure_full_budget_usec":%s,"memory_pressure_some_ratio_basis_points":%s,"memory_pressure_full_ratio_basis_points":%s,"memory_pressure_some_limit_percent":%s,"memory_pressure_full_limit_percent":%s,"fit_limit_bytes":%s,"memory_high_overshoot_tolerance_bytes":%s}\n' \
+    "$phase" "$phase_peak" "$phase_swap_peak" "$oom_delta" "$oom_kill_delta" "$high_delta" "$max_delta" "$pressure_some_delta" "$pressure_full_delta" "$elapsed_usec" "$pressure_some_budget" "$pressure_full_budget" "$pressure_some_ratio_basis_points" "$pressure_full_ratio_basis_points" "$MEMORY_PRESSURE_SOME_LIMIT_PERCENT" "$MEMORY_PRESSURE_FULL_LIMIT_PERCENT" "$MEMORY_FIT_LIMIT_BYTES" "$MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES" | tee -a "$MEMORY_SUMMARY"
   (( sampler_status == 0 && oom_delta == 0 && oom_kill_delta == 0 &&
-     high_delta >= 0 && high_delta <= MEMORY_HIGH_EVENTS_TOLERANCE && max_delta == 0 &&
-     pressure_some_delta >= 0 && pressure_full_delta >= 0 &&
+     high_delta >= 0 && max_delta == 0 &&
+     pressure_some_delta <= pressure_some_budget && pressure_full_delta <= pressure_full_budget &&
      phase_swap_peak == 0 &&
      phase_peak < MEMORY_FIT_LIMIT_BYTES + MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES ))
 }
