@@ -123,7 +123,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
         self.assertEqual("22.23.2", profile["toolchain"]["node"])
         self.assertEqual(
-            "46bc6a9cc56c9ae156908ca141eb8292d0373ae5e692eb88b94475fad158074d",
+            "0b3915d873e5d93778cc1f658a7a62054add7ce8dd83e971f2f627bb4ecb3869",
             profile["runner_script_sha256"],
         )
         self.assertEqual(SCRIPT, script)
@@ -286,7 +286,11 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn("bun ./node_modules/.bin/tsc --noEmit", text)
         self.assertIn("NODE_ENV=test bun ./node_modules/.bin/jest --ci", text)
         self.assertIn(
-            '"$NEXT_NODE" "$FRONTEND_MODULES/next/dist/bin/next" dev --webpack -p "$FRONTEND_PORT"',
+            '"$NEXT_NODE" ./node_modules/next/dist/bin/next dev --webpack -p "$FRONTEND_PORT"',
+            text,
+        )
+        self.assertNotIn(
+            '"$NEXT_NODE" "$FRONTEND_MODULES/next/dist/bin/next"',
             text,
         )
         self.assertIn("bun ./node_modules/.bin/playwright test", text)
@@ -945,9 +949,10 @@ phase_e2e
             'exec env NODE_OPTIONS=--max-old-space-size=1536', frontend
         )
         self.assertIn(
-            '"$NEXT_NODE" "$FRONTEND_MODULES/next/dist/bin/next" dev --webpack -p "$FRONTEND_PORT"',
+            '"$NEXT_NODE" ./node_modules/next/dist/bin/next dev --webpack -p "$FRONTEND_PORT"',
             frontend,
         )
+        self.assertNotIn('$FRONTEND_MODULES/next/dist/bin/next', frontend)
         self.assertNotIn("bun ./node_modules/.bin/next", frontend)
         self.assertIn('readonly NEXT_NODE=/usr/local/bin/node', runner)
         self.assertIn(

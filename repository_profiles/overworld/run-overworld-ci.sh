@@ -477,7 +477,7 @@ start_frontend() {
   (cd frontend && exec env NODE_OPTIONS=--max-old-space-size=1536 \
     NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK" \
     FRONTEND_PORT=$FRONTEND_PORT BACKEND_URL="http://127.0.0.1:$BACKEND_PORT" \
-    "$NEXT_NODE" "$FRONTEND_MODULES/next/dist/bin/next" dev --webpack -p "$FRONTEND_PORT") >"$STATE_ROOT/frontend.log" 2>&1 &
+    "$NEXT_NODE" ./node_modules/next/dist/bin/next dev --webpack -p "$FRONTEND_PORT") >"$STATE_ROOT/frontend.log" 2>&1 &
   echo $! > "$STATE_ROOT/frontend.pid"
   for attempt in $(seq 1 60); do
     curl --fail --silent "http://127.0.0.1:$FRONTEND_PORT" >/dev/null && break

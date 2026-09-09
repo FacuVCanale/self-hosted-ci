@@ -399,6 +399,54 @@ class OverworldProfileImageTests(unittest.TestCase):
             self.assertEqual(0, staged.returncode, staged.stderr)
             self.assertEqual("bare-sibling-ok", staged.stdout.strip())
 
+    def test_node_resolves_bare_siblings_only_from_runtime_node_modules_layout(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / "frontend-node_modules"
+            frontend = root / "frontend"
+            launcher = snapshot / "tool/bin/tool.js"
+            sibling = snapshot / "sibling"
+            launcher.parent.mkdir(parents=True)
+            sibling.mkdir()
+            frontend.mkdir()
+            launcher.write_text(
+                'console.log(require("sibling"))\n', encoding="utf-8"
+            )
+            (sibling / "package.json").write_text(
+                '{"name":"sibling","main":"index.js"}\n', encoding="utf-8"
+            )
+            (sibling / "index.js").write_text(
+                'module.exports = "bare-sibling-ok"\n', encoding="utf-8"
+            )
+
+            direct = subprocess.run(
+                [node, str(launcher)],
+                cwd=frontend,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(0, direct.returncode)
+            self.assertIn("Cannot find module 'sibling'", direct.stderr)
+
+            runtime_modules = frontend / "node_modules"
+            runtime_modules.mkdir()
+            subprocess.run(
+                ["cp", "-al", f"{snapshot}/.", f"{runtime_modules}/"],
+                check=True,
+            )
+            staged = subprocess.run(
+                [node, str(runtime_modules / "tool/bin/tool.js")],
+                cwd=frontend,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(0, staged.returncode, staged.stderr)
+            self.assertEqual("bare-sibling-ok", staged.stdout.strip())
+
     def test_bun_direct_bypasses_node_shebang_for_runtime_launcher(self) -> None:
         bun = shutil.which("bun")
         if bun is None:
