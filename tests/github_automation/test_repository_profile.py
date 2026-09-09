@@ -232,13 +232,16 @@ class RepositoryProfileTests(unittest.TestCase):
             "memory.swap.peak", "memory.pressure", "pids.current", "memory.max", "memory.jsonl",
             "MEMORY_FIT_LIMIT_BYTES=3865468928", "oom_kill_delta",
             "MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES=4194304",
-            "MEMORY_HIGH_EVENTS_TOLERANCE=8192",
+            "MEMORY_PRESSURE_SOME_LIMIT_PERCENT=10",
+            "MEMORY_PRESSURE_FULL_LIMIT_PERCENT=5",
             "memory_high_events_delta", "memory_max_events_delta",
             "memory_pressure_some_delta_usec", "memory_pressure_full_delta_usec",
             "! -w /sys/fs/cgroup/memory.peak", "! -w /sys/fs/cgroup/memory.pressure",
             "sampler_status=0",
             "sampler_status=$?", "sampler_status == 0",
-            "high_delta >= 0", "high_delta <= MEMORY_HIGH_EVENTS_TOLERANCE",
+            "high_delta >= 0",
+            "pressure_some_delta <= pressure_some_budget",
+            "pressure_full_delta <= pressure_full_budget",
             "max_delta == 0",
             "phase_swap_peak == 0",
             "phase_peak < MEMORY_FIT_LIMIT_BYTES + MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES",
@@ -354,40 +357,160 @@ class RepositoryProfileTests(unittest.TestCase):
             with self.subTest(malformed=malformed):
                 self.assertNotEqual(0, read(malformed, "some").returncode)
 
-    def test_phase_memory_guard_rejects_reclaim_hard_limit_and_sampler_failure(self):
+    def test_monotonic_clock_parser_requires_exact_uptime_fields(self):
+        text = SCRIPT.read_text()
+        parser = text[
+            text.index("read_monotonic_usec() {") : text.index("\nreset_phase_measurement_state() {")
+        ].replace("/proc/uptime", '"$UPTIME_FILE"')
+
+        def read(candidate: str) -> subprocess.CompletedProcess[str]:
+            with tempfile.TemporaryDirectory() as directory:
+                uptime = Path(directory) / "uptime"
+                uptime.write_text(candidate)
+                return subprocess.run(
+                    ["bash", "-c", f"{parser}\nread_monotonic_usec"],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "UPTIME_FILE": str(uptime)},
+                )
+
+        valid = read("123.45 987.65\n")
+        self.assertEqual(0, valid.returncode, valid.stderr)
+        self.assertEqual("123450000", valid.stdout)
+        largest_safe = read("9223372036854.77 0.00\n")
+        self.assertEqual(0, largest_safe.returncode, largest_safe.stderr)
+        self.assertEqual("9223372036854770000", largest_safe.stdout)
+        for malformed in (
+            "123.45\n",
+            "123.45 idle\n",
+            "123.45 987\n",
+            "123.456 987.65\n",
+            "123.45 987.654\n",
+            "123.45 987.65 extra\n",
+            "123.45 987.65\n0.00 0.00\n",
+            "123.45  987.65\n",
+            "123.45\t987.65\n",
+            "9223372036854.78 0.00\n",
+            "9223372036855.00 0.00\n",
+        ):
+            with self.subTest(malformed=malformed):
+                self.assertNotEqual(0, read(malformed).returncode)
+
+    def test_phase_measurement_start_publishes_state_only_after_all_baselines(self):
+        prefix = SCRIPT.read_text().split("require_image_contract() {", 1)[0]
+
+        def start(*, fail_event: str = "", fail_pressure: str = "",
+                  fail_monotonic: bool = False) -> subprocess.CompletedProcess[str]:
+            with tempfile.TemporaryDirectory() as directory:
+                command = prefix + f"""
+read_memory_event() {{
+  [[ "$1" != "{fail_event}" ]] || return 1
+  printf '1'
+}}
+read_memory_pressure_total() {{
+  [[ "$1" != "{fail_pressure}" ]] || return 1
+  printf '1'
+}}
+read_monotonic_usec() {{ {'return 1' if fail_monotonic else "printf '1000000'"}; }}
+set +e
+start_phase_measurement frontend
+start_status=$?
+set -e
+sentinel_absent=0
+[[ ! -e "$STATE_ROOT/memory-frontend.running" ]] && sentinel_absent=1
+printf '{{"start_status":%s,"active_phase":"%s","active_sampler_pid":"%s","active_sampler_sentinel":"%s","sentinel_absent":%s}}\n' \
+  "$start_status" "$ACTIVE_PHASE" "$ACTIVE_SAMPLER_PID" "$ACTIVE_SAMPLER_SENTINEL" "$sentinel_absent"
+exit "$start_status"
+"""
+                return subprocess.run(
+                    ["bash"], input=command, capture_output=True, text=True,
+                    env={
+                        **os.environ,
+                        "RUNNER_TEMP": str(Path(directory) / "runner-temp"),
+                        "PROFILE_TESTED_MERGE_SHA": "0" * 40,
+                    },
+                )
+
+        for case in (
+            {"fail_event": "oom"},
+            {"fail_event": "max"},
+            {"fail_pressure": "some"},
+            {"fail_pressure": "full"},
+            {"fail_monotonic": True},
+        ):
+            with self.subTest(case=case):
+                failed = start(**case)
+                self.assertNotEqual(0, failed.returncode)
+                state = json.loads(failed.stdout)
+                self.assertEqual(1, state["start_status"])
+                self.assertEqual("", state["active_phase"])
+                self.assertEqual("", state["active_sampler_pid"])
+                self.assertEqual("", state["active_sampler_sentinel"])
+                self.assertEqual(1, state["sentinel_absent"])
+
+    def test_phase_memory_guard_uses_monotonic_pressure_slos_and_hard_limits(self):
         prefix = SCRIPT.read_text().split("require_image_contract() {", 1)[0]
 
         def finish(*, high: int = 10, maximum: int = 20, peak: int = 3865468927,
-                   swap_peak: int = 0, sampler_status: int = 0) -> subprocess.CompletedProcess[str]:
+                   swap_peak: int = 0, sampler_status: int = 0,
+                   oom_after: int = 1, oom_kill_after: int = 2,
+                   started_usec: int = 1_000_000, finished_usec: int = 2_000_000,
+                   pressure_some_start: int = 100, pressure_some_after: int = 100_100,
+                   pressure_full_start: int = 50, pressure_full_after: int = 50_050,
+                   phase: str = "frontend", report_state: bool = False,
+                   fail_event: str = "", fail_pressure: str = "",
+                   fail_monotonic: bool = False, fail_cgroup: str = "") -> subprocess.CompletedProcess[str]:
             with tempfile.TemporaryDirectory() as directory:
+                finish_command = f"finish_phase_measurement {phase}"
+                if report_state:
+                    finish_command = f"""set +e
+sampler_pid_before=$ACTIVE_SAMPLER_PID
+sentinel_before=$ACTIVE_SAMPLER_SENTINEL
+finish_phase_measurement {phase}
+finish_status=$?
+set -e
+sampler_reaped=0
+sentinel_absent=0
+summary_lines=$(wc -l < "$MEMORY_SUMMARY")
+if ! kill -0 "$sampler_pid_before" 2>/dev/null; then sampler_reaped=1; fi
+if [[ ! -e "$sentinel_before" && ! -L "$sentinel_before" ]]; then sentinel_absent=1; fi
+printf '{{"finish_status":%s,"active_phase":"%s","active_sampler_pid":"%s","active_sampler_sentinel":"%s","active_oom":%s,"active_oom_kill":%s,"active_high":%s,"active_max":%s,"active_pressure_some":%s,"active_pressure_full":%s,"active_started_monotonic_usec":%s,"sampler_reaped":%s,"sentinel_absent":%s,"summary_lines":%s}}\\n' \\
+  "$finish_status" "$ACTIVE_PHASE" "$ACTIVE_SAMPLER_PID" "$ACTIVE_SAMPLER_SENTINEL" "$ACTIVE_OOM" "$ACTIVE_OOM_KILL" "$ACTIVE_HIGH" "$ACTIVE_MAX" "$ACTIVE_PRESSURE_SOME" "$ACTIVE_PRESSURE_FULL" "$ACTIVE_STARTED_MONOTONIC_USEC" "$sampler_reaped" "$sentinel_absent" "$summary_lines"
+exit "$finish_status"
+"""
                 command = prefix + f"""
-ACTIVE_PHASE=e2e
+ACTIVE_PHASE={phase}
 ACTIVE_OOM=1
 ACTIVE_OOM_KILL=2
 ACTIVE_HIGH=10
 ACTIVE_MAX=20
-ACTIVE_PRESSURE_SOME=100
-ACTIVE_PRESSURE_FULL=50
+ACTIVE_PRESSURE_SOME={pressure_some_start}
+ACTIVE_PRESSURE_FULL={pressure_full_start}
+ACTIVE_STARTED_MONOTONIC_USEC={started_usec}
 ACTIVE_SAMPLER_SENTINEL="$STATE_ROOT/test.running"
 : > "$ACTIVE_SAMPLER_SENTINEL"
 (exit {sampler_status}) &
 ACTIVE_SAMPLER_PID=$!
 read_memory_event() {{
+  [[ "$1" != "{fail_event}" ]] || return 1
   case "$1" in
-    oom) printf '1' ;;
-    oom_kill) printf '2' ;;
+    oom) printf '{oom_after}' ;;
+    oom_kill) printf '{oom_kill_after}' ;;
     high) printf '{high}' ;;
     max) printf '{maximum}' ;;
     *) return 1 ;;
   esac
 }}
 read_memory_pressure_total() {{
-  case "$1" in some) printf '140' ;; full) printf '55' ;; *) return 1 ;; esac
+  [[ "$1" != "{fail_pressure}" ]] || return 1
+  case "$1" in some) printf '{pressure_some_after}' ;; full) printf '{pressure_full_after}' ;; *) return 1 ;; esac
 }}
+read_monotonic_usec() {{ {'return 1' if fail_monotonic else f"printf '{finished_usec}'"}; }}
 read_cgroup_value() {{
+  [[ "$1" != "{fail_cgroup}" ]] || return 1
   case "$1" in memory.peak) printf '{peak}' ;; memory.swap.peak) printf '{swap_peak}' ;; *) return 1 ;; esac
 }}
-finish_phase_measurement e2e
+{finish_command}
 """
                 return subprocess.run(
                     ["bash"],
@@ -406,17 +529,39 @@ finish_phase_measurement e2e
         summary = json.loads(passed.stdout)
         self.assertEqual(0, summary["memory_high_events_delta"])
         self.assertEqual(0, summary["memory_max_events_delta"])
-        self.assertEqual(40, summary["memory_pressure_some_delta_usec"])
-        self.assertEqual(5, summary["memory_pressure_full_delta_usec"])
+        self.assertEqual(100_000, summary["memory_pressure_some_delta_usec"])
+        self.assertEqual(50_000, summary["memory_pressure_full_delta_usec"])
+        self.assertEqual(1_000_000, summary["phase_elapsed_monotonic_usec"])
+        self.assertEqual(100_000, summary["memory_pressure_some_budget_usec"])
+        self.assertEqual(50_000, summary["memory_pressure_full_budget_usec"])
+        self.assertEqual(1000, summary["memory_pressure_some_ratio_basis_points"])
+        self.assertEqual(500, summary["memory_pressure_full_ratio_basis_points"])
+        self.assertEqual(10, summary["memory_pressure_some_limit_percent"])
+        self.assertEqual(5, summary["memory_pressure_full_limit_percent"])
         self.assertEqual(4194304, summary["memory_high_overshoot_tolerance_bytes"])
-        self.assertEqual(8192, summary["memory_high_events_tolerance"])
-        healthy_frontend = finish(high=6679, peak=3867774976)
+        # Run 34372708368 observed these exact frontend counters. Its old
+        # contract did not capture monotonic elapsed time, so the 207,986,207us
+        # interval below is the approximate wall-clock interval visible in the
+        # GitHub log; new runs emit the exact monotonic interval in their JSON.
+        healthy_frontend = finish(
+            high=11_120,
+            peak=3_867_824_128,
+            started_usec=1_000_000,
+            finished_usec=208_986_207,
+            pressure_some_after=820_031,
+            pressure_full_after=675_141,
+        )
         self.assertEqual(0, healthy_frontend.returncode, healthy_frontend.stderr)
-        high_event_boundary = finish(high=8202)
-        self.assertEqual(0, high_event_boundary.returncode, high_event_boundary.stderr)
+        high_events_healthy_psi = finish(high=1_000_010)
+        self.assertEqual(0, high_events_healthy_psi.returncode, high_events_healthy_psi.stderr)
+        self.assertEqual(0, finish(pressure_some_after=100_100).returncode)
+        self.assertNotEqual(0, finish(pressure_some_after=100_101).returncode)
+        self.assertEqual(0, finish(pressure_full_after=50_050).returncode)
+        self.assertNotEqual(0, finish(pressure_full_after=50_051).returncode)
         for case in (
             {"high": 9},
-            {"high": 8203},
+            {"oom_after": 2},
+            {"oom_kill_after": 3},
             {"maximum": 21},
             {"peak": 3869663232},
             {"high": 101690, "peak": 3874357248},
@@ -425,6 +570,52 @@ finish_phase_measurement e2e
         ):
             with self.subTest(case=case):
                 self.assertNotEqual(0, finish(**case).returncode)
+
+        for case in (
+            {"finished_usec": 1_000_000},
+            {"finished_usec": 999_999},
+            {"pressure_some_after": 99},
+            {"pressure_full_after": 49},
+        ):
+            with self.subTest(clean_state=case):
+                failed = finish(**case, report_state=True)
+                self.assertNotEqual(0, failed.returncode)
+                self.assertEqual(1, len(failed.stdout.splitlines()), failed.stdout)
+                state = json.loads(failed.stdout)
+                self.assertEqual(1, state["finish_status"])
+                self.assertEqual("", state["active_phase"])
+                self.assertEqual("", state["active_sampler_pid"])
+                self.assertEqual("", state["active_sampler_sentinel"])
+                self.assertEqual(1, state["sampler_reaped"])
+                self.assertEqual(1, state["sentinel_absent"])
+                self.assertEqual(0, state["summary_lines"])
+                for key, value in state.items():
+                    if key.startswith("active_") and key not in {
+                        "active_phase", "active_sampler_pid", "active_sampler_sentinel"
+                    }:
+                        self.assertEqual(0, value, key)
+
+        for case in (
+            {"fail_event": "oom"},
+            {"fail_event": "max"},
+            {"fail_pressure": "some"},
+            {"fail_pressure": "full"},
+            {"fail_monotonic": True},
+            {"fail_cgroup": "memory.peak"},
+            {"fail_cgroup": "memory.swap.peak"},
+        ):
+            with self.subTest(final_read_failure=case):
+                failed = finish(**case, report_state=True)
+                self.assertNotEqual(0, failed.returncode)
+                self.assertEqual(1, len(failed.stdout.splitlines()), failed.stdout)
+                state = json.loads(failed.stdout)
+                self.assertEqual(1, state["finish_status"])
+                self.assertEqual("", state["active_phase"])
+                self.assertEqual("", state["active_sampler_pid"])
+                self.assertEqual("", state["active_sampler_sentinel"])
+                self.assertEqual(1, state["sampler_reaped"])
+                self.assertEqual(1, state["sentinel_absent"])
+                self.assertEqual(0, state["summary_lines"])
 
     def test_backend_service_data_reset_is_exact_guarded_and_idempotent(self):
         text = SCRIPT.read_text()
