@@ -8,7 +8,11 @@ readonly EXPECTED_MEMORY_BYTES=4294967296
 # Incus/cgroup v2 stores memory.high at page granularity. This is the
 # page-aligned value observed for the configured 90% of the 4 GiB hard limit.
 readonly MEMORY_FIT_LIMIT_BYTES=3865468928
-readonly MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES=16777216
+# The healthy frontend crossed memory.high by 2,306,048 bytes and recorded
+# 6,669 high events. The failed e2e crossed by 8,888,320 bytes with 101,680
+# events, so these bounds admit the former while rejecting sustained reclaim.
+readonly MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES=4194304
+readonly MEMORY_HIGH_EVENTS_TOLERANCE=8192
 readonly WATERFALL_REVISION=6df90210830b2ebe36eda6b96d91237914d000e4
 readonly WATERFALL_ROOT=/opt/self-hosted-ci/overworld-deps/waterfall
 readonly BACKEND_LOCK_SHA256=b235110fe83b4b3a4eafb337efc0bb8d7424aea33a72f0338b2192892ce79fdb
@@ -48,6 +52,10 @@ ACTIVE_SAMPLER_PID=
 ACTIVE_SAMPLER_SENTINEL=
 ACTIVE_OOM=0
 ACTIVE_OOM_KILL=0
+ACTIVE_HIGH=0
+ACTIVE_MAX=0
+ACTIVE_PRESSURE_SOME=0
+ACTIVE_PRESSURE_FULL=0
 ACTIVE_PGDATA=
 ACTIVE_PGBIN=
 
@@ -70,8 +78,19 @@ read_memory_event() {
   printf '%s' "$value"
 }
 
+read_memory_pressure_total() {
+  local stall=$1 line total
+  line=$(awk -v stall="$stall" '$1 == stall { if (seen++) exit 2; print } END { if (!seen) exit 1 }' \
+    /sys/fs/cgroup/memory.pressure) || return 1
+  [[ "$line" =~ ^(some|full)\ avg10=[0-9]+\.[0-9]+\ avg60=[0-9]+\.[0-9]+\ avg300=[0-9]+\.[0-9]+\ total=[0-9]+$ ]] || return 1
+  [[ ${BASH_REMATCH[1]} == "$stall" ]] || return 1
+  total=${line##* total=}
+  [[ "$total" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$total"
+}
+
 memory_sampler() {
-  local phase=$1 sentinel=$2 current peak swap_current swap_peak pids oom oom_kill
+  local phase=$1 sentinel=$2 current peak swap_current swap_peak pids oom oom_kill high max pressure_some pressure_full
   while [[ -e "$sentinel" ]]; do
     current=$(read_cgroup_value memory.current)
     peak=$(read_cgroup_value memory.peak)
@@ -80,8 +99,12 @@ memory_sampler() {
     pids=$(read_cgroup_value pids.current)
     oom=$(read_memory_event oom)
     oom_kill=$(read_memory_event oom_kill)
-    printf '{"phase":"%s","epoch_seconds":%s,"memory_current_bytes":%s,"memory_peak_bytes":%s,"memory_swap_current_bytes":%s,"memory_swap_peak_bytes":%s,"pids_current":%s,"oom":%s,"oom_kill":%s}\n' \
-      "$phase" "$(date +%s)" "$current" "$peak" "$swap_current" "$swap_peak" "$pids" "$oom" "$oom_kill" >> "$MEMORY_LOG"
+    high=$(read_memory_event high)
+    max=$(read_memory_event max)
+    pressure_some=$(read_memory_pressure_total some)
+    pressure_full=$(read_memory_pressure_total full)
+    printf '{"phase":"%s","epoch_seconds":%s,"memory_current_bytes":%s,"memory_peak_bytes":%s,"memory_swap_current_bytes":%s,"memory_swap_peak_bytes":%s,"pids_current":%s,"oom":%s,"oom_kill":%s,"memory_high_events":%s,"memory_max_events":%s,"memory_pressure_some_total_usec":%s,"memory_pressure_full_total_usec":%s}\n' \
+      "$phase" "$(date +%s)" "$current" "$peak" "$swap_current" "$swap_peak" "$pids" "$oom" "$oom_kill" "$high" "$max" "$pressure_some" "$pressure_full" >> "$MEMORY_LOG"
     sleep 1
   done
 }
@@ -92,6 +115,10 @@ start_phase_measurement() {
   ACTIVE_PHASE=$phase
   ACTIVE_OOM=$(read_memory_event oom)
   ACTIVE_OOM_KILL=$(read_memory_event oom_kill)
+  ACTIVE_HIGH=$(read_memory_event high)
+  ACTIVE_MAX=$(read_memory_event max)
+  ACTIVE_PRESSURE_SOME=$(read_memory_pressure_total some)
+  ACTIVE_PRESSURE_FULL=$(read_memory_pressure_total full)
   ACTIVE_SAMPLER_SENTINEL="$STATE_ROOT/memory-$phase.running"
   : > "$ACTIVE_SAMPLER_SENTINEL"
   memory_sampler "$phase" "$ACTIVE_SAMPLER_SENTINEL" &
@@ -99,37 +126,47 @@ start_phase_measurement() {
 }
 
 finish_phase_measurement() {
-  local phase=$1 oom_after oom_kill_after phase_peak phase_swap_peak oom_delta oom_kill_delta sampler_status=0
+  local phase=$1 oom_after oom_kill_after high_after max_after pressure_some_after pressure_full_after
+  local phase_peak phase_swap_peak oom_delta oom_kill_delta high_delta max_delta pressure_some_delta pressure_full_delta sampler_status=0
   [[ "$ACTIVE_PHASE" == "$phase" ]]
   unlink "$ACTIVE_SAMPLER_SENTINEL" 2>/dev/null || true
   wait "$ACTIVE_SAMPLER_PID" 2>/dev/null || sampler_status=$?
   oom_after=$(read_memory_event oom)
   oom_kill_after=$(read_memory_event oom_kill)
+  high_after=$(read_memory_event high)
+  max_after=$(read_memory_event max)
+  pressure_some_after=$(read_memory_pressure_total some)
+  pressure_full_after=$(read_memory_pressure_total full)
   oom_delta=$((oom_after - ACTIVE_OOM))
   oom_kill_delta=$((oom_kill_after - ACTIVE_OOM_KILL))
+  high_delta=$((high_after - ACTIVE_HIGH))
+  max_delta=$((max_after - ACTIVE_MAX))
+  pressure_some_delta=$((pressure_some_after - ACTIVE_PRESSURE_SOME))
+  pressure_full_delta=$((pressure_full_after - ACTIVE_PRESSURE_FULL))
   # Enforce the limit from root-owned cgroup counters. JSONL is diagnostic
   # only: untrusted workload code may share the runner UID and mutate it.
   phase_peak=$(read_cgroup_value memory.peak)
   phase_swap_peak=$(read_cgroup_value memory.swap.peak)
-  printf '{"phase":"%s","memory_peak_bytes":%s,"memory_swap_peak_bytes":%s,"oom_delta":%s,"oom_kill_delta":%s,"fit_limit_bytes":%s,"memory_high_overshoot_tolerance_bytes":%s}\n' \
-    "$phase" "$phase_peak" "$phase_swap_peak" "$oom_delta" "$oom_kill_delta" "$MEMORY_FIT_LIMIT_BYTES" "$MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES" | tee -a "$MEMORY_SUMMARY"
+  printf '{"phase":"%s","memory_peak_bytes":%s,"memory_swap_peak_bytes":%s,"oom_delta":%s,"oom_kill_delta":%s,"memory_high_events_delta":%s,"memory_max_events_delta":%s,"memory_pressure_some_delta_usec":%s,"memory_pressure_full_delta_usec":%s,"fit_limit_bytes":%s,"memory_high_overshoot_tolerance_bytes":%s,"memory_high_events_tolerance":%s}\n' \
+    "$phase" "$phase_peak" "$phase_swap_peak" "$oom_delta" "$oom_kill_delta" "$high_delta" "$max_delta" "$pressure_some_delta" "$pressure_full_delta" "$MEMORY_FIT_LIMIT_BYTES" "$MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES" "$MEMORY_HIGH_EVENTS_TOLERANCE" | tee -a "$MEMORY_SUMMARY"
   ACTIVE_PHASE=
   ACTIVE_SAMPLER_PID=
   ACTIVE_SAMPLER_SENTINEL=
-  (( sampler_status == 0 ))
-  (( oom_delta == 0 ))
-  (( oom_kill_delta == 0 ))
-  (( phase_peak < MEMORY_FIT_LIMIT_BYTES + MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES ))
+  (( sampler_status == 0 && oom_delta == 0 && oom_kill_delta == 0 &&
+     high_delta >= 0 && high_delta <= MEMORY_HIGH_EVENTS_TOLERANCE && max_delta == 0 &&
+     pressure_some_delta >= 0 && pressure_full_delta >= 0 &&
+     phase_swap_peak == 0 &&
+     phase_peak < MEMORY_FIT_LIMIT_BYTES + MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES ))
 }
 
 require_image_contract() {
   local chromium_candidates headless_candidates privilege_helper=/usr/bin/sudo
   (( EUID >= 1000 ))
   [[ $(stat -c %U:%G:%a "$privilege_helper") == root:root:750 && ! -x "$privilege_helper" ]]
-  [[ ! -w /sys/fs/cgroup/memory.peak && ! -w /sys/fs/cgroup/memory.events ]]
+  [[ ! -w /sys/fs/cgroup/memory.peak && ! -w /sys/fs/cgroup/memory.events && ! -w /sys/fs/cgroup/memory.pressure ]]
   [[ -r /sys/fs/cgroup/memory.current && -r /sys/fs/cgroup/memory.peak ]]
   [[ -r /sys/fs/cgroup/memory.swap.current && -r /sys/fs/cgroup/memory.swap.peak ]]
-  [[ -r /sys/fs/cgroup/memory.events && -r /sys/fs/cgroup/pids.current ]]
+  [[ -r /sys/fs/cgroup/memory.events && -r /sys/fs/cgroup/memory.pressure && -r /sys/fs/cgroup/pids.current ]]
   [[ $(cat /sys/fs/cgroup/memory.max) == "$EXPECTED_MEMORY_BYTES" ]]
   [[ $(cat /sys/fs/cgroup/memory.high) == "$MEMORY_FIT_LIMIT_BYTES" ]]
   [[ $(bun --version) == 1.4.0 ]]
@@ -221,6 +258,25 @@ stop_postgres() {
   ACTIVE_PGBIN=
 }
 
+reset_backend_service_data() {
+  local path runner_identity
+  [[ "$PG16_DATA" == "$STATE_ROOT/postgres-16" ]] || return 1
+  [[ "$MINIO_DATA" == "$STATE_ROOT/minio" ]] || return 1
+  runner_identity="$(id -u):$(id -g)"
+  for path in "$PG16_DATA" "$MINIO_DATA"; do
+    if [[ -e "$path" || -L "$path" ]]; then
+      [[ -d "$path" && ! -L "$path" ]] || return 1
+      [[ $(stat -c '%u:%g:%a' "$path") == "$runner_identity:700" ]] || return 1
+    fi
+  done
+  rm -rf -- "$PG16_DATA" "$MINIO_DATA"
+  [[ ! -e "$PG16_DATA" && ! -L "$PG16_DATA" ]] || return 1
+  [[ ! -e "$MINIO_DATA" && ! -L "$MINIO_DATA" ]] || return 1
+  mkdir "$MINIO_DATA"
+  chmod 700 "$MINIO_DATA"
+  [[ $(stat -c '%u:%g:%a' "$MINIO_DATA") == "$runner_identity:700" ]] || return 1
+}
+
 stop_local_service() {
   local name=$1 pid
   if [[ -f "$STATE_ROOT/$name.pid" ]]; then
@@ -261,7 +317,7 @@ start_postgres() {
   local major=$1 data=$2 port=$3 expected_postgis=$4 database bin
   bin="/usr/lib/postgresql/$major/bin"
   "$bin/initdb" -D "$data" --username=overworld --auth=trust --no-instructions >/dev/null
-  "$bin/pg_ctl" -D "$data" -o "-F -k $PGSOCKET -p $port -h 127.0.0.1" -w start >/dev/null
+  "$bin/pg_ctl" -D "$data" -o "-F -c shared_buffers=32MB -k $PGSOCKET -p $port -h 127.0.0.1" -w start >/dev/null
   ACTIVE_PGDATA=$data
   ACTIVE_PGBIN=$bin
   for database in "${@:5}"; do "$bin/createdb" -h 127.0.0.1 -p "$port" -U overworld "$database"; done
@@ -309,6 +365,7 @@ phase_backend() {
     bun test src/modules/inference/inventory-to-report.stage-push.contract.pg.test.ts)
   stop_local_services
   stop_postgres
+  reset_backend_service_data
 }
 
 phase_frontend() {

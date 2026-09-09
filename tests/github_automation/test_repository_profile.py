@@ -229,11 +229,19 @@ class RepositoryProfileTests(unittest.TestCase):
             self.assertEqual(1, text.count(phase))
         for evidence in (
             "memory.current", "memory.peak", "memory.events", "memory.swap.current",
-            "memory.swap.peak", "pids.current", "memory.max", "memory.jsonl",
+            "memory.swap.peak", "memory.pressure", "pids.current", "memory.max", "memory.jsonl",
             "MEMORY_FIT_LIMIT_BYTES=3865468928", "oom_kill_delta",
-            "MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES=16777216",
-            "! -w /sys/fs/cgroup/memory.peak", "sampler_status=0",
-            "sampler_status=$?", "(( sampler_status == 0 ))",
+            "MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES=4194304",
+            "MEMORY_HIGH_EVENTS_TOLERANCE=8192",
+            "memory_high_events_delta", "memory_max_events_delta",
+            "memory_pressure_some_delta_usec", "memory_pressure_full_delta_usec",
+            "! -w /sys/fs/cgroup/memory.peak", "! -w /sys/fs/cgroup/memory.pressure",
+            "sampler_status=0",
+            "sampler_status=$?", "sampler_status == 0",
+            "high_delta >= 0", "high_delta <= MEMORY_HIGH_EVENTS_TOLERANCE",
+            "max_delta == 0",
+            "phase_swap_peak == 0",
+            "phase_peak < MEMORY_FIT_LIMIT_BYTES + MEMORY_HIGH_OVERSHOOT_TOLERANCE_BYTES",
             "-r /sys/fs/cgroup/memory.current", "-r /sys/fs/cgroup/pids.current",
             '$(cat /sys/fs/cgroup/memory.high) == "$MEMORY_FIT_LIMIT_BYTES"',
             "GIT_NO_REPLACE_OBJECTS=1",
@@ -290,6 +298,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn('bun ./node_modules/.bin/next dev --webpack -p "$FRONTEND_PORT")', text)
         self.assertIn("start_postgres 16", text)
         self.assertIn("start_postgres 17", text)
+        self.assertEqual(1, text.count('-o "-F -c shared_buffers=32MB -k $PGSOCKET -p $port -h 127.0.0.1"'))
         self.assertIn("PG16_DATA", text)
         self.assertIn("PG17_DATA", text)
         self.assertIn("stop_postgres", text)
@@ -308,6 +317,203 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn("! -e .git/info/sparse-checkout", text)
         self.assertIn("unlink .git/index", text)
         self.assertIn("HEAD^{tree}", text)
+
+    def test_memory_pressure_parser_is_exact_and_fail_closed(self):
+        text = SCRIPT.read_text()
+        parser = text[
+            text.index("read_memory_pressure_total() {") : text.index("\nmemory_sampler() {")
+        ].replace("/sys/fs/cgroup/memory.pressure", '"$PRESSURE_FILE"')
+
+        def read(candidate: str, stall: str) -> subprocess.CompletedProcess[str]:
+            with tempfile.TemporaryDirectory() as directory:
+                pressure = Path(directory) / "memory.pressure"
+                pressure.write_text(candidate)
+                return subprocess.run(
+                    ["bash", "-c", f"{parser}\nread_memory_pressure_total {stall}"],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "PRESSURE_FILE": str(pressure)},
+                )
+
+        valid = (
+            "some avg10=0.00 avg60=1.25 avg300=2.50 total=12345\n"
+            "full avg10=0.00 avg60=0.01 avg300=0.02 total=678\n"
+        )
+        some = read(valid, "some")
+        self.assertEqual(0, some.returncode, some.stderr)
+        self.assertEqual("12345", some.stdout)
+        full = read(valid, "full")
+        self.assertEqual(0, full.returncode, full.stderr)
+        self.assertEqual("678", full.stdout)
+        for malformed in (
+            "some avg10=0 avg60=1.25 avg300=2.50 total=12345\n",
+            "some avg10=0.00 avg60=1.25 avg300=2.50 total=not-a-number\n",
+            valid + "some avg10=0.00 avg60=0.00 avg300=0.00 total=12346\n",
+            "full avg10=0.00 avg60=0.01 avg300=0.02 total=678\n",
+        ):
+            with self.subTest(malformed=malformed):
+                self.assertNotEqual(0, read(malformed, "some").returncode)
+
+    def test_phase_memory_guard_rejects_reclaim_hard_limit_and_sampler_failure(self):
+        prefix = SCRIPT.read_text().split("require_image_contract() {", 1)[0]
+
+        def finish(*, high: int = 10, maximum: int = 20, peak: int = 3865468927,
+                   swap_peak: int = 0, sampler_status: int = 0) -> subprocess.CompletedProcess[str]:
+            with tempfile.TemporaryDirectory() as directory:
+                command = prefix + f"""
+ACTIVE_PHASE=e2e
+ACTIVE_OOM=1
+ACTIVE_OOM_KILL=2
+ACTIVE_HIGH=10
+ACTIVE_MAX=20
+ACTIVE_PRESSURE_SOME=100
+ACTIVE_PRESSURE_FULL=50
+ACTIVE_SAMPLER_SENTINEL="$STATE_ROOT/test.running"
+: > "$ACTIVE_SAMPLER_SENTINEL"
+(exit {sampler_status}) &
+ACTIVE_SAMPLER_PID=$!
+read_memory_event() {{
+  case "$1" in
+    oom) printf '1' ;;
+    oom_kill) printf '2' ;;
+    high) printf '{high}' ;;
+    max) printf '{maximum}' ;;
+    *) return 1 ;;
+  esac
+}}
+read_memory_pressure_total() {{
+  case "$1" in some) printf '140' ;; full) printf '55' ;; *) return 1 ;; esac
+}}
+read_cgroup_value() {{
+  case "$1" in memory.peak) printf '{peak}' ;; memory.swap.peak) printf '{swap_peak}' ;; *) return 1 ;; esac
+}}
+finish_phase_measurement e2e
+"""
+                return subprocess.run(
+                    ["bash"],
+                    input=command,
+                    capture_output=True,
+                    text=True,
+                    env={
+                        **os.environ,
+                        "RUNNER_TEMP": str(Path(directory) / "runner-temp"),
+                        "PROFILE_TESTED_MERGE_SHA": "0" * 40,
+                    },
+                )
+
+        passed = finish()
+        self.assertEqual(0, passed.returncode, passed.stderr)
+        summary = json.loads(passed.stdout)
+        self.assertEqual(0, summary["memory_high_events_delta"])
+        self.assertEqual(0, summary["memory_max_events_delta"])
+        self.assertEqual(40, summary["memory_pressure_some_delta_usec"])
+        self.assertEqual(5, summary["memory_pressure_full_delta_usec"])
+        self.assertEqual(4194304, summary["memory_high_overshoot_tolerance_bytes"])
+        self.assertEqual(8192, summary["memory_high_events_tolerance"])
+        healthy_frontend = finish(high=6679, peak=3867774976)
+        self.assertEqual(0, healthy_frontend.returncode, healthy_frontend.stderr)
+        high_event_boundary = finish(high=8202)
+        self.assertEqual(0, high_event_boundary.returncode, high_event_boundary.stderr)
+        for case in (
+            {"high": 9},
+            {"high": 8203},
+            {"maximum": 21},
+            {"peak": 3869663232},
+            {"high": 101690, "peak": 3874357248},
+            {"swap_peak": 1},
+            {"sampler_status": 1},
+        ):
+            with self.subTest(case=case):
+                self.assertNotEqual(0, finish(**case).returncode)
+
+    def test_backend_service_data_reset_is_exact_guarded_and_idempotent(self):
+        text = SCRIPT.read_text()
+        helper = text[
+            text.index("reset_backend_service_data() {") : text.index("\nstop_local_service() {")
+        ]
+
+        def reset(*, drift: bool = False, symlink: bool = False,
+                  permissive: bool = False):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "state"
+                root.mkdir()
+                postgres = root / ("other-postgres" if drift else "postgres-16")
+                minio = root / "minio"
+                backing = root / "postgres-backing"
+                if symlink:
+                    backing.mkdir(mode=0o700)
+                    (backing / "keep").write_text("owned elsewhere")
+                    postgres.symlink_to(backing, target_is_directory=True)
+                else:
+                    postgres.mkdir(mode=0o700)
+                    (postgres / "discard").write_text("backend data")
+                    if permissive:
+                        postgres.chmod(0o755)
+                minio.mkdir(mode=0o700)
+                (minio / "discard").write_text("backend objects")
+                command = f"""
+set -euo pipefail
+STATE_ROOT={root}
+PG16_DATA={postgres}
+MINIO_DATA={minio}
+stat() {{
+  [[ "$1" == -c && "$2" == '%u:%g:%a' ]]
+  "$PYTHON" -c 'import os, stat, sys; value=os.stat(sys.argv[1]); print(f"{{value.st_uid}}:{{value.st_gid}}:{{stat.S_IMODE(value.st_mode):o}}")' "$3"
+}}
+{helper}
+reset_backend_service_data
+reset_backend_service_data
+"""
+                completed = subprocess.run(
+                    ["bash"],
+                    input=command,
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "PYTHON": sys.executable},
+                )
+                observed = {
+                    "postgres_exists": postgres.exists(),
+                    "postgres_is_symlink": postgres.is_symlink(),
+                    "postgres_discard": (postgres / "discard").is_file(),
+                    "minio_exists": minio.is_dir(),
+                    "minio_discard": (minio / "discard").is_file(),
+                    "minio_entries": list(minio.iterdir()) if minio.is_dir() else None,
+                    "minio_mode": minio.stat().st_mode & 0o777 if minio.is_dir() else None,
+                    "backing_keep": (backing / "keep").is_file(),
+                }
+                return completed, observed
+
+        completed, observed = reset()
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertFalse(observed["postgres_exists"])
+        self.assertTrue(observed["minio_exists"])
+        self.assertEqual([], observed["minio_entries"])
+        self.assertEqual(0o700, observed["minio_mode"])
+
+        completed, observed = reset(drift=True)
+        self.assertNotEqual(0, completed.returncode)
+        self.assertTrue(observed["postgres_exists"])
+        self.assertTrue(observed["postgres_discard"])
+        self.assertTrue(observed["minio_discard"])
+
+        completed, observed = reset(symlink=True)
+        self.assertNotEqual(0, completed.returncode)
+        self.assertTrue(observed["postgres_is_symlink"])
+        self.assertTrue(observed["backing_keep"])
+        self.assertTrue(observed["minio_discard"])
+
+        completed, observed = reset(permissive=True)
+        self.assertNotEqual(0, completed.returncode)
+        self.assertTrue(observed["postgres_discard"])
+        self.assertTrue(observed["minio_discard"])
+
+    def test_backend_resets_service_data_only_after_services_stop(self):
+        text = SCRIPT.read_text()
+        backend = text[text.index("phase_backend() {") : text.index("\nphase_frontend() {")]
+        reset = backend.index("  reset_backend_service_data\n")
+        self.assertLess(backend.index("  stop_local_services\n"), reset)
+        self.assertLess(backend.index("  stop_postgres\n"), reset)
+        self.assertEqual(1, backend.count("  reset_backend_service_data\n"))
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "GNU stat contract")
     def test_checkout_worktree_config_is_exactly_normalized(self):
