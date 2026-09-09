@@ -870,8 +870,117 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn("Conflicts=${FENCED_SERVICES[*]}", source)
         self.assertIn("--collect", source)
         self.assertIn("KillMode=control-group", source)
-        self.assertIn("systemctl is-active --quiet \"${BUILD_PROXY_UNIT}\" && status=1", source)
+        initial_observation = source.index("declare -A was_active")
+        first_mutation = source.index("install -d -o root -g root -m 0700")
+        self.assertLess(initial_observation, first_mutation)
+        initial_block = source[initial_observation:first_mutation]
+        self.assertIn('systemctl show "${service}" --property=ActiveState --value', initial_block)
+        self.assertIn('active|inactive) was_active["${service}"]="${observed_state}"', initial_block)
+        self.assertIn('|| die "initial service state cannot be observed: ${service}"', initial_block)
+        self.assertIn('*) die "initial service state is not exact: ${service}"', initial_block)
         self.assertIn("grep -Eq '(^|:)8079$'", source)
+        cleanup = source[source.index("cleanup(){") : source.index("\n}\ntrap cleanup EXIT")]
+        receipt = "emit_built_receipt||status=1"
+        self.assertEqual(1, source.count('printf \'{"status":"built"'))
+        self.assertEqual(1, cleanup.count(receipt))
+        self.assertIn('rm -rf --one-file-system "${workdir}"||status=1', cleanup)
+        self.assertIn('[[ ! -e "${workdir}" ]]||status=1', cleanup)
+        self.assertEqual(2, cleanup.count('instance_inventory="$(incus list'))
+        self.assertIn(
+            'observed_state="$(systemctl show "${BUILD_PROXY_UNIT}" --property=ActiveState --value',
+            cleanup,
+        )
+        self.assertIn('listeners="$(ss -H -ltn 2>/dev/null)"', cleanup)
+        self.assertGreaterEqual(cleanup.count("observer_status=$?"), 4)
+        self.assertLess(
+            cleanup.index('systemctl stop "${BUILD_PROXY_UNIT}"'),
+            cleanup.index(receipt),
+        )
+        self.assertLess(cleanup.index("grep -Eq '(^|:)8079$'"), cleanup.index(receipt))
+        self.assertLess(cleanup.index('for service in "${FENCED_SERVICES[@]}"'), cleanup.index(receipt))
+        self.assertLess(cleanup.index('[[ ! -e "${workdir}" ]]'), cleanup.index(receipt))
+        self.assertGreater(source.index("transaction_succeeded=true"), source.index("trap cleanup EXIT"))
+
+    def test_build_receipt_requires_successful_cleanup_and_service_restoration(self) -> None:
+        source = BUILDER.read_text(encoding="utf-8")
+        finalization = source[
+            source.index("emit_built_receipt(){") : source.index("\n}\ntrap cleanup EXIT") + 2
+        ]
+        self.assertIn('[[ "${was_active[${service}]}" == active ]]', finalization)
+        finalization = finalization.replace(
+            '[[ "${was_active[${service}]}" == active ]]',
+            '[[ "$(was_active "${service}")" == active ]]',
+        ).replace(
+            '"${was_active[${service}]}"',
+            '"$(was_active "${service}")"',
+        )
+
+        def run_cleanup(failure: str | None = None) -> subprocess.CompletedProcess[str]:
+            with tempfile.TemporaryDirectory() as directory:
+                workdir = Path(directory) / "transaction"
+                workdir.mkdir()
+                script = f"""
+set -u
+PROJECT=ci-jit
+BUILD_PROXY_UNIT=self-hosted-ci-profile-build-proxy.service
+builder=builder
+published_verifier=verifier
+transaction_succeeded=true
+alias_published=true
+published_fingerprint={'f' * 64}
+candidate_alias=overworld-pr-v1-{'a' * 12}
+base_fingerprint={'b' * 64}
+manifest_sha={'c' * 64}
+workdir={shlex.quote(str(workdir))}
+FAILURE={shlex.quote(failure or '')}
+FENCED_SERVICES=(active.service inactive.service)
+was_active() {{ [[ "$1" == active.service ]] && builtin printf active || builtin printf inactive; }}
+printf() {{
+  if [[ "$FAILURE" == printf && "$1" == *status*built* ]]; then return 1; fi
+  builtin printf "$@"
+}}
+incus() {{
+  if [[ "$FAILURE" == incus && "$1" == list ]]; then return 1; fi
+  return 0
+}}
+ss() {{ [[ "$FAILURE" != ss ]]; }}
+rm() {{ local target="${{!#}}"; /bin/rm -rf -- "$target"; }}
+systemctl() {{
+  if [[ "$1" == show ]]; then
+    [[ "$FAILURE" != systemctl ]] || return 1
+    case "$2" in
+      "$BUILD_PROXY_UNIT"|inactive.service) printf inactive ;;
+      active.service) printf active ;;
+      *) return 2 ;;
+    esac
+    return 0
+  fi
+  if [[ "$FAILURE" == restore && "$1" == start && "$2" == active.service ]]; then return 1; fi
+  return 0
+}}
+{finalization}
+(exit 0)
+cleanup
+"""
+                return subprocess.run(
+                    ["bash"], input=script, text=True, capture_output=True
+                )
+
+        success = run_cleanup()
+        self.assertEqual(0, success.returncode, success.stderr)
+        receipts = [
+            json.loads(line)
+            for line in success.stdout.splitlines()
+            if line.startswith('{"status":"built"')
+        ]
+        self.assertEqual(1, len(receipts))
+        self.assertEqual("built", receipts[0]["status"])
+
+        for failure in ("restore", "incus", "systemctl", "ss", "printf"):
+            with self.subTest(failure=failure):
+                failed = run_cleanup(failure)
+                self.assertNotEqual(0, failed.returncode)
+                self.assertNotIn('{"status":"built"', failed.stdout)
 
     def test_builder_is_deleted_before_published_image_verification(self) -> None:
         lines = BUILDER.read_text(encoding="utf-8").splitlines()
