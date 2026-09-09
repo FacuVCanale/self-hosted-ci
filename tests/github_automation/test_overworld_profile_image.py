@@ -468,13 +468,13 @@ class OverworldProfileImageTests(unittest.TestCase):
                         module.copy_dependency_tree(source, destination)
                     self.assertFalse(destination.exists())
 
-    def test_regenerated_modules_cleanup_accepts_only_exact_backend_tree(self) -> None:
+    def test_frontend_backend_seed_and_cleanup_accept_only_the_exact_snapshot(self) -> None:
         spec = importlib.util.spec_from_file_location("overworld_image_provision", PROFILE / "provision.py")
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
-        def make_tree(root: Path, *, backend: object = "exact", frontend: object = None) -> tuple[Path, Path]:
+        def make_tree(root: Path, *, backend: object = None) -> tuple[Path, Path]:
             overworld = root / "overworld"
             dependencies = root / "dependencies"
             snapshot = dependencies / "backend-node_modules"
@@ -494,29 +494,94 @@ class OverworldProfileImageTests(unittest.TestCase):
                 (overworld / "backend/node_modules").write_text("not a tree", encoding="utf-8")
             elif backend == "symlink":
                 (overworld / "backend/node_modules").symlink_to(snapshot, target_is_directory=True)
-            if frontend is not None:
-                target = overworld / "frontend/node_modules"
-                if frontend == "dir": target.mkdir()
-                elif frontend == "file": target.write_text("unexpected", encoding="utf-8")
-                elif frontend == "symlink": target.symlink_to(snapshot, target_is_directory=True)
             return overworld, dependencies
 
         with tempfile.TemporaryDirectory() as directory:
             overworld, dependencies = make_tree(Path(directory))
-            module.remove_exact_regenerated_modules(overworld, dependencies)
+            digest = module.seed_backend_snapshot_for_frontend(overworld, dependencies)
+            self.assertEqual(module.tree_digest(dependencies / "backend-node_modules"), digest)
+            self.assertEqual(module.tree_digest(overworld / "backend/node_modules"), digest)
+            module.remove_exact_regenerated_modules(overworld, dependencies, digest)
             self.assertFalse((overworld / "backend/node_modules").exists())
 
-        for backend in (None, "drift", "file", "symlink"):
+        for backend in ("exact", "drift", "file", "symlink"):
             with self.subTest(backend=backend), tempfile.TemporaryDirectory() as directory:
                 overworld, dependencies = make_tree(Path(directory), backend=backend)
-                with self.assertRaises(SystemExit):
-                    module.remove_exact_regenerated_modules(overworld, dependencies)
+                with self.assertRaisesRegex(SystemExit, "seed destination is not absent"):
+                    module.seed_backend_snapshot_for_frontend(overworld, dependencies)
+
+        for mutation in ("seed", "snapshot"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                overworld, dependencies = make_tree(Path(directory))
+                digest = module.seed_backend_snapshot_for_frontend(overworld, dependencies)
+                root = (
+                    overworld / "backend/node_modules"
+                    if mutation == "seed"
+                    else dependencies / "backend-node_modules"
+                )
+                (root / "package.txt").write_text("mutated", encoding="utf-8")
+                with self.assertRaisesRegex(SystemExit, "drifted|mutated"):
+                    module.remove_exact_regenerated_modules(overworld, dependencies, digest)
 
         for frontend in ("dir", "file", "symlink"):
             with self.subTest(frontend=frontend), tempfile.TemporaryDirectory() as directory:
-                overworld, dependencies = make_tree(Path(directory), frontend=frontend)
+                overworld, dependencies = make_tree(Path(directory))
+                digest = module.seed_backend_snapshot_for_frontend(overworld, dependencies)
+                target = overworld / "frontend/node_modules"
+                snapshot = dependencies / "backend-node_modules"
+                if frontend == "dir": target.mkdir()
+                elif frontend == "file": target.write_text("unexpected", encoding="utf-8")
+                elif frontend == "symlink": target.symlink_to(snapshot, target_is_directory=True)
                 with self.assertRaisesRegex(SystemExit, "unexpected regenerated frontend"):
-                    module.remove_exact_regenerated_modules(overworld, dependencies)
+                    module.remove_exact_regenerated_modules(overworld, dependencies, digest)
+
+    def test_frontend_install_runs_after_the_exact_backend_snapshot_is_seeded(self) -> None:
+        syntax = ast.parse((PROFILE / "provision.py").read_text(encoding="utf-8"))
+        main = next(
+            node
+            for node in syntax.body
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+        install_loop = next(
+            node
+            for node in main.body
+            if isinstance(node, ast.For)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "component"
+            and ast.unparse(node.iter) == "('backend', 'frontend')"
+        )
+        install = next(
+            statement
+            for statement in install_loop.body
+            if isinstance(statement, ast.Expr)
+            and "run('bun', 'install', '--frozen-lockfile'" in ast.unparse(statement)
+        )
+        backend = next(
+            statement
+            for statement in install_loop.body
+            if isinstance(statement, ast.If)
+            and ast.unparse(statement.test) == "component == 'backend'"
+            and "seed_backend_snapshot_for_frontend" in ast.unparse(statement)
+        )
+        seed = next(
+            statement
+            for statement in backend.body
+            if isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "backend_snapshot_digest"
+                for target in statement.targets
+            )
+        )
+        self.assertLess(install_loop.body.index(install), install_loop.body.index(backend))
+        self.assertIn("seed_backend_snapshot_for_frontend", ast.unparse(seed.value))
+        cleanup = next(
+            statement
+            for statement in main.body
+            if isinstance(statement, ast.Expr)
+            and "remove_exact_regenerated_modules" in ast.unparse(statement)
+        )
+        self.assertLess(main.body.index(install_loop), main.body.index(cleanup))
 
     def test_image_verifier_enforces_runner_accessible_waterfall_python(self) -> None:
         spec = importlib.util.spec_from_file_location("overworld_image_verify", PROFILE / "verify.py")
@@ -993,7 +1058,8 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn('next_metadata.get("version") != "16.2.3"', source)
         self.assertIn('shutil.copytree(next_package, installed_next, symlinks=False)', source)
         self.assertIn('detach_regular_files(installed_next)', source)
-        self.assertEqual(2, source.count('copy_dependency_tree(') - 1)
+        self.assertEqual(3, source.count('copy_dependency_tree(') - 1)
+        self.assertIn('copy_dependency_tree(backend_snapshot, backend)', source)
         self.assertIn('copy_dependency_tree(source_modules, target_modules)', source)
         self.assertIn('copy_dependency_tree(target_modules, sealed_frontend)', source)
         self.assertIn('detach_regular_files(sealed_frontend)', source)
@@ -1008,6 +1074,10 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertIn('frontend dependency snapshot retained a symlink ancestor', source)
         self.assertIn('if component == "backend":', source)
         self.assertIn('shutil.move(str(source_modules), target_modules)', source)
+        self.assertIn(
+            'backend_snapshot_digest = seed_backend_snapshot_for_frontend(overworld, dependencies)',
+            source,
+        )
         self.assertIn('browser-logs/file-logger.js', source)
         self.assertIn('node-environment-extensions/console-file.js', source)
         self.assertEqual(1, source.count('"bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts"'))
@@ -1068,7 +1138,10 @@ class OverworldProfileImageTests(unittest.TestCase):
             'if tree_digest(modules) != before:',
         ):
             self.assertIn(offline_smoke_contract, source)
-        regenerated_cleanup = source.index('remove_exact_regenerated_modules(overworld, dependencies)', source.index("def main"))
+        regenerated_cleanup = source.index(
+            'remove_exact_regenerated_modules(overworld, dependencies, backend_snapshot_digest)',
+            source.index("def main"),
+        )
         hardening = source.index('for path in dependencies.rglob("*")')
         copying = source.index('shutil.copytree(overworld, smoke_root')
         executing = source.index('"bun", "install", "--frozen-lockfile", "--offline", "--ignore-scripts"')
