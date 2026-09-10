@@ -28,6 +28,7 @@ from github_automation.local_approval import (
     PilotWorkRequestBuilder,
     WorkerAuthorityResolver,
 )
+from github_automation.pr_autodispatch import AutoDispatchError, OpenPullRequest, plan
 from github_automation.pilot_checks import (
     GateAppAuthorityV1,
     GateCheckClient,
@@ -143,7 +144,7 @@ def root_config(path: Path):
     }
     if (
         not isinstance(value, dict)
-        or set(value) - {"gate"} != required
+        or set(value) - {"gate", "auto_dispatch"} != required
         or value["schema_version"] != 1
         or value["mode"] not in {"ci-jit-pilot", "ci-gate-full"}
     ):
@@ -184,6 +185,16 @@ def root_config(path: Path):
         or gate["private_key_file"] == value["github_app_private_key_file"]
     ):
         raise LocalApprovalError("outbound worker gate block is invalid")
+    auto = value.get("auto_dispatch")
+    if auto is not None and (
+        not isinstance(auto, dict)
+        or set(auto) != {"enabled", "poll_seconds"}
+        or not isinstance(auto["enabled"], bool)
+        or isinstance(auto["poll_seconds"], bool)
+        or not isinstance(auto["poll_seconds"], int)
+        or not 15 <= auto["poll_seconds"] <= 3600
+    ):
+        raise LocalApprovalError("outbound worker auto_dispatch block is invalid")
     return value
 
 
@@ -319,6 +330,12 @@ def runtime(config_path):
     state = WorkerState(Path(c["worker_state_file"]))
     signer = FileAllocationSigner(Path(c["allocation_signer_key_file"]))
     checks = _gate_publisher(c, client)
+    auto = c.get("auto_dispatch")
+    dispatcher = (
+        AutoDispatcher(client, source, c["repository"])
+        if isinstance(auto, dict) and auto.get("enabled")
+        else None
+    )
     worker = (
         PilotWorker(
             state, source, broker, github, signer,
@@ -328,6 +345,53 @@ def runtime(config_path):
         else OutboundWorker(state, source, broker, github, signer)
     )
     return c, source, worker
+
+
+class AutoDispatcher:
+    """Poll the exact repository and keep approvals aligned with its open PRs.
+
+    This is the only automatic entry point into the control plane, and it is a
+    poll: nothing listens, nothing is relayed, and its authority is the same
+    selected-repository App the worker already holds. It never widens beyond the
+    one configured repository and never cancels a different pull request's work.
+    """
+
+    def __init__(self, client, source, repository):
+        self.client = client
+        self.source = source
+        self.repository = repository
+
+    def reconcile_once(self):
+        token = self.client.authenticate()
+        listed = self.client.open_pull_requests(token)
+        actions = plan(
+            open_pull_requests=[
+                OpenPullRequest(number, head) for number, head in listed
+            ],
+            approvals=self.source.status(self.repository),
+        )
+        applied = []
+        for action in actions:
+            try:
+                if action.kind == "revoke":
+                    self.source.revoke(self.repository, action.pr_number)
+                else:
+                    self.source.approve(self.repository, action.pr_number)
+            except LocalApprovalError as exc:
+                # One unapprovable pull request must never stop the others.
+                applied.append({
+                    "pr": action.pr_number, "kind": action.kind,
+                    "result": "blocked", "code": type(exc).__name__,
+                })
+                continue
+            applied.append({
+                "pr": action.pr_number, "kind": action.kind,
+                "head_sha": action.head_sha, "reason": action.reason,
+            })
+        return {
+            "open_pull_requests": len(listed),
+            "actions": applied,
+        }
 
 
 def _gate_publisher(c, dispatch_client):
@@ -389,6 +453,7 @@ def main(argv=None):
     status.add_argument("--repository")
     status.add_argument("--pr", type=int)
     sub.add_parser("run-once")
+    sub.add_parser("auto-once")
     sub.add_parser("serve")
     a = p.parse_args(argv)
     if a.command == "plan":
@@ -398,7 +463,7 @@ def main(argv=None):
                     "mode": "plan",
                     "inbound_listener": False,
                     "external_relay": False,
-                    "automatic_pr_polling": False,
+                    "automatic_pr_polling": "opt-in-outbound-poll-of-one-repository",
                     "authority": "selected-repository-github-app-plus-local-authority-v1",
                     "approval": "operator-explicit",
                     "pull_request_checks": "gate-app-when-configured",
@@ -408,7 +473,7 @@ def main(argv=None):
         )
         return 0
     try:
-        c, source, worker = runtime(a.config)
+        c, source, worker, dispatcher = runtime(a.config)
         if a.command == "approve":
             value = source.approve(a.repository, a.pr)
         elif a.command == "revoke":
@@ -419,16 +484,42 @@ def main(argv=None):
             worker.state.recover_running()
             source.recover_claims()
             value = worker.run_once()
+        elif a.command == "auto-once":
+            if dispatcher is None:
+                raise LocalApprovalError("automatic dispatch is not enabled")
+            source.recover_claims()
+            value = dispatcher.reconcile_once()
         else:
             worker.state.recover_running()
             source.recover_claims()
+            auto_interval = (
+                c["auto_dispatch"]["poll_seconds"] if dispatcher is not None else 0
+            )
+            next_auto = 0.0
             while True:
                 source.recover_claims()
+                if dispatcher is not None and time.monotonic() >= next_auto:
+                    # A polling failure must never stop the worker loop that is
+                    # already carrying an approved run to its conclusion.
+                    try:
+                        dispatcher.reconcile_once()
+                    except (
+                        LocalApprovalError,
+                        AutoDispatchError,
+                        WorkerAuthorityError,
+                        OSError,
+                    ) as exc:
+                        print(
+                            f"automatic dispatch poll skipped: {type(exc).__name__}",
+                            file=sys.stderr,
+                        )
+                    next_auto = time.monotonic() + auto_interval
                 worker.run_once()
                 time.sleep(c["poll_seconds"])
         print(json.dumps(value, sort_keys=True, separators=(",", ":")))
         return 0
     except (
+        AutoDispatchError,
         LocalApprovalError,
         WorkerAuthorityError,
         WorkerError,

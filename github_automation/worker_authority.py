@@ -279,6 +279,65 @@ class WorkerGitHubClient:
             raise WorkerAuthorityError("pull request identity mismatch")
         return value
 
+    def open_pull_requests(
+        self, token: WorkerInstallationToken, *, limit: int = 100
+    ) -> tuple[tuple[int, str], ...]:
+        """List the exact repository's open pull requests as (number, head SHA).
+
+        Only pull requests whose head belongs to this same repository are
+        returned: a head living in a fork is never handed to the local runner,
+        regardless of how the repository is configured today.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise WorkerAuthorityError("pull request page size is invalid")
+        response = self._request(
+            "GET",
+            f"/repos/{self.authority.repository}/pulls"
+            f"?state=open&sort=created&direction=asc&per_page={limit}",
+            self._headers(token.value),
+        )
+        token.assert_current(self.authority, self._clock())
+        if response.status != 200 or len(response.body) > 4_194_304:
+            raise WorkerAuthorityError("open pull request listing failed")
+        try:
+            value = json.loads(response.body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise WorkerAuthorityError(
+                "open pull request listing is invalid JSON"
+            ) from exc
+        if not isinstance(value, list):
+            raise WorkerAuthorityError("open pull request listing is not a list")
+        listed: list[tuple[int, str]] = []
+        for entry in value:
+            if not isinstance(entry, Mapping):
+                raise WorkerAuthorityError("open pull request entry is invalid")
+            number, head, base = (
+                entry.get("number"),
+                entry.get("head"),
+                entry.get("base"),
+            )
+            if (
+                isinstance(number, bool)
+                or not isinstance(number, int)
+                or number < 1
+                or entry.get("state") != "open"
+                or not isinstance(head, Mapping)
+                or not _SHA.fullmatch(str(head.get("sha", "")))
+                or not isinstance(base, Mapping)
+            ):
+                raise WorkerAuthorityError("open pull request entry is not exact")
+            head_repository = head.get("repo")
+            if (
+                not isinstance(head_repository, Mapping)
+                or head_repository.get("id") != self.authority.repository_id
+                or not isinstance(base.get("repo"), Mapping)
+                or base["repo"].get("id") != self.authority.repository_id
+            ):
+                # A fork head is skipped, never dispatched.
+                continue
+            listed.append((number, str(head["sha"])))
+        return tuple(listed)
+
     def potential_merge_commit(
         self, number: int, token: WorkerInstallationToken
     ) -> str:

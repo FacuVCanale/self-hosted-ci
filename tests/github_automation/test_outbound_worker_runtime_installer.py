@@ -131,6 +131,27 @@ class OutboundWorkerRuntimeInstallerTests(unittest.TestCase):
         self.assertIn('{"checks": "write", "metadata": "read"}', source)
         self.assertIn('gate["app_id"] == value["app_id"]', source)
 
+
+    def test_automatic_dispatch_is_opt_in_and_bounded(self):
+        source = (ROOT / "scripts/host/outbound-coordinator-worker.py").read_text()
+        # Off unless the block says enabled, and never a hot spin loop.
+        self.assertIn('if isinstance(auto, dict) and auto.get("enabled")', source)
+        self.assertIn("not 15 <= auto[\"poll_seconds\"] <= 3600", source)
+        self.assertIn('set(auto) != {"enabled", "poll_seconds"}', source)
+
+    def test_automatic_dispatch_never_stops_an_approved_run(self):
+        source = (ROOT / "scripts/host/outbound-coordinator-worker.py").read_text()
+        poll = source.index("dispatcher.reconcile_once()")
+        guard = source.index("automatic dispatch poll skipped")
+        run = source.index("worker.run_once()\n                time.sleep")
+        self.assertLess(poll, guard)
+        self.assertLess(guard, run)
+
+    def test_the_control_plane_still_has_no_listener_or_relay(self):
+        source = (ROOT / "scripts/host/outbound-coordinator-worker.py").read_text()
+        for forbidden in ("HTTPServer", "socketserver", "bind(", "listen("):
+            self.assertNotIn(forbidden, source)
+
     def config(self) -> dict:
         return {
             "schema_version": 1,

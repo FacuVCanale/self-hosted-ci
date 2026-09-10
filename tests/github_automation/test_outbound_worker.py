@@ -276,7 +276,12 @@ class OutboundWorkerTests(unittest.TestCase):
         value = json.loads(result.stdout)
         self.assertFalse(value["inbound_listener"])
         self.assertFalse(value["external_relay"])
-        self.assertFalse(value["automatic_pr_polling"])
+        # Automatic dispatch is an outbound poll of one opted-in repository, and
+        # the plan must say so rather than claim there is no polling at all.
+        self.assertEqual(
+            value["automatic_pr_polling"], "opt-in-outbound-poll-of-one-repository"
+        )
+        self.assertEqual(value["approval"], "operator-explicit")
 
     def test_pilot_resumes_durable_post_dispatch_failure_without_redispatch(self):
         now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)

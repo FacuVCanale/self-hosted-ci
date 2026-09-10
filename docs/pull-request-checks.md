@@ -73,3 +73,28 @@ install-outbound-worker-runtime.py --apply \
 ```
 
 Omitting the block leaves publication off, which is the fail-closed default.
+
+## Automatic dispatch
+
+Automatic dispatch is an optional outbound poll, never a listener. The host that
+already holds the dispatch authority lists the exact repository's open pull
+requests and keeps the local approval store aligned with them:
+
+* a pull request whose active approval points at an older head is revoked and
+  its current head approved, so a new commit always requires a new approval;
+* a head that already reached a settled state is never approved again;
+* an approval whose pull request is no longer open is revoked;
+* a head living in a fork is skipped, never dispatched;
+* nothing is ever cancelled across pull requests. The host runs one job at a
+  time, so several approved heads queue in arrival order.
+
+Enable it with an optional block, off by default:
+
+```json
+"auto_dispatch": {"enabled": true, "poll_seconds": 60}
+```
+
+`poll_seconds` is bounded between 15 and 3600. A polling failure is logged and
+skipped; it can never stop the worker loop that is already carrying an approved
+run to its conclusion. `outbound-coordinator-worker.py auto-once` runs one
+reconciliation and prints the exact actions it applied.

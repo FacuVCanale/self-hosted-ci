@@ -108,6 +108,7 @@ REQUIRED_LIVE_TARGETS = {
     "/usr/local/lib/self-hosted-ci/github_automation/jit_pilot.py",
     "/usr/local/lib/self-hosted-ci/github_automation/local_approval.py",
     "/usr/local/lib/self-hosted-ci/github_automation/pilot_checks.py",
+    "/usr/local/lib/self-hosted-ci/github_automation/pr_autodispatch.py",
     "/usr/local/share/self-hosted-ci/schemas/jit-canary-authorization-v1.schema.json",
     "/usr/local/share/self-hosted-ci/schemas/runner-lifecycle-proof-v1.schema.json",
     "/etc/self-hosted-ci/garm/config.toml.example",
