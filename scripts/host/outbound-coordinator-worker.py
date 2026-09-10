@@ -344,7 +344,7 @@ def runtime(config_path):
         if c["mode"] == "ci-jit-pilot"
         else OutboundWorker(state, source, broker, github, signer)
     )
-    return c, source, worker
+    return c, source, worker, dispatcher
 
 
 class AutoDispatcher:

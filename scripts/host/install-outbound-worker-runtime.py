@@ -59,7 +59,7 @@ REQUIRED_FIELDS = {
 #: The `gate` block is optional: a host without it simply publishes no pull
 #: request Check Runs, which is the fail-closed default. Its private key is a
 #: distinct managed secret, never the dispatcher's.
-OPTIONAL_FIELDS = {"gate"}
+OPTIONAL_FIELDS = {"gate", "auto_dispatch"}
 GATE_FIELDS = {"app_id", "app_slug", "installation_id", "private_key_file"}
 GATE_PERMISSIONS = {"checks": "write", "metadata": "read"}
 EXACT_PERMISSIONS = {
@@ -195,7 +195,30 @@ def load_config(path: Path) -> dict[str, Any]:
     if value["broker_executable"] != BROKER_TARGET:
         raise InstallError("broker_executable is not the exact managed broker")
     _validate_gate(value)
+    _validate_auto_dispatch(value)
     return value
+
+
+def _validate_auto_dispatch(value: dict[str, Any]) -> None:
+    """Validate the optional automatic dispatch block, if present.
+
+    Absent means dispatch stays operator-explicit. The interval is bounded so a
+    misconfigured host can neither hot-spin against GitHub nor silently stop
+    polling for hours.
+    """
+    auto = value.get("auto_dispatch")
+    if auto is None:
+        return
+    if not isinstance(auto, dict) or set(auto) != {"enabled", "poll_seconds"}:
+        raise InstallError("auto_dispatch block fields are not exact")
+    if not isinstance(auto["enabled"], bool):
+        raise InstallError("auto_dispatch enabled must be a boolean")
+    if (
+        isinstance(auto["poll_seconds"], bool)
+        or not isinstance(auto["poll_seconds"], int)
+        or not 15 <= auto["poll_seconds"] <= 3600
+    ):
+        raise InstallError("auto_dispatch poll_seconds must be between 15 and 3600")
 
 
 def _validate_gate(value: dict[str, Any]) -> None:
