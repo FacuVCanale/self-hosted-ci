@@ -28,6 +28,7 @@ from .crypto import spki_fingerprint
 from .github import ObservedWorkflowJob
 from .jit_pilot import JitPilotError, JitPilotPackageV1, PilotTerminalMonitor
 from .local_approval import LocalApprovalError
+from .pilot_checks import GateCheckError, PilotCheckPublisher
 from .runner_jit import (
     sign_allocation,
     validate_allocation_payload,
@@ -443,12 +444,85 @@ class PilotWorker:
         broker: Any,
         github: Any,
         signer: Any,
+        checks: PilotCheckPublisher | None = None,
+        repository: str | None = None,
     ):
         self.state = state
         self.source = source
         self.broker = broker
         self.github = github
         self.signer = signer
+        self.checks = checks
+        self.repository = repository
+
+    def _details_url(self, run_id: int, job_id: int) -> str:
+        """The exact job page a published Check Run points its author at."""
+        return (
+            f"https://github.com/{self.repository}/actions/runs/{run_id}"
+            f"/job/{job_id}"
+        )
+
+    def _open_checks(
+        self, key: str, progress: Mapping[str, Any], package: Any, run_id: int, job_id: int
+    ) -> Mapping[str, int]:
+        """Open the pull request Check Runs once, and remember their identities.
+
+        Publication is best effort by design: a Check Run that cannot be opened
+        must never abort a local run that is already valid, and the durable
+        record keeps a resumed attempt from opening a second pair.
+        """
+        recorded = progress.get("checks")
+        if isinstance(recorded, dict) and recorded:
+            return recorded
+        if self.checks is None or self.repository is None:
+            return {}
+        try:
+            opened = self.checks.start(
+                head_sha=package.head_sha,
+                details_url=self._details_url(run_id, job_id),
+            )
+        except (GateCheckError, OSError):
+            return {}
+        self._record(key, "checks-open", checks=dict(opened))
+        return opened
+
+    def _close_checks(
+        self, key: str, *, job_id: int | None = None, conclusion: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Close whatever Check Runs this assignment opened, exactly once.
+
+        Every terminal path calls this, including the failure paths, so a
+        published Check Run can never be left `in_progress` forever.
+        """
+        if self.checks is None:
+            return
+        try:
+            progress = self.state.progress(key)
+        except WorkerError:
+            return
+        checks = progress.get("checks")
+        if not isinstance(checks, dict) or not checks or progress.get("checks_closed"):
+            return
+        run_id, observed = progress.get("run_id"), progress.get("observed") or {}
+        details = self._details_url(run_id, observed.get("job_id") or job_id or 0)
+        try:
+            if conclusion is not None and job_id is not None:
+                self.checks.conclude(
+                    checks=checks, job_id=job_id, job_conclusion=conclusion,
+                    details_url=details,
+                )
+            else:
+                self.checks.abandon(
+                    checks=checks, reason=reason or "the local run ended without a result",
+                    details_url=details,
+                )
+        except (GateCheckError, OSError):
+            return
+        try:
+            self.state.record(key, progress.get("phase") or "checks-closed", checks_closed=True)
+        except WorkerError:
+            return
 
     def _record(self, key: str, phase: str, **values: Any) -> None:
         self.state.record(key, phase, **values)
@@ -519,6 +593,9 @@ class PilotWorker:
     ) -> Mapping[str, Any]:
         allocation_id = self._recovery_allocation_id(request)
         self.state.record(key, "cleanup-required", failure_reason=reason)
+        self._close_checks(
+            key, reason=f"the local assignment was terminated ({reason})"
+        )
         if progress:
             try:
                 self._recover_exact(allocation_id)
@@ -640,6 +717,11 @@ class PilotWorker:
                 )
             if observed.run_id != run_id or observed.job_name != "local-quality":
                 raise WorkerError("pilot observation crossed dispatch identity")
+            # The pull request Check Runs open only once the exact job identity
+            # is proven, so nothing is ever published for a run we do not own.
+            self._open_checks(
+                key, self.state.progress(key), package, run_id, observed.job_id
+            )
             payload = dict(reservation)
             payload.pop("allocation_reservation_version")
             payload.update(
@@ -675,6 +757,7 @@ class PilotWorker:
                 run_id=run_id,
                 job_id=observed.job_id,
             )
+            self._close_checks(key, job_id=observed.job_id, conclusion=outcome)
             result = {
                 "status": "completed",
                 "mode": "ci-jit-pilot",
@@ -689,6 +772,13 @@ class PilotWorker:
         except Exception as exc:
             latest = self.state.progress(key)
             run_id = latest.get("run_id")
+            self._close_checks(
+                key,
+                reason=(
+                    "the self-hosted runner stopped owning this run "
+                    f"({type(exc).__name__})"
+                ),
+            )
             if run_id is not None:
                 self.source.retry(key, type(exc).__name__)
                 self.state.fail(key)

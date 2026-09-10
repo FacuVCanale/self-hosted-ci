@@ -15,6 +15,7 @@ from github_automation.local_approval import (
     ResolvedApprovalTarget,
 )
 from github_automation.outbound_worker import OutboundWorker, PilotWorker, WorkerState
+from github_automation.pilot_checks import GateCheckError
 from tests.github_automation.test_github_contracts import protocol
 from tests.github_automation.test_runner_jit import reservation
 
@@ -123,6 +124,27 @@ def work_request():
         "protocol_package": protocol(),
         "reservation": allocation,
     }
+
+
+class RecordingPublisher:
+    """Stands in for the gate App and records every publication decision."""
+
+    def __init__(self):
+        self.started = []
+        self.concluded = []
+        self.abandoned = []
+
+    def start(self, *, head_sha, details_url):
+        self.started.append((head_sha, "/actions/runs/" in details_url))
+        return {"backend lint + test": 1, "frontend lint + test": 2}
+
+    def conclude(self, *, checks, job_id, job_conclusion, details_url):
+        self.concluded.append((dict(checks), job_id, job_conclusion))
+        return {}
+
+    def abandon(self, *, checks, reason, details_url):
+        self.abandoned.append(reason)
+        return {}
 
 
 class OutboundWorkerTests(unittest.TestCase):
@@ -330,6 +352,114 @@ class OutboundWorkerTests(unittest.TestCase):
                 ],
             )
             self.assertEqual("completed", source.status()[0]["state"])
+
+
+    def _pilot_fixture(self, directory, publisher, github=None):
+        """One approved pilot assignment wired to a recording Check publisher."""
+        now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+
+        class Clock:
+            def __call__(self):
+                return now
+
+        class Resolver:
+            def resolve(self, repository, pr):
+                return ResolvedApprovalTarget(
+                    "123", repository, pr, "a" * 40, "main",
+                    f"{repository}/.github/workflows/ci-jit-pilot-child.yml@refs/heads/main",
+                    "b" * 40, "c" * 40,
+                )
+
+        root = Path(directory)
+        clock = Clock()
+        source = LocalApprovalStore(
+            root / "approvals.sqlite3",
+            GateStore(root / "gate.sqlite3", clock=clock),
+            Resolver(),
+            PilotWorkRequestBuilder("d" * 64),
+            clock=clock,
+        )
+        source.approve("example-owner/example-repo", 42)
+        state = WorkerState(root / "worker.sqlite3")
+        github = github or GitHub()
+        # The fake job only reports the label the observation captured, exactly
+        # as the live client does.
+        github.label = ""
+        original_observe = github.observe_exact_job
+
+        def observe(run_id, label):
+            github.label = label
+            return original_observe(run_id, label)
+
+        github.observe_exact_job = observe
+        worker = PilotWorker(
+            state, source, Broker(), github, Signer(),
+            checks=publisher, repository="example-owner/example-repo",
+        )
+        return worker, state, source
+
+    def test_published_checks_target_the_pull_request_head_and_close_green(self):
+        publisher = RecordingPublisher()
+        with tempfile.TemporaryDirectory() as directory:
+            worker, _state, _source = self._pilot_fixture(directory, publisher)
+            result = worker.run_once()
+        self.assertEqual("completed", result["status"])
+        # "a" * 40 is the approval's PR head, not the default branch dispatch ref.
+        self.assertEqual(publisher.started, [("a" * 40, True)])
+        self.assertEqual(len(publisher.concluded), 1)
+        self.assertEqual(publisher.abandoned, [])
+
+    def test_a_lost_run_closes_its_checks_instead_of_hanging_in_progress(self):
+        publisher = RecordingPublisher()
+
+        class LosesTheRun(GitHub):
+            def run(self, run_id):
+                raise RuntimeError("the host lost the run")
+
+        with tempfile.TemporaryDirectory() as directory:
+            worker, _state, _source = self._pilot_fixture(
+                directory, publisher, github=LosesTheRun()
+            )
+            with self.assertRaisesRegex(RuntimeError, "lost the run"):
+                worker.run_once()
+        self.assertEqual(len(publisher.started), 1)
+        self.assertEqual(len(publisher.abandoned), 1)
+        self.assertIn("RuntimeError", publisher.abandoned[0])
+
+    def test_a_resumed_attempt_never_opens_a_second_pair_of_checks(self):
+        publisher = RecordingPublisher()
+
+        class FailsOnce(GitHub):
+            def __init__(self):
+                super().__init__()
+                self.runs = 0
+
+            def run(self, run_id):
+                self.runs += 1
+                if self.runs == 1:
+                    raise RuntimeError("transient GitHub failure")
+                return super().run(run_id)
+
+        with tempfile.TemporaryDirectory() as directory:
+            worker, _state, _source = self._pilot_fixture(
+                directory, publisher, github=FailsOnce()
+            )
+            with self.assertRaisesRegex(RuntimeError, "transient"):
+                worker.run_once()
+            worker.run_once()
+        self.assertEqual(len(publisher.started), 1)
+
+    def test_a_check_publication_failure_never_fails_a_valid_local_run(self):
+        class Broken(RecordingPublisher):
+            def start(self, *, head_sha, details_url):
+                raise GateCheckError("gate key is unavailable")
+
+        publisher = Broken()
+        with tempfile.TemporaryDirectory() as directory:
+            worker, _state, _source = self._pilot_fixture(directory, publisher)
+            result = worker.run_once()
+        self.assertEqual("completed", result["status"])
+        self.assertEqual(publisher.concluded, [])
 
     def test_revoked_durable_approval_reconciles_without_crash_loop(self):
         now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)

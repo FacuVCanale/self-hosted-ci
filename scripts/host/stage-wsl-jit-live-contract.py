@@ -501,6 +501,13 @@ PUBLIC_ARTIFACTS = (
         "garm",
     ),
     (
+        "github_automation/pilot_checks.py",
+        "/usr/local/lib/self-hosted-ci/github_automation/pilot_checks.py",
+        "0644",
+        "python-module",
+        "garm",
+    ),
+    (
         "templates/garm/config.toml.example",
         "/etc/self-hosted-ci/garm/config.toml.example",
         "0640",
