@@ -28,6 +28,11 @@ from github_automation.local_approval import (
     PilotWorkRequestBuilder,
     WorkerAuthorityResolver,
 )
+from github_automation.pilot_checks import (
+    GateAppAuthorityV1,
+    GateCheckClient,
+    PilotCheckPublisher,
+)
 from github_automation.outbound_worker import (
     FileAllocationSigner,
     LocalBrokerCli,
@@ -74,6 +79,25 @@ class HTTPS:
         except (URLError, TimeoutError, OSError) as exc:
             raise WorkerAuthorityError("worker GitHub transport failed") from exc
 
+    def stream(self, url, *, headers, chunk_size=1 << 20):
+        """Yield a redirect-followed response body in bounded chunks.
+
+        Job logs are plain text far larger than any JSON this worker reads, and
+        the phase evidence lives at the end, so they must never be truncated to
+        the JSON bound. Nothing is parsed here; the caller scans for markers.
+        """
+        request = Request(url, headers=dict(headers), method="GET")
+        with urlopen(
+            request, timeout=self.timeout, context=ssl.create_default_context()
+        ) as response:
+            if response.status != 200:
+                raise WorkerAuthorityError("worker GitHub log transport failed")
+            while True:
+                chunk = response.read(chunk_size)
+                if not chunk:
+                    return
+                yield chunk
+
 
 def root_config(path: Path):
     info = os.lstat(path)
@@ -119,7 +143,7 @@ def root_config(path: Path):
     }
     if (
         not isinstance(value, dict)
-        or set(value) != required
+        or set(value) - {"gate"} != required
         or value["schema_version"] != 1
         or value["mode"] not in {"ci-jit-pilot", "ci-gate-full"}
     ):
@@ -144,6 +168,22 @@ def root_config(path: Path):
         "organization-runner-group",
     }:
         raise LocalApprovalError("outbound worker authority kind is invalid")
+    gate = value.get("gate")
+    if gate is not None and (
+        not isinstance(gate, dict)
+        or set(gate) != {"app_id", "app_slug", "installation_id", "private_key_file"}
+        or any(
+            isinstance(gate[field], bool)
+            or not isinstance(gate[field], int)
+            or gate[field] < 1
+            for field in ("app_id", "installation_id")
+        )
+        or not isinstance(gate["app_slug"], str)
+        or not isinstance(gate["private_key_file"], str)
+        or gate["app_id"] == value["app_id"]
+        or gate["private_key_file"] == value["github_app_private_key_file"]
+    ):
+        raise LocalApprovalError("outbound worker gate block is invalid")
     return value
 
 
@@ -278,12 +318,60 @@ def runtime(config_path):
     github = GitHub()
     state = WorkerState(Path(c["worker_state_file"]))
     signer = FileAllocationSigner(Path(c["allocation_signer_key_file"]))
+    checks = _gate_publisher(c, client)
     worker = (
-        PilotWorker(state, source, broker, github, signer)
+        PilotWorker(
+            state, source, broker, github, signer,
+            checks=checks, repository=c["repository"],
+        )
         if c["mode"] == "ci-jit-pilot"
         else OutboundWorker(state, source, broker, github, signer)
     )
     return c, source, worker
+
+
+def _gate_publisher(c, dispatch_client):
+    """Build the Check Run publisher, or None when no gate App is configured.
+
+    The gate App holds `checks:write` and nothing else; the job log it reasons
+    over is fetched with the dispatcher's own `actions` authority, so neither
+    identity gains a capability the other has.
+    """
+    gate = c.get("gate")
+    if gate is None:
+        return None
+    authority = GateAppAuthorityV1(
+        gate["app_id"],
+        gate["app_slug"],
+        gate["installation_id"],
+        c["repository"],
+        c["repository_id"],
+        "selected",
+        {"checks": "write", "metadata": "read"},
+    )
+    transport = HTTPS(c["request_timeout_seconds"])
+    client = GateCheckClient(
+        authority, RootPrivateKeySigner.from_file(Path(gate["private_key_file"])),
+        transport,
+    )
+
+    def job_log(job_id):
+        token = dispatch_client.authenticate()
+        url = (
+            f"https://api.github.com/repos/{c['repository']}"
+            f"/actions/jobs/{int(job_id)}/logs"
+        )
+        return transport.stream(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token.value}",
+                "X-GitHub-Api-Version": "2026-03-10",
+                "User-Agent": "self-hosted-ci-gate/1",
+            },
+        )
+
+    return PilotCheckPublisher(client, job_log)
 
 
 def main(argv=None):
@@ -313,6 +401,7 @@ def main(argv=None):
                     "automatic_pr_polling": False,
                     "authority": "selected-repository-github-app-plus-local-authority-v1",
                     "approval": "operator-explicit",
+                    "pull_request_checks": "gate-app-when-configured",
                 },
                 sort_keys=True,
             )

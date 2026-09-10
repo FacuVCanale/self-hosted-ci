@@ -52,6 +52,85 @@ class OutboundWorkerRuntimeInstallerTests(unittest.TestCase):
         source = (ROOT / "scripts/host/outbound-coordinator-worker.py").read_text()
         self.assertIn('max(1200, c["request_timeout_seconds"])', source)
 
+
+    def _write_config(self, directory, value):
+        path = Path(directory) / "outbound-worker.json"
+        path.write_text(json.dumps(value))
+        return path
+
+    def test_a_config_without_a_gate_block_stays_valid(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            value = installer.load_config(self._write_config(directory, self.config()))
+        self.assertIsNone(value.get("gate"))
+
+    def test_a_valid_gate_block_is_accepted(self):
+        installer = load_installer()
+        config = {**self.config(), "gate": {
+            "app_id": 4729014, "app_slug": "facu-ci-gate", "installation_id": 156799177,
+            "private_key_file": "/etc/self-hosted-ci/secrets/gate-github-app.pem",
+        }}
+        with tempfile.TemporaryDirectory() as directory:
+            value = installer.load_config(self._write_config(directory, config))
+        self.assertEqual(value["gate"]["app_slug"], "facu-ci-gate")
+
+    def test_the_gate_may_never_reuse_the_dispatcher_identity_or_key(self):
+        installer = load_installer()
+        base = self.config()
+        for gate, reason in (
+            ({"app_id": base["app_id"], "app_slug": "gate", "installation_id": 9,
+              "private_key_file": "/etc/self-hosted-ci/secrets/gate.pem"}, "distinct identity"),
+            ({"app_id": 1, "app_slug": "gate", "installation_id": base["installation_id"],
+              "private_key_file": "/etc/self-hosted-ci/secrets/gate.pem"}, "distinct identity"),
+            ({"app_id": 1, "app_slug": "gate", "installation_id": 9,
+              "private_key_file": base["github_app_private_key_file"]}, "another managed secret"),
+            ({"app_id": 1, "app_slug": "gate", "installation_id": 9,
+              "private_key_file": base["allocation_signer_key_file"]}, "another managed secret"),
+        ):
+            with self.subTest(gate=gate), tempfile.TemporaryDirectory() as directory:
+                path = self._write_config(directory, {**base, "gate": gate})
+                with self.assertRaisesRegex(installer.InstallError, reason):
+                    installer.load_config(path)
+
+    def test_the_gate_key_must_live_under_the_managed_secrets_directory(self):
+        installer = load_installer()
+        config = {**self.config(), "gate": {
+            "app_id": 1, "app_slug": "gate", "installation_id": 9,
+            "private_key_file": "/home/facu/gate.pem",
+        }}
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_config(directory, config)
+            with self.assertRaisesRegex(installer.InstallError, "managed secrets directory"):
+                installer.load_config(path)
+
+    def test_an_incomplete_gate_block_is_refused(self):
+        installer = load_installer()
+        for gate in (
+            {"app_id": 1, "app_slug": "gate", "installation_id": 9},
+            {"app_id": 1, "app_slug": "gate", "installation_id": 9,
+             "private_key_file": "/etc/self-hosted-ci/secrets/gate.pem", "extra": 1},
+            {"app_id": 0, "app_slug": "gate", "installation_id": 9,
+             "private_key_file": "/etc/self-hosted-ci/secrets/gate.pem"},
+        ):
+            with self.subTest(gate=gate), tempfile.TemporaryDirectory() as directory:
+                path = self._write_config(directory, {**self.config(), "gate": gate})
+                with self.assertRaises(installer.InstallError):
+                    installer.load_config(path)
+
+    def test_unknown_top_level_fields_are_still_refused(self):
+        installer = load_installer()
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_config(directory, {**self.config(), "surprise": 1})
+            with self.assertRaisesRegex(installer.InstallError, "fields are not exact"):
+                installer.load_config(path)
+
+    def test_the_host_worker_only_publishes_checks_through_a_separate_gate_app(self):
+        source = (ROOT / "scripts/host/outbound-coordinator-worker.py").read_text()
+        # The gate identity signs Check Runs; the dispatcher identity reads logs.
+        self.assertIn('RootPrivateKeySigner.from_file(Path(gate["private_key_file"]))', source)
+        self.assertIn('{"checks": "write", "metadata": "read"}', source)
+        self.assertIn('gate["app_id"] == value["app_id"]', source)
+
     def config(self) -> dict:
         return {
             "schema_version": 1,

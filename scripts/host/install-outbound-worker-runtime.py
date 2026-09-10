@@ -56,6 +56,12 @@ REQUIRED_FIELDS = {
     "poll_seconds",
     "request_timeout_seconds",
 }
+#: The `gate` block is optional: a host without it simply publishes no pull
+#: request Check Runs, which is the fail-closed default. Its private key is a
+#: distinct managed secret, never the dispatcher's.
+OPTIONAL_FIELDS = {"gate"}
+GATE_FIELDS = {"app_id", "app_slug", "installation_id", "private_key_file"}
+GATE_PERMISSIONS = {"checks": "write", "metadata": "read"}
 EXACT_PERMISSIONS = {
     "metadata": "read",
     "contents": "read",
@@ -92,7 +98,10 @@ def load_config(path: Path) -> dict[str, Any]:
         )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise InstallError("outbound worker config is not readable exact JSON") from exc
-    if not isinstance(value, dict) or set(value) != REQUIRED_FIELDS:
+    if (
+        not isinstance(value, dict)
+        or set(value) - OPTIONAL_FIELDS != REQUIRED_FIELDS
+    ):
         raise InstallError("outbound worker config fields are not exact")
     if value["schema_version"] != 1 or value["mode"] != "ci-jit-pilot":
         raise InstallError(
@@ -185,7 +194,46 @@ def load_config(path: Path) -> dict[str, Any]:
         raise InstallError("worker databases must use distinct paths")
     if value["broker_executable"] != BROKER_TARGET:
         raise InstallError("broker_executable is not the exact managed broker")
+    _validate_gate(value)
     return value
+
+
+def _validate_gate(value: dict[str, Any]) -> None:
+    """Validate the optional Check Run publishing identity, if present.
+
+    The gate App is a separate identity from the dispatcher: a distinct App ID
+    and a distinct key file under the managed secrets directory. Sharing either
+    would let the dispatch authority write Check Runs, which the design forbids.
+    """
+    gate = value.get("gate")
+    if gate is None:
+        return
+    if not isinstance(gate, dict) or set(gate) != GATE_FIELDS:
+        raise InstallError("gate block fields are not exact")
+    for field in ("app_id", "installation_id"):
+        if (
+            isinstance(gate[field], bool)
+            or not isinstance(gate[field], int)
+            or gate[field] < 1
+        ):
+            raise InstallError(f"gate {field} must be a positive integer")
+    if not re.fullmatch(r"[A-Za-z0-9-]+", str(gate["app_slug"])):
+        raise InstallError("gate app_slug is invalid")
+    key = PurePosixPath(str(gate["private_key_file"]))
+    if key.parent != SECRET_ROOT:
+        raise InstallError(
+            "gate private key must be a direct child of the managed secrets directory"
+        )
+    if str(key) in {
+        value["github_app_private_key_file"],
+        value["allocation_signer_key_file"],
+        value["authority_signer_key_file"],
+    }:
+        raise InstallError("gate private key must not reuse another managed secret")
+    if gate["app_id"] == value["app_id"] or gate["installation_id"] == value[
+        "installation_id"
+    ]:
+        raise InstallError("gate App must be a distinct identity from the dispatcher")
 
 
 def _private_key(path: Path, expected: str) -> None:
@@ -342,17 +390,27 @@ def _install_runtime_locked(
     config_source: Path,
     github_key_source: Path,
     allocation_key_source: Path,
+    gate_key_source: Path | None = None,
     *,
     prefix: Path = Path("/"),
     expected_uid: int = 0,
 ) -> dict[str, Any]:
     ready_target = _physical(prefix, READY_TARGET)
     ready_target.unlink(missing_ok=True)
-    for source in (config_source, github_key_source, allocation_key_source):
+    sources = [config_source, github_key_source, allocation_key_source]
+    if gate_key_source is not None:
+        sources.append(gate_key_source)
+    for source in sources:
         _secure_file(source, expected_uid=expected_uid)
     config = load_config(config_source)
     _private_key(github_key_source, "GitHub App")
     _private_key(allocation_key_source, "allocation signer")
+    if (config.get("gate") is None) != (gate_key_source is None):
+        raise InstallError(
+            "a gate block and a gate private key source must be supplied together"
+        )
+    if gate_key_source is not None:
+        _private_key(gate_key_source, "GitHub App")
     config_target = _physical(prefix, CONFIG_TARGET)
     etc_root = _physical(prefix, "/etc/self-hosted-ci")
     secrets_root = _physical(prefix, SECRET_ROOT)
@@ -385,6 +443,13 @@ def _install_runtime_locked(
         uid=expected_uid,
         gid=target_gid,
     )
+    if gate_key_source is not None:
+        gate_target = _physical(prefix, config["gate"]["private_key_file"])
+        _atomic_install(
+            gate_key_source, gate_target, 0o600, uid=expected_uid, gid=target_gid
+        )
+        _secure_file(gate_target, expected_uid=expected_uid)
+        _private_key(gate_target, "GitHub App")
     for path in (config_target, github_target, allocation_target):
         _secure_file(path, expected_uid=expected_uid)
     installed = load_config(config_target)
@@ -421,6 +486,7 @@ def install_runtime(
     config_source: Path,
     github_key_source: Path,
     allocation_key_source: Path,
+    gate_key_source: Path | None = None,
     *,
     prefix: Path = Path("/"),
     expected_uid: int = 0,
@@ -430,6 +496,7 @@ def install_runtime(
             config_source,
             github_key_source,
             allocation_key_source,
+            gate_key_source,
             prefix=prefix,
             expected_uid=expected_uid,
         )
@@ -442,6 +509,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config-source", type=Path)
     parser.add_argument("--github-app-private-key-source", type=Path)
     parser.add_argument("--allocation-signer-key-source", type=Path)
+    parser.add_argument("--gate-app-private-key-source", type=Path)
     parser.add_argument(
         "--acknowledge-install-root-only-worker-secrets", action="store_true"
     )
@@ -490,6 +558,7 @@ def main(argv: list[str] | None = None) -> int:
             args.config_source,
             args.github_app_private_key_source,
             args.allocation_signer_key_source,
+            args.gate_app_private_key_source,
         )
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0
