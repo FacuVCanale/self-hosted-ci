@@ -95,6 +95,67 @@ class WorkerAuthorityTests(unittest.TestCase):
         client = WorkerGitHubClient(authority(), signer, transport, clock=lambda: NOW)
         return client, client.authenticate(), transport, signer
 
+
+    def test_open_pull_requests_returns_exact_numbers_and_heads(self) -> None:
+        listing = response(200, [
+            {"number": 7, "state": "open",
+             "head": {"sha": "a" * 40, "repo": {"id": 303}},
+             "base": {"repo": {"id": 303}}},
+            {"number": 9, "state": "open",
+             "head": {"sha": "b" * 40, "repo": {"id": 303}},
+             "base": {"repo": {"id": 303}}},
+        ])
+        client, token, transport, _ = self.authenticate(*auth_responses(), listing)
+        self.assertEqual(
+            client.open_pull_requests(token), ((7, "a" * 40), (9, "b" * 40))
+        )
+        method, url, _headers, _body = transport.calls[-1]
+        self.assertEqual(method, "GET")
+        self.assertIn(f"/repos/{REPOSITORY}/pulls?state=open", url)
+
+    def test_a_fork_head_is_never_listed_for_local_dispatch(self) -> None:
+        listing = response(200, [
+            {"number": 7, "state": "open",
+             "head": {"sha": "a" * 40, "repo": {"id": 999}},
+             "base": {"repo": {"id": 303}}},
+        ])
+        client, token, _transport, _ = self.authenticate(*auth_responses(), listing)
+        self.assertEqual(client.open_pull_requests(token), ())
+
+    def test_a_pull_request_of_another_repository_is_refused(self) -> None:
+        listing = response(200, [
+            {"number": 7, "state": "open",
+             "head": {"sha": "a" * 40, "repo": {"id": 303}},
+             "base": {"repo": {"id": 999}}},
+        ])
+        client, token, _transport, _ = self.authenticate(*auth_responses(), listing)
+        self.assertEqual(client.open_pull_requests(token), ())
+
+    def test_a_malformed_pull_request_listing_is_refused(self) -> None:
+        for body in (
+            {"items": []},
+            [{"number": 7, "state": "open", "head": {"sha": "abc", "repo": {"id": 303}},
+              "base": {"repo": {"id": 303}}}],
+            [{"number": 0, "state": "open", "head": {"sha": "a" * 40, "repo": {"id": 303}},
+              "base": {"repo": {"id": 303}}}],
+            [{"number": 7, "state": "closed", "head": {"sha": "a" * 40, "repo": {"id": 303}},
+              "base": {"repo": {"id": 303}}}],
+        ):
+            with self.subTest(body=body):
+                client, token, _transport, _ = self.authenticate(
+                    *auth_responses(), response(200, body)
+                )
+                with self.assertRaises(WorkerAuthorityError):
+                    client.open_pull_requests(token)
+
+    def test_an_oversized_page_size_is_refused(self) -> None:
+        client, token, _transport, _ = self.authenticate()
+        for limit in (0, 101, True, "50"):
+            with self.subTest(limit=limit), self.assertRaisesRegex(
+                WorkerAuthorityError, "page size"
+            ):
+                client.open_pull_requests(token, limit=limit)
+
     def test_exact_selected_repository_token_and_headers(self) -> None:
         self.assertEqual("read", WORKER_PERMISSIONS["administration"])
         self.assertEqual("read", WORKER_PERMISSIONS["contents"])
