@@ -127,7 +127,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
         self.assertEqual("22.23.2", profile["toolchain"]["node"])
         self.assertEqual(
-            "7edaa14c1ea8dbf3199e6f170db71521fb7a54280ec436f6c0dd58a08a6cb840",
+            "0af175f2a43609f9d2d78ed4a7e048ce096f6a7e21eada3e082b36efec246eb6",
             profile["runner_script_sha256"],
         )
         self.assertEqual(SCRIPT, script)
@@ -446,9 +446,11 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn("bun ./node_modules/.bin/tsc --noEmit", text)
         self.assertIn("NODE_ENV=test bun ./node_modules/.bin/jest --ci", text)
         self.assertIn(
-            '"$NEXT_NODE" ./node_modules/next/dist/bin/next dev --webpack -p "$FRONTEND_PORT"',
+            '"$NEXT_NODE" ./node_modules/next/dist/bin/next build --webpack',
             text,
         )
+        self.assertIn('"$NEXT_NODE" server.js', text)
+        self.assertNotIn("next dev", text)
         self.assertNotIn(
             '"$NEXT_NODE" "$FRONTEND_MODULES/next/dist/bin/next"',
             text,
@@ -974,6 +976,9 @@ test -d {component}/node_modules
             text.index("run_playwright_e2e() {") : text.index("\nphase_e2e() {")
         ]
         e2e = text[text.index("phase_e2e() {") : text.index("\nrequire_image_contract\n")]
+        standalone_build = e2e.index("  build_frontend_standalone\n")
+        postgres = e2e.index("  start_postgres 17")
+        minio = e2e.index("  start_minio\n")
         first_backend = e2e.index("  start_backend\n")
         initial_backend_stop = e2e.index("  stop_local_service backend\n")
         pg_loop = e2e.index('  for pg_test in "${pg_tests[@]}"; do')
@@ -981,6 +986,8 @@ test -d {component}/node_modules
         frontend = e2e.index("  start_frontend\n")
         playwright = e2e.index("run_playwright_e2e")
         self.assertEqual(2, e2e.count("  start_backend\n"))
+        self.assertLess(standalone_build, postgres)
+        self.assertLess(postgres, minio)
         self.assertLess(first_backend, initial_backend_stop)
         self.assertLess(initial_backend_stop, pg_loop)
         self.assertLess(pg_loop, clean_backend)
@@ -1005,6 +1012,7 @@ readonly TRACE={trace}
 {e2e}
 start_postgres() {{ printf 'postgres\n' >> "$TRACE"; }}
 start_minio() {{ printf 'minio\n' >> "$TRACE"; }}
+build_frontend_standalone() {{ printf 'build:standalone\n' >> "$TRACE"; }}
 start_backend() {{ printf 'backend\n' >> "$TRACE"; }}
 stop_local_service() {{ printf 'stop:%s\n' "$1" >> "$TRACE"; }}
 start_frontend() {{ printf 'frontend\n' >> "$TRACE"; }}
@@ -1023,7 +1031,7 @@ printf 'after:%s\n' "${{BUN_OPTIONS-unset}}" >> "$TRACE"
             )
             self.assertEqual(0, result.returncode, result.stderr)
             events = trace.read_text().splitlines()
-            self.assertEqual(["postgres", "minio", "backend", "stop:backend"], events[:4])
+            self.assertEqual(["build:standalone", "postgres", "minio", "backend", "stop:backend"], events[:5])
             pg_events = [event for event in events if event.startswith("bun:unset:test ")]
             self.assertEqual(len(E2E_PG_TESTS), len(pg_events))
             last_pg = max(events.index(event) for event in pg_events)
@@ -1164,37 +1172,63 @@ printf 'STATUS=%s\n' "$status"
 
         runner = SCRIPT.read_text()
         self.assertEqual(1, runner.count("NEXT_FONT_GOOGLE_MOCKED_RESPONSES="))
-        self.assertEqual(1, runner.count("NODE_OPTIONS=--max-old-space-size=1536"))
+        self.assertEqual(2, runner.count("NODE_OPTIONS=--max-old-space-size=1536"))
         for forbidden_heap in (1024, 1152, 1280):
             self.assertNotIn(f"NODE_OPTIONS=--max-old-space-size={forbidden_heap}", runner)
-        frontend = runner[runner.index("start_frontend() {") : runner.index("\nphase_e2e() {")]
+        frontend = runner[runner.index("require_no_symlinks() {") : runner.index("\nphase_e2e() {")]
         self.assertIn('NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK"', frontend)
-        self.assertNotIn("NEXT_FONT_GOOGLE_MOCKED_RESPONSES", runner[: runner.index("start_frontend() {")])
+        self.assertNotIn("NEXT_FONT_GOOGLE_MOCKED_RESPONSES", runner[: runner.index("build_frontend_standalone() {")])
         self.assertLess(frontend.index("require_next_font_mock"), frontend.index('"$NEXT_NODE"'))
         self.assertIn(
             'require_pinned_root_executable "$NEXT_NODE" "$NEXT_NODE_SHA256"',
             frontend,
         )
         self.assertIn(
-            'exec env NODE_OPTIONS=--max-old-space-size=1536', frontend
+            'exec env NODE_ENV=production NODE_OPTIONS=--max-old-space-size=1536', frontend
         )
         self.assertIn(
-            '"$NEXT_NODE" ./node_modules/next/dist/bin/next dev --webpack -p "$FRONTEND_PORT"',
+            '"$NEXT_NODE" ./node_modules/next/dist/bin/next build --webpack',
             frontend,
         )
+        self.assertIn('"$NEXT_NODE" server.js', frontend)
+        self.assertNotIn("next dev", frontend)
+        self.assertIn('NEXT_TELEMETRY_DISABLED=1', frontend)
+        self.assertIn('INTERNAL_API_BASE_URL="http://127.0.0.1:$BACKEND_PORT"', frontend)
+        self.assertIn('NEXT_PUBLIC_API_BASE_URL="http://localhost:$BACKEND_PORT"', frontend)
+        self.assertIn('NEXT_PUBLIC_ENV_MODE=DEV', frontend)
+        self.assertIn('HOSTNAME=127.0.0.1 PORT=$FRONTEND_PORT', frontend)
+        self.assertIn('cp -a -- frontend/public frontend/.next/standalone/public', frontend)
+        self.assertIn('cp -a -- frontend/.next/static frontend/.next/standalone/.next/static', frontend)
+        self.assertIn('links=$(/usr/bin/find "$first" "$second" -type l -print) || return 1', frontend)
+        self.assertIn('require_no_symlinks frontend/.next/static frontend/public || return 1', frontend)
         self.assertNotIn('$FRONTEND_MODULES/next/dist/bin/next', frontend)
         self.assertNotIn("bun ./node_modules/.bin/next", frontend)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "frontend").mkdir()
+            (root / "backend").mkdir()
+            (root / "frontend/public").mkdir(parents=True)
+            (root / "frontend/public/config.js").write_text("public fixture\n")
             state = root / "state"
             state.mkdir()
             fake_node = root / "pinned-node"
             fake_node.write_text(
                 "#!/bin/sh\n"
+                "if [ \"$1\" != server.js ]; then printf 'BUILD_NODE_ENV=%s\\n' \"$NODE_ENV\"; fi\n"
                 "printf 'NODE_OPTIONS=%s\\n' \"$NODE_OPTIONS\"\n"
+                "printf 'NEXT_TELEMETRY_DISABLED=%s\\n' \"$NEXT_TELEMETRY_DISABLED\"\n"
+                "printf 'NEXT_PUBLIC_API_BASE_URL=%s\\n' \"$NEXT_PUBLIC_API_BASE_URL\"\n"
+                "printf 'NEXT_PUBLIC_ENV_MODE=%s\\n' \"$NEXT_PUBLIC_ENV_MODE\"\n"
+                "printf 'INTERNAL_API_BASE_URL=%s\\n' \"${INTERNAL_API_BASE_URL-unset}\"\n"
+                "printf 'HOSTNAME=%s\\n' \"${HOSTNAME-unset}\"\n"
+                "printf 'PORT=%s\\n' \"${PORT-unset}\"\n"
+                "printf 'CWD=%s\\n' \"$PWD\"\n"
                 "printf 'ARGV=%s\\n' \"$*\"\n"
+                "if [ \"$1\" != server.js ]; then\n"
+                "  mkdir -p .next/standalone/.next .next/static\n"
+                "  printf 'server fixture\\n' > .next/standalone/server.js\n"
+                "  printf 'static fixture\\n' > .next/static/sentinel\n"
+                "fi\n"
             )
             fake_node.chmod(0o755)
             command = f"""
@@ -1202,13 +1236,19 @@ set -euo pipefail
 require_next_font_mock() {{ :; }}
 require_pinned_root_executable() {{ :; }}
 curl() {{ return 0; }}
+bun() {{ return 0; }}
 NEXT_NODE="$FAKE_NODE"
 NEXT_NODE_SHA256=unused-by-fake-guard
 NEXT_FONT_MOCK=/unused/font-mock.cjs
 FRONTEND_PORT=3000
 BACKEND_PORT=3001
 STATE_ROOT="$FAKE_STATE_ROOT"
+export NODE_ENV=test
 {frontend}
+build_frontend_standalone
+printf 'AFTER_BUILD_NODE_ENV=%s\n' "$NODE_ENV"
+test -f frontend/.next/standalone/public/config.js
+test -f frontend/.next/standalone/.next/static/sentinel
 start_frontend
 wait "$(cat "$STATE_ROOT/frontend.pid")"
 cat "$STATE_ROOT/frontend.log"
@@ -1226,11 +1266,21 @@ cat "$STATE_ROOT/frontend.log"
                 },
             )
             self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("BUILD_NODE_ENV=production", result.stdout)
+            self.assertIn("AFTER_BUILD_NODE_ENV=test", result.stdout)
             self.assertIn("NODE_OPTIONS=--max-old-space-size=1536", result.stdout)
             self.assertIn(
-                "ARGV=./node_modules/next/dist/bin/next dev --webpack -p 3000",
+                "ARGV=./node_modules/next/dist/bin/next build --webpack",
                 result.stdout,
             )
+            self.assertIn("ARGV=server.js", result.stdout)
+            self.assertIn("NEXT_TELEMETRY_DISABLED=1", result.stdout)
+            self.assertIn("NEXT_PUBLIC_API_BASE_URL=http://localhost:3001", result.stdout)
+            self.assertIn("NEXT_PUBLIC_ENV_MODE=DEV", result.stdout)
+            self.assertIn("INTERNAL_API_BASE_URL=http://127.0.0.1:3001", result.stdout)
+            self.assertIn("HOSTNAME=127.0.0.1", result.stdout)
+            self.assertIn("PORT=3000", result.stdout)
+            self.assertIn(f"CWD={root.resolve() / 'frontend/.next/standalone'}", result.stdout)
         self.assertIn('readonly NEXT_NODE=/usr/local/bin/node', runner)
         self.assertIn(
             'readonly NEXT_NODE_SHA256=3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327',
@@ -1242,7 +1292,7 @@ cat "$STATE_ROOT/frontend.log"
         self.assertNotIn("$SCRIPT_DIR/next-font-google", runner)
 
         guard = runner[
-            runner.index("require_pinned_root_file() {") : runner.index("\nstart_frontend() {")
+            runner.index("require_pinned_root_file() {") : runner.index("\nbuild_frontend_standalone() {")
         ]
         expected_sha = hashlib.sha256(FONT_MOCK.read_bytes()).hexdigest()
         self.assertIn(f"NEXT_FONT_MOCK_SHA256={expected_sha}", runner)
@@ -1314,6 +1364,57 @@ require_pinned_root_executable "$CANDIDATE" "$EXPECTED_SHA"
             link.symlink_to(exact)
             self.assertNotEqual(0, run_guard(link).returncode)
             self.assertNotEqual(0, run_guard(root).returncode)
+
+    def test_standalone_build_fails_closed_on_missing_entrypoint_or_symlinked_assets(self):
+        runner = SCRIPT.read_text()
+        build = runner[
+            runner.index("require_no_symlinks() {") : runner.index("\nstart_frontend() {")
+        ]
+        for case in ("missing-server", "public-symlink", "static-symlink", "find-failure"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "backend").mkdir()
+                (root / "frontend/public").mkdir(parents=True)
+                if case == "public-symlink":
+                    (root / "frontend/public/escape").symlink_to("/etc/passwd")
+                fake_node = root / "pinned-node"
+                fake_node.write_text(
+                    "#!/bin/sh\n"
+                    "mkdir -p .next/standalone/.next .next/static\n"
+                    "if [ \"$CASE\" != missing-server ]; then printf 'server\\n' > .next/standalone/server.js; fi\n"
+                    "if [ \"$CASE\" = static-symlink ]; then ln -s /etc/passwd .next/static/escape; "
+                    "else printf 'static\\n' > .next/static/sentinel; fi\n"
+                )
+                fake_node.chmod(0o755)
+                fake_find = root / "find"
+                fake_find.write_text("#!/bin/sh\nexit 7\n")
+                fake_find.chmod(0o755)
+                candidate_build = build
+                if case == "find-failure":
+                    candidate_build = candidate_build.replace("/usr/bin/find", str(fake_find))
+                command = f"""
+set -euo pipefail
+require_next_font_mock() {{ :; }}
+require_pinned_root_executable() {{ :; }}
+bun() {{ return 0; }}
+NEXT_NODE="$FAKE_NODE"
+NEXT_NODE_SHA256=unused-by-fake-guard
+NEXT_FONT_MOCK=/unused/font-mock.cjs
+BACKEND_PORT=3001
+{candidate_build}
+build_frontend_standalone
+"""
+                result = subprocess.run(
+                    ["bash"],
+                    cwd=root,
+                    input=command,
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "CASE": case, "FAKE_NODE": str(fake_node)},
+                )
+                self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertFalse((root / "frontend/.next/standalone/public").exists())
+                self.assertFalse((root / "frontend/.next/standalone/.next/static").exists())
 
     def test_minio_memory_limit_is_exact_process_scoped_and_does_not_leak(self):
         runner = SCRIPT.read_text()
