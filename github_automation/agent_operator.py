@@ -30,6 +30,18 @@ RUNNER_GROUP = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 DISTRO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SSH_TARGET = re.compile(r"^[A-Za-z0-9._@:-]+$")
 MANAGED_WORKFLOW = ".github/workflows/ci-jit-pilot-child.yml"
+HOSTED_WORKFLOW = re.compile(r"^\.github/workflows/[A-Za-z0-9._-]{1,100}\.ya?ml$")
+# Exact GitHub-hosted workflows that publish the same quality signal the local
+# runner produces.  While a repository is routed local they are suspended at the
+# workflow level, never edited: the reviewed repository command profile pins the
+# byte-exact sha256 of `.github/workflows/ci.yml`, so changing that file would
+# break the very local run that is meant to replace it.  Suspension is exact,
+# recorded, and undone by `use-github`.
+HOSTED_DUPLICATE_WORKFLOWS: Mapping[str, tuple[str, ...]] = {
+    "alethia-earth/Overworld": (".github/workflows/ci.yml",),
+}
+HOSTED_DISABLED_STATE = "disabled_manually"
+HOSTED_ACTIVE_STATE = "active"
 DEFAULT_PUBLIC_REPOSITORY = "FacuVCanale/self-hosted-ci"
 REGISTRY_SCHEMA = "https://raw.githubusercontent.com/FacuVCanale/self-hosted-ci/main/schemas/operator-registry-v1.schema.json"
 
@@ -161,9 +173,22 @@ class PrivateOperatorStore:
                 "ci_runner", "managed_workflow", "repository_id",
                 "authority_installation_id", "workflow_blob_sha",
                 "workflow_content_sha256", "public_sha", "updated_at", "pending",
+                "hosted_workflows_disabled",
             }
             if set(state) - allowed:
                 raise AgentOperatorError("invalid_registry", "repository routing state has unknown fields")
+            suspended = state.get("hosted_workflows_disabled")
+            if suspended is not None and (
+                not isinstance(suspended, list)
+                or len(set(suspended)) != len(suspended)
+                or any(
+                    not isinstance(path, str) or not HOSTED_WORKFLOW.fullmatch(path)
+                    for path in suspended
+                )
+            ):
+                raise AgentOperatorError(
+                    "invalid_registry", "suspended hosted workflow record is invalid"
+                )
             if (
                 state.get("managed_workflow") not in {None, MANAGED_WORKFLOW}
                 or (
@@ -409,6 +434,108 @@ class AgentOperator:
             "content_sha256": hashlib.sha256(content).hexdigest(),
         }
 
+    @staticmethod
+    def hosted_duplicates(repository: str) -> tuple[str, ...]:
+        """Exact hosted workflow paths that duplicate the local quality signal.
+
+        Returns an empty tuple for every repository that has not been reviewed
+        into the allowlist, so opting a new repository into local CI never
+        suspends anything by accident.
+        """
+        return HOSTED_DUPLICATE_WORKFLOWS.get(repository, ())
+
+    def _hosted_workflows(self, repository: str) -> dict[str, dict[str, Any]]:
+        """Observe the live state of the exact hosted duplicates of a repository.
+
+        Returns a mapping of workflow path to `{"id": int, "state": str}` for
+        the allowlisted duplicates GitHub actually knows about.  Paths GitHub
+        does not report are simply absent: there is nothing to suspend.
+        """
+        wanted = set(self.hosted_duplicates(repository))
+        if not wanted:
+            return {}
+        raw = run_checked(
+            ["gh", "api", f"repos/{repository}/actions/workflows?per_page=100"],
+            timeout=30,
+        )
+        try:
+            value = json.loads(raw)
+            entries = value["workflows"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise AgentOperatorError(
+                "hosted_workflow_unavailable", "GitHub workflow listing is invalid"
+            ) from exc
+        observed: dict[str, dict[str, Any]] = {}
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict) or entry.get("path") not in wanted:
+                continue
+            identifier, state = entry.get("id"), entry.get("state")
+            if (
+                isinstance(identifier, bool)
+                or not isinstance(identifier, int)
+                or identifier < 1
+                or not isinstance(state, str)
+            ):
+                raise AgentOperatorError(
+                    "hosted_workflow_unavailable", "GitHub workflow entry is invalid"
+                )
+            if entry["path"] in observed:
+                raise AgentOperatorError(
+                    "hosted_workflow_unavailable", "GitHub reported an ambiguous workflow path"
+                )
+            observed[entry["path"]] = {"id": identifier, "state": state}
+        return observed
+
+    def _set_hosted_workflow(
+        self, repository: str, workflow_id: int, *, enabled: bool
+    ) -> None:
+        """Suspend or restore one exact hosted workflow by its numeric identity.
+
+        The workflow file itself is never read, edited or deleted; only its
+        Actions enablement flag changes, which is what keeps the reviewed
+        `source_workflow_sha256` of the repository command profile intact.
+        """
+        action = "enable" if enabled else "disable"
+        run_checked(
+            [
+                "gh", "api", "--method", "PUT",
+                f"repos/{repository}/actions/workflows/{workflow_id}/{action}",
+            ],
+            timeout=30,
+        )
+
+    def _converge_hosted_workflows(
+        self, repository: str, *, enabled: bool, only: Sequence[str] | None = None
+    ) -> list[str]:
+        """Drive the exact hosted duplicates to one state and prove the result.
+
+        `only` restricts the operation to paths this operator previously
+        suspended, so restoring never enables a workflow somebody else turned
+        off.  Returns the paths whose observed state is the requested one.
+        """
+        target = HOSTED_ACTIVE_STATE if enabled else HOSTED_DISABLED_STATE
+        observed = self._hosted_workflows(repository)
+        selected = {
+            path: entry
+            for path, entry in observed.items()
+            if only is None or path in set(only)
+        }
+        transitioned = []
+        for path, entry in sorted(selected.items()):
+            if entry["state"] == target:
+                continue
+            self._set_hosted_workflow(repository, entry["id"], enabled=enabled)
+            transitioned.append(path)
+        confirmed = self._hosted_workflows(repository)
+        for path in sorted(selected):
+            if confirmed.get(path, {}).get("state") != target:
+                raise AgentOperatorError(
+                    "hosted_workflow_postcondition_failed",
+                    "GitHub-hosted duplicate did not reach its requested state",
+                    details={"workflow": path, "expected_state": target},
+                )
+        return transitioned
+
     def _render_workflow(self, authority: Mapping[str, Any]) -> bytes:
         organization = authority["authority_kind"] == "organization-runner-group"
         template_name = (
@@ -536,8 +663,26 @@ class AgentOperator:
             }
             host_error = {"code": exc.code, "message": str(exc)}
         owned = self._workflow_owned(state, workflow)
+        recorded = set(state.get("hosted_workflows_disabled") or [])
+        try:
+            hosted = self._hosted_workflows(repository)
+        except AgentOperatorError as exc:
+            hosted = {}
+            host_error = host_error or {"code": exc.code, "message": str(exc)}
+        hosted_report = [
+            {
+                "path": path,
+                "state": hosted.get(path, {}).get("state", "absent"),
+                "suspended_by_operator": path in recorded,
+            }
+            for path in sorted(self.hosted_duplicates(repository))
+        ]
         return {
             "status": "ok",
+            "hosted_duplicates": hosted_report,
+            "hosted_duplicates_suspended": all(
+                entry["state"] == HOSTED_DISABLED_STATE for entry in hosted_report
+            ) if hosted_report else None,
             "repository": repository,
             "desired_ci_runner": state["ci_runner"],
             "effective_local": (
@@ -579,15 +724,23 @@ class AgentOperator:
             or self._workflow_owned(current, workflow)
         ):
             blockers.append("managed_workflow_ownership_unverified")
+        hosted = self._hosted_workflows(repository)
+        changes = (
+            [] if workflow is not None and workflow.get("content_sha256") == expected_digest
+            else [f"install:{MANAGED_WORKFLOW}"]
+        )
+        changes += [
+            f"suspend-hosted:{path}"
+            for path, entry in sorted(hosted.items())
+            if entry["state"] != HOSTED_DISABLED_STATE
+        ]
         plan = {
             "operation": "use-local",
             "repository": repository,
             "apply_requested": apply,
             "blockers": blockers,
-            "changes": (
-                [] if workflow is not None and workflow.get("content_sha256") == expected_digest
-                else [f"install:{MANAGED_WORKFLOW}"]
-            ),
+            "changes": changes,
+            "hosted_duplicates": list(self.hosted_duplicates(repository)),
             "persistent_scope": "exact-repository-only",
         }
         if blockers or not apply:
@@ -638,7 +791,24 @@ class AgentOperator:
             registry, reconciled = self._reconcile_pending(repository, registry, installed)
             if not reconciled:
                 raise AgentOperatorError("registry_postcondition_failed", "local routing transaction did not reconcile")
-        return {**plan, "status": "applied", "changes": [f"installed:{MANAGED_WORKFLOW}"]}
+        # The hosted duplicates are suspended only after the local dispatch
+        # surface exists, so the repository is never left with no CI at all.
+        suspended = self._converge_hosted_workflows(repository, enabled=False)
+        applied_changes = [f"installed:{MANAGED_WORKFLOW}"]
+        applied_changes += [f"suspended-hosted:{path}" for path in suspended]
+        with self.store.locked():
+            registry = self.store.load()
+            state = registry["repositories"].setdefault(repository, {"ci_runner": "github"})
+            recorded = sorted(set(state.get("hosted_workflows_disabled") or []) | set(suspended))
+            if recorded:
+                state["hosted_workflows_disabled"] = recorded
+                state["updated_at"] = utc_now()
+                self.store.save(registry)
+                self.store.append_audit({
+                    "at": utc_now(), "operation": "use-local", "repository": repository,
+                    "result": "hosted-duplicates-suspended", "workflows": recorded,
+                })
+        return {**plan, "status": "applied", "changes": applied_changes}
 
     def use_github(self, repository: str, *, apply: bool) -> dict[str, Any]:
         repository = exact_repository(repository)
@@ -654,11 +824,15 @@ class AgentOperator:
                 "blockers": ["managed_workflow_ownership_unverified"],
                 "resulting_ci_runner": "github",
             }
+        restorable = sorted(set(current.get("hosted_workflows_disabled") or []))
         plan = {
             "operation": "use-github",
             "repository": repository,
             "apply_requested": apply,
-            "changes": [] if workflow is None else [f"delete:{MANAGED_WORKFLOW}"],
+            "changes": (
+                ([] if workflow is None else [f"delete:{MANAGED_WORKFLOW}"])
+                + [f"restore-hosted:{path}" for path in restorable]
+            ),
             "resulting_ci_runner": "github",
         }
         if not apply:
@@ -684,6 +858,23 @@ class AgentOperator:
             self.store.append_audit({
                 "at": utc_now(), "operation": "use-github", "repository": repository,
                 "result": "intent-recorded",
+            })
+        # Restore the hosted duplicates this operator suspended before the local
+        # dispatch surface disappears, so quality coverage is never interrupted.
+        # Only recorded paths are touched: a workflow somebody else disabled by
+        # hand stays disabled.
+        if restorable:
+            self._converge_hosted_workflows(repository, enabled=True, only=restorable)
+            with self.store.locked():
+                registry = self.store.load()
+                state = registry["repositories"].get(repository)
+                if isinstance(state, dict):
+                    state.pop("hosted_workflows_disabled", None)
+                    state["updated_at"] = utc_now()
+                    self.store.save(registry)
+            self.store.append_audit({
+                "at": utc_now(), "operation": "use-github", "repository": repository,
+                "result": "hosted-duplicates-restored", "workflows": restorable,
             })
         # GitHub-first: remove dispatch surface before changing local state.
         if workflow is not None:
