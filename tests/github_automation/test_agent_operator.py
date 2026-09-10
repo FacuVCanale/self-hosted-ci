@@ -13,6 +13,7 @@ from github_automation.agent_operator import (
     HostConfig,
     OperatorPaths,
     PrivateOperatorStore,
+    HOSTED_DUPLICATE_WORKFLOWS,
     REGISTRY_SCHEMA,
     exact_repository,
 )
@@ -391,6 +392,206 @@ class AgentOperatorTests(unittest.TestCase):
         os.chmod(self.store.paths.registry, 0o644)
         with self.assertRaisesRegex(AgentOperatorError, "private registry"):
             self.store.load()
+
+
+class FakeGitHubWorkflows:
+    """Minimal Actions workflow surface that records every request it serves."""
+
+    def __init__(self, states):
+        self.states = dict(states)
+        self.identities = {path: index + 1 for index, path in enumerate(sorted(states))}
+        self.calls = []
+        self.frozen = set()
+
+    def __call__(self, argv, **_kwargs):
+        self.calls.append(list(argv))
+        joined = " ".join(argv)
+        if "actions/workflows?per_page=100" in joined:
+            return json.dumps({
+                "total_count": len(self.states),
+                "workflows": [
+                    {"id": self.identities[path], "path": path, "state": state}
+                    for path, state in sorted(self.states.items())
+                ],
+            })
+        for path, identifier in self.identities.items():
+            for action, state in (
+                ("disable", "disabled_manually"), ("enable", "active")
+            ):
+                if joined.endswith(f"actions/workflows/{identifier}/{action}"):
+                    if path not in self.frozen:
+                        self.states[path] = state
+                    return "{}"
+        return "{}"
+
+    @property
+    def mutations(self):
+        return [call for call in self.calls if "--method" in call]
+
+
+class HostedDuplicateSuspensionTests(unittest.TestCase):
+    """`use-local` replaces the hosted duplicates instead of running beside them."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        root = Path(self.temporary.name)
+        key = root / "id_ed25519"
+        key.write_text("test")
+        os.chmod(key, 0o600)
+        self.store = PrivateOperatorStore(OperatorPaths(root / "state"))
+        self.host = HostConfig(
+            "selfhosted-ci-svc@100.117.46.21", key, public_sha="d" * 40
+        )
+        self.operator = FakeOperator(self.store, self.host)
+        self.allowlist = mock.patch.dict(
+            HOSTED_DUPLICATE_WORKFLOWS,
+            {"FacuVCanale/demo": (".github/workflows/ci.yml",)},
+            clear=False,
+        )
+        self.allowlist.start()
+        self.addCleanup(self.allowlist.stop)
+
+    def _installing(self, github):
+        def side_effect(argv, **kwargs):
+            if "--method" in argv and "PUT" in argv and "contents/" in " ".join(argv):
+                content = self.operator._render_workflow()
+                self.operator.workflow = {
+                    "sha": "b" * 40,
+                    "content": content,
+                    "content_sha256": hashlib.sha256(content).hexdigest(),
+                }
+                return "{}"
+            return github(argv, **kwargs)
+        return side_effect
+
+    def test_plan_reports_the_suspension_without_mutating_github(self):
+        github = FakeGitHubWorkflows({".github/workflows/ci.yml": "active"})
+        with mock.patch("github_automation.agent_operator.run_checked", side_effect=github):
+            result = self.operator.use_local("FacuVCanale/demo", apply=False)
+        self.assertEqual(result["status"], "planned")
+        self.assertIn("suspend-hosted:.github/workflows/ci.yml", result["changes"])
+        self.assertEqual(github.mutations, [])
+        self.assertEqual(github.states[".github/workflows/ci.yml"], "active")
+
+    def test_apply_suspends_the_duplicate_by_identity_and_records_it(self):
+        github = FakeGitHubWorkflows({".github/workflows/ci.yml": "active"})
+        with mock.patch(
+            "github_automation.agent_operator.run_checked",
+            side_effect=self._installing(github),
+        ):
+            result = self.operator.use_local("FacuVCanale/demo", apply=True)
+        self.assertEqual(result["status"], "applied")
+        self.assertIn("suspended-hosted:.github/workflows/ci.yml", result["changes"])
+        self.assertEqual(github.states[".github/workflows/ci.yml"], "disabled_manually")
+        self.assertEqual(
+            self.store.load()["repositories"]["FacuVCanale/demo"]["hosted_workflows_disabled"],
+            [".github/workflows/ci.yml"],
+        )
+        disables = [call for call in github.mutations if call[-1].endswith("/disable")]
+        self.assertEqual(len(disables), 1)
+        self.assertEqual(disables[0][-1], "repos/FacuVCanale/demo/actions/workflows/1/disable")
+        self.assertNotIn(
+            "contents/.github/workflows/ci.yml", " ".join(call[-1] for call in github.mutations)
+        )
+
+    def test_apply_leaves_unlisted_repositories_completely_untouched(self):
+        self.allowlist.stop()
+        self.addCleanup(
+            mock.patch.dict(HOSTED_DUPLICATE_WORKFLOWS, {}, clear=False).start
+        )
+        github = FakeGitHubWorkflows({".github/workflows/ci.yml": "active"})
+        with mock.patch(
+            "github_automation.agent_operator.run_checked",
+            side_effect=self._installing(github),
+        ):
+            result = self.operator.use_local("FacuVCanale/demo", apply=True)
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(
+            result["changes"], ["installed:.github/workflows/ci-jit-pilot-child.yml"]
+        )
+        self.assertEqual(github.states[".github/workflows/ci.yml"], "active")
+        self.assertNotIn(
+            "hosted_workflows_disabled",
+            self.store.load()["repositories"]["FacuVCanale/demo"],
+        )
+
+    def test_suspension_fails_closed_when_github_does_not_converge(self):
+        github = FakeGitHubWorkflows({".github/workflows/ci.yml": "active"})
+        github.frozen.add(".github/workflows/ci.yml")
+        with mock.patch(
+            "github_automation.agent_operator.run_checked",
+            side_effect=self._installing(github),
+        ):
+            with self.assertRaisesRegex(AgentOperatorError, "did not reach its requested state"):
+                self.operator.use_local("FacuVCanale/demo", apply=True)
+
+    def test_status_reports_the_live_state_of_every_hosted_duplicate(self):
+        github = FakeGitHubWorkflows({".github/workflows/ci.yml": "disabled_manually"})
+        with self.store.locked():
+            registry = self.store.load()
+            registry["repositories"]["FacuVCanale/demo"] = {
+                "ci_runner": "local-with-github-fallback",
+                "hosted_workflows_disabled": [".github/workflows/ci.yml"],
+            }
+            self.store.save(registry)
+        with mock.patch("github_automation.agent_operator.run_checked", side_effect=github):
+            result = self.operator.status("FacuVCanale/demo")
+        self.assertEqual(result["hosted_duplicates"], [{
+            "path": ".github/workflows/ci.yml",
+            "state": "disabled_manually",
+            "suspended_by_operator": True,
+        }])
+        self.assertIs(result["hosted_duplicates_suspended"], True)
+
+    def test_use_github_restores_only_what_this_operator_suspended(self):
+        github = FakeGitHubWorkflows({
+            ".github/workflows/ci.yml": "disabled_manually",
+            ".github/workflows/deploy.yml": "disabled_manually",
+        })
+        self.operator.workflow = {
+            "sha": "c" * 40, "content": b"managed", "content_sha256": "d" * 64
+        }
+        with self.store.locked():
+            registry = self.store.load()
+            registry["repositories"]["FacuVCanale/demo"] = {
+                "ci_runner": "local-with-github-fallback",
+                "managed_workflow": ".github/workflows/ci-jit-pilot-child.yml",
+                "workflow_blob_sha": "c" * 40,
+                "workflow_content_sha256": "d" * 64,
+                "hosted_workflows_disabled": [".github/workflows/ci.yml"],
+            }
+            self.store.save(registry)
+
+        def side_effect(argv, **kwargs):
+            if "--method" in argv and "DELETE" in argv:
+                self.operator.workflow = None
+                return "{}"
+            return github(argv, **kwargs)
+
+        with mock.patch("github_automation.agent_operator.run_checked", side_effect=side_effect):
+            result = self.operator.use_github("FacuVCanale/demo", apply=True)
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(github.states[".github/workflows/ci.yml"], "active")
+        self.assertEqual(github.states[".github/workflows/deploy.yml"], "disabled_manually")
+        self.assertEqual(
+            self.store.load()["repositories"]["FacuVCanale/demo"]["ci_runner"], "github"
+        )
+
+    def test_registry_rejects_an_invalid_suspended_workflow_record(self):
+        for record in ("ci.yml", ["ci.yml"], [".github/workflows/../../etc/passwd"],
+                       [".github/workflows/ci.yml", ".github/workflows/ci.yml"], [7]):
+            with self.subTest(record=record):
+                self.store.paths.root.mkdir(parents=True, exist_ok=True)
+                self.store.save({
+                    "$schema": REGISTRY_SCHEMA,
+                    "operator_registry_version": 1,
+                    "repositories": {"FacuVCanale/demo": {
+                        "ci_runner": "github", "hosted_workflows_disabled": record,
+                    }},
+                })
+                with self.assertRaisesRegex(AgentOperatorError, "suspended hosted workflow"):
+                    self.store.load()
 
 
 if __name__ == "__main__":

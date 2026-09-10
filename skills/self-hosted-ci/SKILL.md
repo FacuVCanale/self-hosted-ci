@@ -43,5 +43,6 @@ Resolve a missing repository from the current checkout. Resolve a missing PR onl
 - This product owns CI routing only. These commands do not enable, configure, or run AI review.
 - Do not use Cloudflare or Workers. This control plane is GitHub plus the dedicated Windows/WSL host only.
 - In this release, `use-local` configures the verified non-gating JIT pilot. It does not replace a repository's required CI checks. Preserve that distinction in every report.
+- For a repository with reviewed hosted duplicates, `use-local` also suspends those exact GitHub-hosted workflows at the Actions level so the same quality signal is not produced twice, and `use-github` restores exactly the ones it suspended. The workflow files are never edited or deleted: the reviewed repository command profile pins the byte-exact sha256 of the hosted workflow, so editing it would break the local run meant to replace it. Report the live `hosted_duplicates` block from `status`, never an assumption.
 
 Explicit invocation is `$self-hosted-ci` in Codex and `/self-hosted-ci` in Claude Code.
