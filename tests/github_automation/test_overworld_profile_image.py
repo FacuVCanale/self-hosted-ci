@@ -1363,13 +1363,13 @@ cleanup
             'shutil.rmtree(smoke_root)',
             'before = tree_digest(modules)',
             'if tree_digest(modules) != before:',
-            '"NODE_OPTIONS=--max-old-space-size=1280"',
+            '"NODE_OPTIONS=--max-old-space-size=1536"',
             'str(node_path)',
             'str(modules / "next/dist/bin/next"), "--version"',
             'pinned Next.js Node entrypoint smoke drifted',
             "require('node:v8').getHeapStatistics().heap_size_limit",
             'Math.ceil(limit * 0.8)',
-            '1392508928:1114007143',
+            '1660944384:1328755508',
             'pinned Next.js Node heap contract drifted',
             '"HOME=/home/runner", "BUN_OPTIONS=--smol"',
             '"NO_PROXY=", "no_proxy=", "bun", "--smol"',
@@ -1379,7 +1379,7 @@ cleanup
             self.assertIn(offline_smoke_contract, source)
         self.assertNotIn('"NODE_OPTIONS=--max-old-space-size=1024"', source)
         self.assertNotIn('"NODE_OPTIONS=--max-old-space-size=1152"', source)
-        self.assertNotIn('"NODE_OPTIONS=--max-old-space-size=1536"', source)
+        self.assertNotIn('"NODE_OPTIONS=--max-old-space-size=1280"', source)
         regenerated_cleanup = source.index(
             'remove_exact_regenerated_modules(overworld, dependencies, backend_snapshot_digest)',
             source.index("def main"),

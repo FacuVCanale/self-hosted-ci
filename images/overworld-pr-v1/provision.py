@@ -716,7 +716,7 @@ committed=true
             )
             if run(
                 "runuser", "-u", "runner", "--", "env",
-                "HOME=/home/runner", "NODE_OPTIONS=--max-old-space-size=1280",
+                "HOME=/home/runner", "NODE_OPTIONS=--max-old-space-size=1536",
                 "HTTPS_PROXY=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",
                 "https_proxy=http://127.0.0.1:9", "http_proxy=http://127.0.0.1:9",
                 "ALL_PROXY=http://127.0.0.1:9", "all_proxy=http://127.0.0.1:9",
@@ -727,12 +727,12 @@ committed=true
                 raise SystemExit("pinned Next.js Node entrypoint smoke drifted")
             if run(
                 "runuser", "-u", "runner", "--", "env",
-                "HOME=/home/runner", "NODE_OPTIONS=--max-old-space-size=1280",
+                "HOME=/home/runner", "NODE_OPTIONS=--max-old-space-size=1536",
                 str(node_path), "-e",
                 "const limit=require('node:v8').getHeapStatistics().heap_size_limit; "
                 "process.stdout.write(`${limit}:${Math.ceil(limit * 0.8)}`)",
                 cwd=component_root,
-            ) != "1392508928:1114007143":
+            ) != "1660944384:1328755508":
                 raise SystemExit("pinned Next.js Node heap contract drifted")
             if run(
                 "runuser", "-u", "runner", "--", "env",
