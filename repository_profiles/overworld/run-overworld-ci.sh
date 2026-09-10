@@ -240,7 +240,7 @@ require_image_contract() {
   [[ ${#chromium_candidates[@]} == 1 && -x ${chromium_candidates[0]} ]]
   headless_candidates=(/opt/ms-playwright/chromium_headless_shell-1217*/chrome-headless-shell-linux*/chrome-headless-shell)
   [[ ${#headless_candidates[@]} == 1 && -x ${headless_candidates[0]} ]]
-  command -v minio mc node bun uv curl unlink cp sha256sum stat >/dev/null
+  command -v minio mc node bun uv curl unlink cp sha256sum stat /usr/bin/find >/dev/null
   [[ -x $PG16_BIN/initdb && -x $PG16_BIN/pg_ctl && -x $PG16_BIN/createdb ]]
   [[ -x $PG17_BIN/initdb && -x $PG17_BIN/pg_ctl && -x $PG17_BIN/createdb ]]
 }
@@ -472,13 +472,43 @@ require_next_font_mock() {
   require_pinned_root_file "$FRAGMENT_MONO_FONT" "$FRAGMENT_MONO_FONT_SHA256"
 }
 
-start_frontend() {
-  require_next_font_mock
-  require_pinned_root_executable "$NEXT_NODE" "$NEXT_NODE_SHA256"
-  (cd frontend && exec env NODE_OPTIONS=--max-old-space-size=1536 \
+require_no_symlinks() {
+  local first=$1 second=$2 links
+  links=$(/usr/bin/find "$first" "$second" -type l -print) || return 1
+  [[ -z "$links" ]] || return 1
+}
+
+build_frontend_standalone() {
+  require_next_font_mock || return 1
+  require_pinned_root_executable "$NEXT_NODE" "$NEXT_NODE_SHA256" || return 1
+  [[ ! -e frontend/.next && ! -L frontend/.next ]] || return 1
+  (cd backend && bun run build:types) || return 1
+  (cd frontend && exec env NODE_ENV=production NODE_OPTIONS=--max-old-space-size=1536 \
+    NEXT_TELEMETRY_DISABLED=1 \
     NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK" \
-    FRONTEND_PORT=$FRONTEND_PORT BACKEND_URL="http://127.0.0.1:$BACKEND_PORT" \
-    "$NEXT_NODE" ./node_modules/next/dist/bin/next dev --webpack -p "$FRONTEND_PORT") >"$STATE_ROOT/frontend.log" 2>&1 &
+    NEXT_PUBLIC_API_BASE_URL="http://localhost:$BACKEND_PORT" NEXT_PUBLIC_ENV_MODE=DEV \
+    "$NEXT_NODE" ./node_modules/next/dist/bin/next build --webpack) || return 1
+  [[ -f frontend/.next/standalone/server.js && ! -L frontend/.next/standalone/server.js ]] || return 1
+  [[ -d frontend/.next/standalone/.next && ! -L frontend/.next/standalone/.next ]] || return 1
+  [[ -d frontend/.next/static && ! -L frontend/.next/static ]] || return 1
+  [[ -d frontend/public && ! -L frontend/public ]] || return 1
+  require_no_symlinks frontend/.next/static frontend/public || return 1
+  [[ ! -e frontend/.next/standalone/public && ! -L frontend/.next/standalone/public ]] || return 1
+  [[ ! -e frontend/.next/standalone/.next/static && ! -L frontend/.next/standalone/.next/static ]] || return 1
+  cp -a -- frontend/public frontend/.next/standalone/public || return 1
+  cp -a -- frontend/.next/static frontend/.next/standalone/.next/static || return 1
+  [[ -d frontend/.next/standalone/public && ! -L frontend/.next/standalone/public ]] || return 1
+  [[ -d frontend/.next/standalone/.next/static && ! -L frontend/.next/standalone/.next/static ]] || return 1
+  require_no_symlinks frontend/.next/standalone/public frontend/.next/standalone/.next/static || return 1
+}
+
+start_frontend() {
+  require_pinned_root_executable "$NEXT_NODE" "$NEXT_NODE_SHA256"
+  (cd frontend/.next/standalone && exec env NODE_OPTIONS=--max-old-space-size=1536 \
+    NEXT_TELEMETRY_DISABLED=1 HOSTNAME=127.0.0.1 PORT=$FRONTEND_PORT \
+    INTERNAL_API_BASE_URL="http://127.0.0.1:$BACKEND_PORT" \
+    NEXT_PUBLIC_API_BASE_URL="http://localhost:$BACKEND_PORT" NEXT_PUBLIC_ENV_MODE=DEV \
+    "$NEXT_NODE" server.js) >"$STATE_ROOT/frontend.log" 2>&1 &
   echo $! > "$STATE_ROOT/frontend.pid"
   for attempt in $(seq 1 60); do
     curl --fail --silent "http://127.0.0.1:$FRONTEND_PORT" >/dev/null && break
@@ -493,6 +523,7 @@ run_playwright_e2e() {
 }
 
 phase_e2e() {
+  build_frontend_standalone
   start_postgres 17 "$PG17_DATA" "$E2E_PGPORT" 3.5 overworld
   start_minio
   export DATABASE_URL="postgresql://overworld@127.0.0.1:$E2E_PGPORT/overworld"
