@@ -127,7 +127,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
         self.assertEqual("22.23.2", profile["toolchain"]["node"])
         self.assertEqual(
-            "49ba40b2dde378c8df687ce3ab091682c05375caac9291935050cc9f1c8f7090",
+            "7edaa14c1ea8dbf3199e6f170db71521fb7a54280ec436f6c0dd58a08a6cb840",
             profile["runner_script_sha256"],
         )
         self.assertEqual(SCRIPT, script)
@@ -1164,8 +1164,8 @@ printf 'STATUS=%s\n' "$status"
 
         runner = SCRIPT.read_text()
         self.assertEqual(1, runner.count("NEXT_FONT_GOOGLE_MOCKED_RESPONSES="))
-        self.assertEqual(1, runner.count("NODE_OPTIONS=--max-old-space-size=1280"))
-        for forbidden_heap in (1024, 1152, 1536):
+        self.assertEqual(1, runner.count("NODE_OPTIONS=--max-old-space-size=1536"))
+        for forbidden_heap in (1024, 1152, 1280):
             self.assertNotIn(f"NODE_OPTIONS=--max-old-space-size={forbidden_heap}", runner)
         frontend = runner[runner.index("start_frontend() {") : runner.index("\nphase_e2e() {")]
         self.assertIn('NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK"', frontend)
@@ -1176,7 +1176,7 @@ printf 'STATUS=%s\n' "$status"
             frontend,
         )
         self.assertIn(
-            'exec env NODE_OPTIONS=--max-old-space-size=1280', frontend
+            'exec env NODE_OPTIONS=--max-old-space-size=1536', frontend
         )
         self.assertIn(
             '"$NEXT_NODE" ./node_modules/next/dist/bin/next dev --webpack -p "$FRONTEND_PORT"',
@@ -1226,7 +1226,7 @@ cat "$STATE_ROOT/frontend.log"
                 },
             )
             self.assertEqual(0, result.returncode, result.stderr)
-            self.assertIn("NODE_OPTIONS=--max-old-space-size=1280", result.stdout)
+            self.assertIn("NODE_OPTIONS=--max-old-space-size=1536", result.stdout)
             self.assertIn(
                 "ARGV=./node_modules/next/dist/bin/next dev --webpack -p 3000",
                 result.stdout,

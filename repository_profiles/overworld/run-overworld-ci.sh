@@ -475,7 +475,7 @@ require_next_font_mock() {
 start_frontend() {
   require_next_font_mock
   require_pinned_root_executable "$NEXT_NODE" "$NEXT_NODE_SHA256"
-  (cd frontend && exec env NODE_OPTIONS=--max-old-space-size=1280 \
+  (cd frontend && exec env NODE_OPTIONS=--max-old-space-size=1536 \
     NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK" \
     FRONTEND_PORT=$FRONTEND_PORT BACKEND_URL="http://127.0.0.1:$BACKEND_PORT" \
     "$NEXT_NODE" ./node_modules/next/dist/bin/next dev --webpack -p "$FRONTEND_PORT") >"$STATE_ROOT/frontend.log" 2>&1 &
