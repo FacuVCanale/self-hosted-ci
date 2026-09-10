@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import stat
 import subprocess
 import tempfile
@@ -517,7 +518,23 @@ class PilotWorker:
                     checks=checks, reason=reason or "the local run ended without a result",
                     details_url=details,
                 )
-        except (GateCheckError, OSError):
+        except (GateCheckError, OSError) as exc:
+            # A Check that could not be closed is the one failure mode this
+            # design promises never to leave silent: record it and say so, so
+            # the open Check is visible instead of merely forgotten.
+            print(
+                f"check run close failed: {type(exc).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                self.state.record(
+                    key,
+                    progress.get("phase") or "checks-close-failed",
+                    checks_close_failed=type(exc).__name__,
+                )
+            except WorkerError:
+                pass
             return
         try:
             self.state.record(key, progress.get("phase") or "checks-closed", checks_closed=True)
