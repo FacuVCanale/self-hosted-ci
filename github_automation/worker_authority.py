@@ -332,8 +332,11 @@ class WorkerGitHubClient:
                 or head_repository.get("id") != self.authority.repository_id
                 or not isinstance(base.get("repo"), Mapping)
                 or base["repo"].get("id") != self.authority.repository_id
+                # A stacked pull request targets another branch. `pull_request`
+                # rejects it, so listing it here would queue work that can never
+                # be approved.
+                or base.get("ref") != self.authority.default_branch
             ):
-                # A fork head is skipped, never dispatched.
                 continue
             listed.append((number, str(head["sha"])))
         return tuple(listed)

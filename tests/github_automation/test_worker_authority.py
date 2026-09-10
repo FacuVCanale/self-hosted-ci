@@ -100,10 +100,10 @@ class WorkerAuthorityTests(unittest.TestCase):
         listing = response(200, [
             {"number": 7, "state": "open",
              "head": {"sha": "a" * 40, "repo": {"id": 303}},
-             "base": {"repo": {"id": 303}}},
+             "base": {"ref": "main", "repo": {"id": 303}}},
             {"number": 9, "state": "open",
              "head": {"sha": "b" * 40, "repo": {"id": 303}},
-             "base": {"repo": {"id": 303}}},
+             "base": {"ref": "main", "repo": {"id": 303}}},
         ])
         client, token, transport, _ = self.authenticate(*auth_responses(), listing)
         self.assertEqual(
@@ -117,7 +117,16 @@ class WorkerAuthorityTests(unittest.TestCase):
         listing = response(200, [
             {"number": 7, "state": "open",
              "head": {"sha": "a" * 40, "repo": {"id": 999}},
-             "base": {"repo": {"id": 303}}},
+             "base": {"ref": "main", "repo": {"id": 303}}},
+        ])
+        client, token, _transport, _ = self.authenticate(*auth_responses(), listing)
+        self.assertEqual(client.open_pull_requests(token), ())
+
+    def test_a_stacked_pull_request_targeting_another_branch_is_not_listed(self) -> None:
+        listing = response(200, [
+            {"number": 73, "state": "open",
+             "head": {"sha": "a" * 40, "repo": {"id": 303}},
+             "base": {"ref": "fix/other-branch", "repo": {"id": 303}}},
         ])
         client, token, _transport, _ = self.authenticate(*auth_responses(), listing)
         self.assertEqual(client.open_pull_requests(token), ())
@@ -126,7 +135,7 @@ class WorkerAuthorityTests(unittest.TestCase):
         listing = response(200, [
             {"number": 7, "state": "open",
              "head": {"sha": "a" * 40, "repo": {"id": 303}},
-             "base": {"repo": {"id": 999}}},
+             "base": {"ref": "main", "repo": {"id": 999}}},
         ])
         client, token, _transport, _ = self.authenticate(*auth_responses(), listing)
         self.assertEqual(client.open_pull_requests(token), ())
@@ -135,11 +144,11 @@ class WorkerAuthorityTests(unittest.TestCase):
         for body in (
             {"items": []},
             [{"number": 7, "state": "open", "head": {"sha": "abc", "repo": {"id": 303}},
-              "base": {"repo": {"id": 303}}}],
+              "base": {"ref": "main", "repo": {"id": 303}}}],
             [{"number": 0, "state": "open", "head": {"sha": "a" * 40, "repo": {"id": 303}},
-              "base": {"repo": {"id": 303}}}],
+              "base": {"ref": "main", "repo": {"id": 303}}}],
             [{"number": 7, "state": "closed", "head": {"sha": "a" * 40, "repo": {"id": 303}},
-              "base": {"repo": {"id": 303}}}],
+              "base": {"ref": "main", "repo": {"id": 303}}}],
         ):
             with self.subTest(body=body):
                 client, token, _transport, _ = self.authenticate(

@@ -14,7 +14,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 repo_root = Path(__file__).resolve().parents[2]
 if (repo_root / "github_automation").is_dir():
@@ -81,18 +81,46 @@ class HTTPS:
             raise WorkerAuthorityError("worker GitHub transport failed") from exc
 
     def stream(self, url, *, headers, chunk_size=1 << 20):
-        """Yield a redirect-followed response body in bounded chunks.
+        """Yield a large response body in bounded chunks.
 
         Job logs are plain text far larger than any JSON this worker reads, and
         the phase evidence lives at the end, so they must never be truncated to
         the JSON bound. Nothing is parsed here; the caller scans for markers.
+
+        The logs endpoint answers 302 with a pre-signed URL on a storage host.
+        The redirect is followed by hand and deliberately without the
+        Authorization header: forwarding an installation token to a third-party
+        host is both a credential leak and, because that host authenticates the
+        signature instead, an immediate 401.
         """
+
+        class _NoRedirect(HTTPRedirectHandler):
+            def redirect_request(self, *_args, **_kwargs):
+                return None
+
+        opener = build_opener(_NoRedirect)
         request = Request(url, headers=dict(headers), method="GET")
-        with urlopen(
-            request, timeout=self.timeout, context=ssl.create_default_context()
-        ) as response:
-            if response.status != 200:
-                raise WorkerAuthorityError("worker GitHub log transport failed")
+        try:
+            response = opener.open(
+                request, timeout=self.timeout
+            )
+            location, status = None, response.status
+        except HTTPError as exc:
+            location, status = exc.headers.get("Location"), exc.code
+            exc.close()
+        if status in {301, 302, 303, 307, 308}:
+            if not location or not location.lower().startswith("https://"):
+                raise WorkerAuthorityError("worker GitHub log redirect is unsafe")
+            # No Authorization header: the pre-signed URL carries its own proof.
+            response = urlopen(
+                Request(location, method="GET"),
+                timeout=self.timeout,
+                context=ssl.create_default_context(),
+            )
+            status = response.status
+        if status != 200:
+            raise WorkerAuthorityError("worker GitHub log transport failed")
+        with response:
             while True:
                 chunk = response.read(chunk_size)
                 if not chunk:
@@ -377,7 +405,7 @@ class AutoDispatcher:
                     self.source.revoke(self.repository, action.pr_number)
                 else:
                     self.source.approve(self.repository, action.pr_number)
-            except LocalApprovalError as exc:
+            except (LocalApprovalError, WorkerAuthorityError) as exc:
                 # One unapprovable pull request must never stop the others.
                 applied.append({
                     "pr": action.pr_number, "kind": action.kind,
