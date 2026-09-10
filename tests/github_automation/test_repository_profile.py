@@ -127,7 +127,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
         self.assertEqual("22.23.2", profile["toolchain"]["node"])
         self.assertEqual(
-            "6789de6b434afea00f4107104cd37039102d772e23de8181155ca22b7b56d3c6",
+            "49ba40b2dde378c8df687ce3ab091682c05375caac9291935050cc9f1c8f7090",
             profile["runner_script_sha256"],
         )
         self.assertEqual(SCRIPT, script)
@@ -1164,9 +1164,9 @@ printf 'STATUS=%s\n' "$status"
 
         runner = SCRIPT.read_text()
         self.assertEqual(1, runner.count("NEXT_FONT_GOOGLE_MOCKED_RESPONSES="))
-        self.assertEqual(1, runner.count("NODE_OPTIONS=--max-old-space-size=1152"))
-        self.assertNotIn("NODE_OPTIONS=--max-old-space-size=1024", runner)
-        self.assertNotIn("NODE_OPTIONS=--max-old-space-size=1536", runner)
+        self.assertEqual(1, runner.count("NODE_OPTIONS=--max-old-space-size=1280"))
+        for forbidden_heap in (1024, 1152, 1536):
+            self.assertNotIn(f"NODE_OPTIONS=--max-old-space-size={forbidden_heap}", runner)
         frontend = runner[runner.index("start_frontend() {") : runner.index("\nphase_e2e() {")]
         self.assertIn('NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK"', frontend)
         self.assertNotIn("NEXT_FONT_GOOGLE_MOCKED_RESPONSES", runner[: runner.index("start_frontend() {")])
@@ -1176,7 +1176,7 @@ printf 'STATUS=%s\n' "$status"
             frontend,
         )
         self.assertIn(
-            'exec env NODE_OPTIONS=--max-old-space-size=1152', frontend
+            'exec env NODE_OPTIONS=--max-old-space-size=1280', frontend
         )
         self.assertIn(
             '"$NEXT_NODE" ./node_modules/next/dist/bin/next dev --webpack -p "$FRONTEND_PORT"',
@@ -1226,7 +1226,7 @@ cat "$STATE_ROOT/frontend.log"
                 },
             )
             self.assertEqual(0, result.returncode, result.stderr)
-            self.assertIn("NODE_OPTIONS=--max-old-space-size=1152", result.stdout)
+            self.assertIn("NODE_OPTIONS=--max-old-space-size=1280", result.stdout)
             self.assertIn(
                 "ARGV=./node_modules/next/dist/bin/next dev --webpack -p 3000",
                 result.stdout,
@@ -1314,6 +1314,61 @@ require_pinned_root_executable "$CANDIDATE" "$EXPECTED_SHA"
             link.symlink_to(exact)
             self.assertNotEqual(0, run_guard(link).returncode)
             self.assertNotEqual(0, run_guard(root).returncode)
+
+    def test_minio_memory_limit_is_exact_process_scoped_and_does_not_leak(self):
+        runner = SCRIPT.read_text()
+        start_minio = runner[
+            runner.index("start_minio() {") : runner.index("\nphase_backend() {")
+        ]
+        self.assertEqual(1, runner.count("MINIO_MEMLIMIT=160MiB"))
+        self.assertNotIn("GOMEMLIMIT", runner)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            data = state / "minio"
+            data.mkdir(parents=True)
+            trace = root / "trace"
+            command = f"""
+set -euo pipefail
+STATE_ROOT={state}
+MINIO_DATA={data}
+MINIO_PORT=59002
+TRACE={trace}
+{start_minio}
+minio() {{
+  printf 'MINIO_MEMLIMIT=%s\n' "$MINIO_MEMLIMIT" >> "$TRACE"
+  printf 'MINIO_ROOT_USER=%s\n' "$MINIO_ROOT_USER" >> "$TRACE"
+  printf 'MINIO_ROOT_PASSWORD=%s\n' "$MINIO_ROOT_PASSWORD" >> "$TRACE"
+  printf 'ARGV=%s\n' "$*" >> "$TRACE"
+}}
+curl() {{ return 0; }}
+mc() {{ :; }}
+start_minio
+wait "$(cat "$STATE_ROOT/minio.pid")"
+printf 'MINIO_MEMLIMIT_AFTER=%s\n' "${{MINIO_MEMLIMIT-unset}}"
+printf 'MINIO_ROOT_USER_AFTER=%s\n' "${{MINIO_ROOT_USER-unset}}"
+printf 'MINIO_ROOT_PASSWORD_AFTER=%s\n' "${{MINIO_ROOT_PASSWORD-unset}}"
+"""
+            result = subprocess.run(
+                ["bash"], cwd=root, input=command, capture_output=True, text=True
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(
+                "MINIO_MEMLIMIT_AFTER=unset\n"
+                "MINIO_ROOT_USER_AFTER=unset\n"
+                "MINIO_ROOT_PASSWORD_AFTER=unset\n",
+                result.stdout,
+            )
+            self.assertEqual(
+                [
+                    "MINIO_MEMLIMIT=160MiB",
+                    "MINIO_ROOT_USER=minioadmin",
+                    "MINIO_ROOT_PASSWORD=minioadmin",
+                    f"ARGV=server {data} --address 127.0.0.1:59002",
+                ],
+                trace.read_text(encoding="utf-8").splitlines(),
+            )
 
     def test_next_16_font_loader_smoke_when_package_is_available(self):
         configured = os.environ.get("SELF_HOSTED_CI_NEXT_NODE_MODULES")

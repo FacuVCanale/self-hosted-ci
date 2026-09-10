@@ -387,7 +387,8 @@ start_postgres() {
 }
 
 start_minio() {
-  MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin minio server "$MINIO_DATA" \
+  MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin MINIO_MEMLIMIT=160MiB \
+    minio server "$MINIO_DATA" \
     --address "127.0.0.1:$MINIO_PORT" >"$STATE_ROOT/minio.log" 2>&1 &
   echo $! > "$STATE_ROOT/minio.pid"
   for attempt in $(seq 1 30); do
@@ -474,7 +475,7 @@ require_next_font_mock() {
 start_frontend() {
   require_next_font_mock
   require_pinned_root_executable "$NEXT_NODE" "$NEXT_NODE_SHA256"
-  (cd frontend && exec env NODE_OPTIONS=--max-old-space-size=1152 \
+  (cd frontend && exec env NODE_OPTIONS=--max-old-space-size=1280 \
     NEXT_FONT_GOOGLE_MOCKED_RESPONSES="$NEXT_FONT_MOCK" \
     FRONTEND_PORT=$FRONTEND_PORT BACKEND_URL="http://127.0.0.1:$BACKEND_PORT" \
     "$NEXT_NODE" ./node_modules/next/dist/bin/next dev --webpack -p "$FRONTEND_PORT") >"$STATE_ROOT/frontend.log" 2>&1 &
