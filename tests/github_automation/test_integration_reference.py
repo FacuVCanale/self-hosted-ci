@@ -12,6 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -487,7 +488,7 @@ class ReferencePlatformIntegrationTests(unittest.TestCase):
         for suite in ("SANDBOX", "WSL", "PILOT"):
             with self.subTest(suite=suite):
                 completed = subprocess.run(
-                    [str(ROOT / ".venv/bin/python"), str(launcher), suite],
+                    [sys.executable, str(launcher), suite],
                     cwd=ROOT,
                     env={"PATH": "/usr/bin:/bin"},
                     text=True,

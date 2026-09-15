@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -137,7 +138,7 @@ class JitCanaryActionTests(unittest.TestCase):
             sha = "9" * 40
             result = subprocess.run(
                 [
-                    str(ROOT / ".venv/bin/python"),
+                    sys.executable,
                     str(ROOT / "scripts/render-consumer-workflows.py"),
                     "--repository", "FacuVCanale/self-hosted-ci",
                     "--sha", sha,
