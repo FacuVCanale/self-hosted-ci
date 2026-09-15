@@ -1,4 +1,9 @@
 import json
+import importlib.util
+import io
+import sys
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import hashlib
 import os
 import stat
@@ -596,3 +601,120 @@ class HostedDuplicateSuspensionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HealthSnapshotOperatorTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        root = Path(self.temporary.name)
+        key = root / "key"
+        key.write_text("test")
+        key.chmod(0o600)
+        self.host = HostConfig("service@host", key, public_sha="d" * 40)
+        self.operator = FakeOperator(PrivateOperatorStore(OperatorPaths(root / "state")), self.host)
+        content = self.operator._render_workflow()
+        digest = hashlib.sha256(content).hexdigest()
+        self.operator.workflow = {"sha": "b" * 40, "content": content, "content_sha256": digest}
+        with self.operator.store.locked():
+            registry = self.operator.store.load()
+            registry["repositories"]["FacuVCanale/demo"] = {
+                "ci_runner": "local-with-github-fallback",
+                "managed_workflow": ".github/workflows/ci-jit-pilot-child.yml",
+                "workflow_blob_sha": "b" * 40,
+                "workflow_content_sha256": digest,
+            }
+            self.operator.store.save(registry)
+        self.now = datetime(2026, 9, 15, 12, tzinfo=timezone.utc)
+        cli_path = Path(__file__).resolve().parents[2] / "scripts/self-hosted-ci.py"
+        spec = importlib.util.spec_from_file_location("health_test_cli", cli_path)
+        self.cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.cli)
+
+    def snapshot(self, age=60):
+        stamp = lambda time: time.isoformat().replace("+00:00", "Z")
+        generated = self.now - timedelta(seconds=age)
+        return {
+            "generated_at": stamp(generated),
+            "expires_at": stamp(generated + timedelta(seconds=180)),
+            "eligibility": {"eligible_for_local_ci": True, "blocking_reasons": []},
+            "probe_error": None,
+        }
+
+    @contextmanager
+    def serve_snapshot(self, payload):
+        with mock.patch.object(self.operator, "_ssh", return_value=json.dumps(payload)) as ssh, mock.patch.object(
+            self.operator, "_health", side_effect=lambda: AgentOperator._health(self.operator)
+        ), mock.patch("github_automation.agent_operator.datetime") as clock, mock.patch(
+            "github_automation.agent_operator.run_checked"
+        ) as github:
+            clock.now.return_value = self.now
+            yield ssh, github
+
+    def run_cli(self, *arguments):
+        with mock.patch.object(self.cli.HostConfig, "load", return_value=self.host), mock.patch.object(
+            self.cli, "AgentOperator", return_value=self.operator
+        ), mock.patch.object(sys, "argv", ["self-hosted-ci", *arguments]), mock.patch(
+            "sys.stdout", new_callable=io.StringIO
+        ) as output:
+            code = self.cli.main()
+        return code, json.loads(output.getvalue())
+
+    def test_fresh_snapshot_doctor_healthy_and_effective_local(self):
+        with self.serve_snapshot(self.snapshot()):
+            code, result = self.run_cli("doctor", "FacuVCanale/demo")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["doctor"], "healthy")
+        self.assertTrue(result["effective_local"])
+        self.assertEqual(result["health"]["snapshot_age_seconds"], 60)
+        self.assertEqual(result["health"]["expires_at"], self.snapshot()["expires_at"])
+
+    def test_expired_snapshot_doctor_unhealthy_and_not_effective_local(self):
+        payload = self.snapshot(age=3 * 86400)
+        with self.serve_snapshot(payload):
+            _, result = self.run_cli("doctor", "FacuVCanale/demo")
+        self.assertEqual(result["doctor"], "unhealthy")
+        self.assertFalse(result["health"]["eligible"])
+        self.assertFalse(result["effective_local"])
+        self.assertEqual(result["health"]["blockers"], ["snapshot_expired"])
+        self.assertEqual(result["health"]["snapshot_age_seconds"], 3 * 86400)
+
+    def test_snapshot_timestamps_missing_or_malformed_fail_closed(self):
+        for field in ("generated_at", "expires_at"):
+            for value in (None, "yesterday", 123, "2026-09-15T12:00:00"):
+                with self.subTest(field=field, value=value):
+                    payload = self.snapshot()
+                    if value is None:
+                        del payload[field]
+                    else:
+                        payload[field] = value
+                    with self.serve_snapshot(payload):
+                        _, result = self.run_cli("doctor", "FacuVCanale/demo")
+                    self.assertEqual(result["doctor"], "unhealthy")
+                    self.assertFalse(result["effective_local"])
+                    self.assertIn("snapshot_invalid", result["health"]["blockers"])
+
+    def test_snapshot_expiry_allows_only_30_seconds_skew(self):
+        for age, eligible in ((209, True), (210, False), (211, False)):
+            with self.subTest(age=age), self.serve_snapshot(self.snapshot(age)):
+                health = self.operator._health()
+                self.assertEqual(health["eligible"], eligible)
+                self.assertEqual(health["blockers"], [] if eligible else ["snapshot_expired"])
+
+    def test_expired_snapshot_run_local_rejects_plan_and_apply_without_dispatch(self):
+        for apply in (False, True):
+            with self.subTest(apply=apply), self.serve_snapshot(self.snapshot(3 * 86400)) as (ssh, github), mock.patch.object(
+                self.operator, "_github_pr", return_value={"headSha": "a" * 40}
+            ) as pr, mock.patch.object(self.operator, "_workflow", wraps=self.operator._workflow) as workflow:
+                args = ["run-local", "FacuVCanale/demo", "--pr", "7"]
+                if apply:
+                    args.append("--apply")
+                code, result = self.run_cli(*args)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(result["status"], "blocked")
+                self.assertIn("snapshot_expired", result["blockers"])
+                pr.assert_not_called()
+                workflow.assert_not_called()
+                github.assert_not_called()
+                self.assertEqual(ssh.call_count, 1)
+                self.assertIn("current.json", ssh.call_args.args[0])
