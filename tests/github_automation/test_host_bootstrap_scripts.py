@@ -33,6 +33,24 @@ class HostBootstrapScriptTests(unittest.TestCase):
         self.assertNotIn('$watchdog.Repetition.Duration =', source)
         self.assertNotIn('$watchdog.EndBoundary =', source)
 
+    def test_watchdog_start_boundary_is_future_and_checked_before_manual_start(self):
+        source = (ROOT / "scripts/host/install-health-supervisor.ps1").read_text()
+        self.assertIn(
+            '$watchdog.StartBoundary = [DateTime]::Now.AddMinutes(10).ToString("yyyy-MM-ddTHH:mm:ss")',
+            source,
+        )
+        self.assertNotIn('[DateTime]::Today', source)
+        captured = source.index('$taskRegistrationStartedAt = [DateTime]::Now')
+        registration = source.index('$task = Register-PasswordSupervisorTask')
+        verified = source.index('task watchdog future StartBoundary postcondition failed')
+        started = source.index('Start-ScheduledTask -TaskName $TaskName')
+        self.assertLess(captured, registration)
+        self.assertLess(registration, verified)
+        self.assertLess(verified, started)
+        self.assertIn('[DateTime]::Parse([string]$watchdog.StartBoundary', source)
+        self.assertIn('$watchdogStart -lt $taskRegistrationStartedAt.AddMinutes(9)', source)
+        self.assertIn('$watchdogStart -gt $taskRegistrationStartedAt.AddMinutes(11)', source)
+
     def test_bash_is_syntactically_valid_and_renders_fail_closed_wsl_config(self) -> None:
         syntax = subprocess.run(["bash", "-n", str(BASH_SCRIPT)], text=True, capture_output=True, check=False)
         self.assertEqual(0, syntax.returncode, syntax.stderr)
