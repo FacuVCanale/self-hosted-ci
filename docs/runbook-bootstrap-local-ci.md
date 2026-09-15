@@ -125,18 +125,45 @@ de servicio**, no `facun`: el registro de distros WSL pertenece a cada usuario.
 Estos comandos no arrancan la distro ni la task:
 
 ```bash
-ci_ssh_target='selfhosted-ci-svc@100.117.46.21'
+# ssh_target debe identificar a selfhosted-ci-svc@<tailscale-ip-del-host>.
+ci_ssh_target="$(python3 -c 'import json; from pathlib import Path; print(json.loads((Path.home() / ".config/self-hosted-ci/config.json").read_text())["ssh_target"])')"
 ci_ssh_key="$HOME/.local/share/self-hosted-ci/service-ssh/id_ed25519"
 ssh -i "$ci_ssh_key" "$ci_ssh_target" 'wsl.exe --list --verbose'
 ssh -i "$ci_ssh_key" "$ci_ssh_target" 'powershell.exe -NoProfile -NonInteractive -Command "Get-ScheduledTask -TaskName SelfHostedCI-Health-Supervisor | Select-Object TaskName,State; Get-ScheduledTaskInfo -TaskName SelfHostedCI-Health-Supervisor | Select-Object LastRunTime,LastTaskResult,NextRunTime"'
 ssh -i "$ci_ssh_key" "$ci_ssh_target" 'cmd.exe /d /c type C:\ProgramData\self-hosted-ci\health\current.json'
 ```
 
+### Si `schtasks /run` no cambia `LastRunTime`
+
+Una rotación de contraseña posterior a la instalación puede invalidar la
+credencial guardada de la task (`LogonType=Password`). En ese caso,
+`schtasks /run` no logra arrancarla y `LastRunTime` no cambia.
+El log `Microsoft-Windows-TaskScheduler/Operational` viene deshabilitado por
+defecto: sin habilitarlo, el fallo puede quedar silencioso.
+
+Para diagnosticarlo, el operador humano habilita el log **desde PowerShell
+elevada en la PC**. Este paso modifica la configuración del log y queda fuera
+del diagnóstico read-only desde la Mac:
+
+```powershell
+wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true
+schtasks /run /tn SelfHostedCI-Health-Supervisor
+Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; Id = 101,104 } -MaxEvents 20 |
+  Select-Object TimeCreated, Id, Message
+```
+
+Buscar eventos de `SelfHostedCI-Health-Supervisor` con error
+`2147943726 = 0x8007052E` ("usuario o contraseña incorrectos"). Habilitar el log
+no recupera eventos anteriores; el nuevo intento permite registrar el fallo.
+Confirmada la credencial inválida, la **única recuperación** es desinstalar y
+reinstalar el supervisor según el paso del operador humano de abajo. Repetir
+`schtasks /run` no repara la credencial.
+
 ### Recuperación canónica
 
-El operador arranca la task existente bajo `selfhosted-ci-svc`; la task conserva
-su identidad y credencial protegida. Es una operación de recuperación, **no**
-parte del diagnóstico read-only:
+Con la credencial guardada válida, el operador arranca la task existente bajo
+`selfhosted-ci-svc`; la task conserva su identidad y credencial protegida.
+Es una operación de recuperación, **no** parte del diagnóstico read-only:
 
 ```bash
 ssh -i "$ci_ssh_key" "$ci_ssh_target" 'schtasks /run /tn SelfHostedCI-Health-Supervisor'
@@ -160,10 +187,20 @@ No registrar runners manuales para reclamar un label viejo.
 ### Actualizar la task instalada: paso del operador humano
 
 El código nuevo no actualiza una task ya instalada. El operador humano debe
-reinstalar `scripts/host/install-health-supervisor.ps1` desde PowerShell elevado
-(admin), con los acknowledgements de contraseña y ACL del paso de instalación
-anterior. El instalador exige una credencial de contraseña para la cuenta de
-servicio, **la genera y rota él mismo** y la guarda protegida en Task Scheduler;
+ejecutar `uninstall-health-supervisor.ps1` y después
+`install-health-supervisor.ps1` **desde PowerShell elevada (admin) en la PC,
+no por SSH: el instalador reinicia `sshd`**. Los scripts del package están en
+`C:\ProgramData\self-hosted-ci\package\scripts\host`; ubicarse allí antes de
+seguir los comandos de desinstalación e instalación, con los acknowledgements
+de contraseña y ACL correspondientes:
+
+```powershell
+Set-Location 'C:\ProgramData\self-hosted-ci\package\scripts\host'
+```
+
+Este procedimiento también es obligatorio cuando los eventos 101/104 confirman
+que la credencial guardada quedó invalidada por una rotación posterior.
+El instalador exige una credencial de contraseña para la cuenta de servicio, **la genera y rota él mismo** y la guarda protegida en Task Scheduler;
 no recibe `-Password` ni requiere publicar la contraseña en comandos o logs.
 Como rechaza una task existente, usar primero el desinstalador canónico
 `uninstall-health-supervisor.ps1`, con sus acknowledgements, y luego instalar.
