@@ -10,7 +10,8 @@ param(
     [switch]$AcknowledgeCreateDisabledReader,
     [switch]$AcknowledgeOneTimePasswordRotation,
     [ValidateSet("none", "host-after-reader", "worker-before-wsl", "payload-after-install", "payload-evidence-failure")][string]$FailureInjection = "none",
-    [switch]$AcknowledgeFailureInjection
+    [switch]$AcknowledgeFailureInjection,
+    [switch]$AcknowledgeSupervisorCredentialInvalidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,6 +35,18 @@ $ServicePath = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $TimerPath = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "packaging/systemd/self-hosted-ci-health-heartbeat.timer"
 $PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $ReaderDescription = "Managed disabled self-hosted-ci health reader"
+
+function Assert-SupervisorCredentialRotationAllowed {
+    if ($AcknowledgeSupervisorCredentialInvalidation) { return }
+    # Enumeration distinguishes an absent task from a failed scheduler query.
+    # Do not suppress errors: unknown task state must block password rotation.
+    $supervisors = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $_.TaskName -eq "SelfHostedCI-Health-Supervisor"
+    })
+    if ($supervisors.Count -gt 0) {
+        throw ("health supervisor task exists; its stored credential would be invalidated " + [char]0x2014 + " run uninstall-health-supervisor.ps1 first and reinstall it last")
+    }
+}
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -264,11 +277,11 @@ else {
 $payload = Render-Payload
 $payloadBytes = [Text.Encoding]::UTF8.GetBytes($payload)
 $payloadSha = ([Security.Cryptography.SHA256]::Create().ComputeHash($payloadBytes) | ForEach-Object { $_.ToString("x2") }) -join ""
-[ordered]@{ mode="plan"; apply_requested=[bool]$Apply; task_name=$TaskName; service_sid=$service.SID.Value; reader_action=$(if ($orphanReaderProfile) { "recover-orphan-create-disabled" } elseif ($null -eq $existingReader) { "create-disabled" } else { "verify-disabled" }); distro=$DistroName; payload_sha256=$payloadSha; persistent_task_must_be_absent=$true; runner_registration="not_performed"; external_calls="not_performed" } | ConvertTo-Json -Compress
+[ordered]@{ mode="plan"; apply_requested=[bool]$Apply; task_name=$TaskName; service_sid=$service.SID.Value; reader_action=$(if ($orphanReaderProfile) { "recover-orphan-create-disabled" } elseif ($null -eq $existingReader) { "create-disabled" } else { "verify-disabled" }); distro=$DistroName; payload_sha256=$payloadSha; persistent_task_must_be_absent=(-not [bool]$AcknowledgeSupervisorCredentialInvalidation); runner_registration="not_performed"; external_calls="not_performed" } | ConvertTo-Json -Compress
 if (-not $Apply) { return }
+Assert-SupervisorCredentialRotationAllowed
 if (-not $AcknowledgeCreateDisabledReader -or -not $AcknowledgeOneTimePasswordRotation) { throw "Apply requires both acknowledgements" }
 if ($FailureInjection -ne "none" -and -not $AcknowledgeFailureInjection) { throw "failure injection requires its explicit acknowledgement" }
-if (Get-ScheduledTask -TaskName $PersistentTaskName -ErrorAction SilentlyContinue) { throw "persistent supervisor must not exist; bootstrap must run first" }
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task already exists" }
 $expectedStagingRoot = [IO.Path]::GetFullPath("C:\ProgramData\self-hosted-ci\health-bootstrap")
 if ([IO.Path]::GetFullPath($Root) -ne $expectedStagingRoot) { throw "health bootstrap staging root is not canonical" }
@@ -375,7 +388,7 @@ catch {
 }
 "@
     [IO.File]::WriteAllText($WorkerPath, $worker, [Text.UTF8Encoding]::new($false))
-    $password = New-RandomPassword; Set-LocalUser -Name $service.Name -Password $password; $passwordApplied = $true
+    $password = New-RandomPassword; Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $password; $passwordApplied = $true
     [void](Register-OneShot "$env:COMPUTERNAME\$($service.Name)" $password); $registered = $true
     $password.Dispose(); $password = $null
     $observed = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
@@ -402,7 +415,7 @@ catch {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false; $registered = $false
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task remains after unregister" }
     $finalPassword = New-RandomPassword
-    try { Set-LocalUser -Name $service.Name -Password $finalPassword }
+    try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $finalPassword }
     finally { $finalPassword.Dispose() }
     $passwordApplied = $false
     Assert-NoReparsePath $Root
@@ -427,7 +440,7 @@ catch {
         }
         catch { $rollback.Add("task cleanup: $($_.Exception.Message)") }
     }
-    if ($passwordApplied) { $recovery = New-RandomPassword; try { Set-LocalUser -Name $service.Name -Password $recovery } catch { $rollback.Add("credential invalidation: $($_.Exception.Message)") } finally { $recovery.Dispose() } }
+    if ($passwordApplied) { $recovery = New-RandomPassword; try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $recovery } catch { $rollback.Add("credential invalidation: $($_.Exception.Message)") } finally { $recovery.Dispose() } }
     if (Test-Path -LiteralPath $Root) { try { Assert-NoReparsePath $Root; Assert-NoReparseDescendants $Root; Remove-Item -LiteralPath $Root -Recurse -Force } catch { $rollback.Add("staging cleanup: $($_.Exception.Message)") } }
     if ($createdReader) {
         try {

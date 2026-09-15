@@ -755,7 +755,7 @@ if ($script:events[$script:events.Count - 1] -ne 'probe') { throw 'normal probin
             "SecureStringToBSTR",
             "ZeroFreeBSTR",
             "payload_sha256",
-            "persistent supervisor must not exist; bootstrap must run first",
+            "Assert-SupervisorCredentialRotationAllowed",
             "two-heartbeat postcondition failed",
             "Unregister-ScheduledTask",
             "stored_task_credential_invalidated=$true",
@@ -952,7 +952,7 @@ if ($script:events[$script:events.Count - 1] -ne 'probe') { throw 'normal probin
     def test_exact_prerequisite_uninstall_requires_supervisor_first(self) -> None:
         source = PREREQUISITE_UNINSTALLER.read_text(encoding="utf-8")
         for token in (
-            "persistent supervisor must be uninstalled first",
+            "Assert-SupervisorCredentialRotationAllowed",
             "health reader must be disabled",
             "unexpected reader profile artifact blocks exact uninstall",
             "Remove-LocalUser",

@@ -7,7 +7,8 @@ param(
     [switch]$Apply,
     [switch]$AcknowledgeTaskRemoval,
     [switch]$AcknowledgeFinalPasswordRotation,
-    [switch]$AcknowledgeHealthArtifactRemoval
+    [switch]$AcknowledgeHealthArtifactRemoval,
+    [switch]$AcknowledgeSupervisorCredentialInvalidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +26,18 @@ $PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe
 $MarkerRoot = Join-Path $env:ProgramFiles "self-hosted-ci\transactions"
 $MarkerPath = Join-Path $MarkerRoot "health-supervisor-uninstall-v1.json"
 $MarkerVersion = 1
+
+function Assert-SupervisorCredentialRotationAllowed {
+    if ($AcknowledgeSupervisorCredentialInvalidation) { return }
+    # Enumeration distinguishes an absent task from a failed scheduler query.
+    # Do not suppress errors: unknown task state must block password rotation.
+    $supervisors = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $_.TaskName -eq "SelfHostedCI-Health-Supervisor"
+    })
+    if ($supervisors.Count -gt 0) {
+        throw ("health supervisor task exists; its stored credential would be invalidated " + [char]0x2014 + " run uninstall-health-supervisor.ps1 first and reinstall it last")
+    }
+}
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -285,7 +298,7 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw
 $password = $null
 try {
     $password = New-CryptographicAccountPassword
-    Set-LocalUser -Name $account.Name -Password $password -ErrorAction Stop
+    Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $account.Name -Password $password -ErrorAction Stop
 }
 finally { if ($null -ne $password) { $password.Dispose() } }
 Disable-LocalUser -Name $ReaderAccount -ErrorAction Stop

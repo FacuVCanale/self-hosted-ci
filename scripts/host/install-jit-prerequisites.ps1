@@ -7,7 +7,8 @@ param(
     [int]$TimeoutSeconds = 600,
     [switch]$Apply,
     [switch]$AcknowledgeHostPackageInstallation,
-    [switch]$AcknowledgeOneTimePasswordRotation
+    [switch]$AcknowledgeOneTimePasswordRotation,
+    [switch]$AcknowledgeSupervisorCredentialInvalidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +31,18 @@ $ExpectedGarmProviderIncusSha256 = "1489b5f9b3f01528e338c604c13dabe8321ed6f1bc6d
 $ExpectedIncusVersion = "6.0.0-1ubuntu0.3"
 $ExpectedCowsqlVersion = "1.15.8-1"
 $ExpectedCowsqlSha256 = "650da8a131d05d89d893e8e168f1be43913d9cdbd631a08dda2fc313a1d1939f"
+
+function Assert-SupervisorCredentialRotationAllowed {
+    if ($AcknowledgeSupervisorCredentialInvalidation) { return }
+    # Enumeration distinguishes an absent task from a failed scheduler query.
+    # Do not suppress errors: unknown task state must block password rotation.
+    $supervisors = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $_.TaskName -eq "SelfHostedCI-Health-Supervisor"
+    })
+    if ($supervisors.Count -gt 0) {
+        throw ("health supervisor task exists; its stored credential would be invalidated " + [char]0x2014 + " run uninstall-health-supervisor.ps1 first and reinstall it last")
+    }
+}
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -156,6 +169,7 @@ $payloadSha256 = ([Security.Cryptography.SHA256]::Create().ComputeHash($payloadB
     runner_registration = "not_performed"; no_host_changes = (-not [bool]$Apply)
 } | ConvertTo-Json -Compress
 if (-not $Apply) { return }
+Assert-SupervisorCredentialRotationAllowed
 if (-not $AcknowledgeHostPackageInstallation -or -not $AcknowledgeOneTimePasswordRotation) { throw "Apply requires both explicit acknowledgements" }
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task already exists" }
 if (Test-Path -LiteralPath $Root) { throw "staging root already exists" }
@@ -239,7 +253,7 @@ if (`$result.status -ne 'installed' -or `$result.garm_enabled -ne `$false -or `$
 "@
     [IO.File]::WriteAllText($WorkerPath, $worker, [Text.UTF8Encoding]::new($false))
     $temporaryPassword = New-CryptographicAccountPassword
-    Set-LocalUser -Name $service.Name -Password $temporaryPassword
+    Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $temporaryPassword
     $passwordApplied = $true
     [void](Register-OneShot "$env:COMPUTERNAME\$($service.Name)" $temporaryPassword)
     $registered = $true
@@ -271,7 +285,7 @@ if (`$result.status -ne 'installed' -or `$result.garm_enabled -ne `$false -or `$
         throw "installed prerequisite postcondition failed"
     }
     $finalPassword = New-CryptographicAccountPassword
-    try { Set-LocalUser -Name $service.Name -Password $finalPassword -ErrorAction Stop }
+    try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $finalPassword -ErrorAction Stop }
     finally { $finalPassword.Dispose() }
     $passwordApplied = $false
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
@@ -287,7 +301,7 @@ catch {
     catch { $cleanup.Add("diagnostic preservation: $($_.Exception.Message)") }
     if ($passwordApplied) {
         $recoveryPassword = New-CryptographicAccountPassword
-        try { Set-LocalUser -Name $service.Name -Password $recoveryPassword -ErrorAction Stop; $passwordApplied = $false }
+        try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $recoveryPassword -ErrorAction Stop; $passwordApplied = $false }
         catch { $cleanup.Add("credential invalidation: $($_.Exception.Message)") }
         finally { $recoveryPassword.Dispose() }
     }

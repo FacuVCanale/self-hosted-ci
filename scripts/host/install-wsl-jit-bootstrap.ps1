@@ -11,7 +11,8 @@ param(
     [int]$TimeoutSeconds = 900,
     [switch]$Apply,
     [switch]$AcknowledgeInertBootstrapMutation,
-    [switch]$AcknowledgeOneTimePasswordRotation
+    [switch]$AcknowledgeOneTimePasswordRotation,
+    [switch]$AcknowledgeSupervisorCredentialInvalidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +26,18 @@ $StdoutPath = Join-Path $Root "worker.stdout.log"
 $StderrPath = Join-Path $Root "worker.stderr.log"
 $DiagnosticsRoot = "C:\ProgramData\self-hosted-ci\diagnostics\bootstrap-install\v1"
 $PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+function Assert-SupervisorCredentialRotationAllowed {
+    if ($AcknowledgeSupervisorCredentialInvalidation) { return }
+    # Enumeration distinguishes an absent task from a failed scheduler query.
+    # Do not suppress errors: unknown task state must block password rotation.
+    $supervisors = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $_.TaskName -eq "SelfHostedCI-Health-Supervisor"
+    })
+    if ($supervisors.Count -gt 0) {
+        throw ("health supervisor task exists; its stored credential would be invalidated " + [char]0x2014 + " run uninstall-health-supervisor.ps1 first and reinstall it last")
+    }
+}
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -161,6 +174,7 @@ Assert-NonAdmin $service
     no_host_changes = (-not [bool]$Apply)
 } | ConvertTo-Json -Compress
 if (-not $Apply) { return }
+Assert-SupervisorCredentialRotationAllowed
 if (-not $AcknowledgeInertBootstrapMutation -or -not $AcknowledgeOneTimePasswordRotation) { throw "Apply requires both explicit acknowledgements" }
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task already exists" }
 if (Test-Path -LiteralPath $Root) { throw "staging root already exists" }
@@ -267,7 +281,7 @@ if (`$result.status -ne 'installed' -or `$result.bootstrap_verified -ne `$true -
 "@
     [IO.File]::WriteAllText($WorkerPath, $worker, [Text.UTF8Encoding]::new($false))
     $temporaryPassword = New-CryptographicAccountPassword
-    Set-LocalUser -Name $service.Name -Password $temporaryPassword; $passwordApplied = $true
+    Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $temporaryPassword; $passwordApplied = $true
     [void](Register-OneShot "$env:COMPUTERNAME\$($service.Name)" $temporaryPassword); $registered = $true
     $temporaryPassword.Dispose(); $temporaryPassword = $null
     $observed = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
@@ -288,7 +302,7 @@ if (`$result.status -ne 'installed' -or `$result.bootstrap_verified -ne `$true -
     if ($result.status -ne "installed" -or $result.bootstrap_verified -ne $true) { throw "bootstrap result postcondition failed" }
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop; $registered = $false
     $finalPassword = New-CryptographicAccountPassword
-    try { Set-LocalUser -Name $service.Name -Password $finalPassword -ErrorAction Stop; $passwordApplied = $false } finally { $finalPassword.Dispose() }
+    try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $finalPassword -ErrorAction Stop; $passwordApplied = $false } finally { $finalPassword.Dispose() }
     Remove-Item -LiteralPath $Root -Recurse -Force
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task cleanup postcondition failed" }
     if (Test-Path -LiteralPath $Root) { throw "staging cleanup postcondition failed" }
@@ -302,7 +316,7 @@ catch {
     }
     if ($passwordApplied) {
         $recoveryPassword = New-CryptographicAccountPassword
-        try { Set-LocalUser -Name $service.Name -Password $recoveryPassword -ErrorAction Stop; $passwordApplied = $false } catch { $cleanup.Add("credential invalidation: $($_.Exception.Message)") } finally { $recoveryPassword.Dispose() }
+        try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $recoveryPassword -ErrorAction Stop; $passwordApplied = $false } catch { $cleanup.Add("credential invalidation: $($_.Exception.Message)") } finally { $recoveryPassword.Dispose() }
     }
     if (Test-Path -LiteralPath $Root) { try { Remove-Item -LiteralPath $Root -Recurse -Force } catch { $cleanup.Add("staging cleanup: $($_.Exception.Message)") } }
     if ($cleanup.Count) { throw "Bootstrap install failed: $original. Cleanup failures: $($cleanup -join '; ')" }

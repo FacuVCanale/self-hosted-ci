@@ -15,7 +15,8 @@ param(
     [switch]$AcknowledgeUnsignedCollection,
     [switch]$AcknowledgeExternalGitHubMutation,
     [switch]$AcknowledgeLocalCiDeactivation,
-    [switch]$AcknowledgeOneTimePasswordRotation
+    [switch]$AcknowledgeOneTimePasswordRotation,
+    [switch]$AcknowledgeSupervisorCredentialInvalidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,6 +34,18 @@ $UnsignedOutputRoot = "C:\ProgramData\self-hosted-ci\unsigned-live-contract"
 $DiagnosticsRoot = "C:\ProgramData\self-hosted-ci\diagnostics\live-contract-install\v1"
 $PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $DiagnosticVersion = 1
+
+function Assert-SupervisorCredentialRotationAllowed {
+    if ($AcknowledgeSupervisorCredentialInvalidation) { return }
+    # Enumeration distinguishes an absent task from a failed scheduler query.
+    # Do not suppress errors: unknown task state must block password rotation.
+    $supervisors = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $_.TaskName -eq "SelfHostedCI-Health-Supervisor"
+    })
+    if ($supervisors.Count -gt 0) {
+        throw ("health supervisor task exists; its stored credential would be invalidated " + [char]0x2014 + " run uninstall-health-supervisor.ps1 first and reinstall it last")
+    }
+}
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -194,6 +207,7 @@ Assert-NonAdmin $service
     no_host_changes = (-not [bool]$Apply)
 } | ConvertTo-Json -Compress
 if (-not $Apply) { return }
+Assert-SupervisorCredentialRotationAllowed
 if ($ExpectedInputSha256 -notmatch '^[0-9a-f]{64}$' -or $ExpectedInputSha256 -cne $inputSha256) { throw "Apply requires the exact lowercase ExpectedInputSha256" }
 if ($ExpectedInputBytes -le 0 -or $ExpectedInputBytes -ne $inputLength) { throw "Apply requires the exact positive ExpectedInputBytes" }
 if (-not $AcknowledgeOneTimePasswordRotation) { throw "Apply requires AcknowledgeOneTimePasswordRotation" }
@@ -479,7 +493,7 @@ if ('$operation' -eq 'collect-unsigned') {
 "@
     [IO.File]::WriteAllText($WorkerPath, $worker, [Text.UTF8Encoding]::new($false))
     $temporaryPassword = New-CryptographicAccountPassword
-    Set-LocalUser -Name $service.Name -Password $temporaryPassword
+    Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $temporaryPassword
     $passwordApplied = $true
     [void](Register-OneShot "$env:COMPUTERNAME\$($service.Name)" $temporaryPassword)
     $registered = $true
@@ -516,7 +530,7 @@ if ('$operation' -eq 'collect-unsigned') {
         }
     } elseif ($result.status -ne "installed" -or $result.live_contract_verified -ne $true -or $result.activation_reconciled -notin @($true, $false) -or $result.garm_enabled -ne $false -or $result.github_configured -ne $false -or $result.runtime_ready_created -ne $false -or $result.runner_registration_performed -ne $false) { throw "installed live contract postcondition failed" }
     $finalPassword = New-CryptographicAccountPassword
-    try { Set-LocalUser -Name $service.Name -Password $finalPassword -ErrorAction Stop }
+    try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $finalPassword -ErrorAction Stop }
     finally { $finalPassword.Dispose() }
     $passwordApplied = $false
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
@@ -539,7 +553,7 @@ catch {
     }
     if ($passwordApplied) {
         $recoveryPassword = New-CryptographicAccountPassword
-        try { Set-LocalUser -Name $service.Name -Password $recoveryPassword -ErrorAction Stop; $passwordApplied = $false }
+        try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $recoveryPassword -ErrorAction Stop; $passwordApplied = $false }
         catch { $cleanup.Add("credential invalidation: $($_.Exception.Message)") }
         finally { $recoveryPassword.Dispose() }
     }

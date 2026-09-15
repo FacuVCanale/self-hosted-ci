@@ -7,7 +7,8 @@ param(
     [switch]$Apply,
     [switch]$AcknowledgePersistentPasswordTask,
     [switch]$AcknowledgeServiceAccountPasswordRotation,
-    [switch]$AcknowledgeProtectedHealthAcls
+    [switch]$AcknowledgeProtectedHealthAcls,
+    [switch]$AcknowledgeSupervisorCredentialInvalidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +26,18 @@ $SftpBegin = "# BEGIN SELF_HOSTED_CI_HEALTH_SFTP"
 $SftpEnd = "# END SELF_HOSTED_CI_HEALTH_SFTP"
 $UninstallMarkerPath = Join-Path $env:ProgramFiles "self-hosted-ci\transactions\health-supervisor-uninstall-v1.json"
 $PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+function Assert-SupervisorCredentialRotationAllowed {
+    if ($AcknowledgeSupervisorCredentialInvalidation) { return }
+    # Enumeration distinguishes an absent task from a failed scheduler query.
+    # Do not suppress errors: unknown task state must block password rotation.
+    $supervisors = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $_.TaskName -eq "SelfHostedCI-Health-Supervisor"
+    })
+    if ($supervisors.Count -gt 0) {
+        throw ("health supervisor task exists; its stored credential would be invalidated " + [char]0x2014 + " run uninstall-health-supervisor.ps1 first and reinstall it last")
+    }
+}
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -287,6 +300,7 @@ $plan = [ordered]@{
 }
 $plan | ConvertTo-Json -Compress
 if (-not $Apply) { return }
+Assert-SupervisorCredentialRotationAllowed
 if (-not $AcknowledgePersistentPasswordTask -or -not $AcknowledgeServiceAccountPasswordRotation -or -not $AcknowledgeProtectedHealthAcls) {
     throw "Apply requires all persistent-task, password-rotation, and ACL acknowledgements"
 }
@@ -323,7 +337,7 @@ try {
     Assert-SftpOnlyConfiguration $reader.Name
 
     $password = New-CryptographicAccountPassword
-    Set-LocalUser -Name $account.Name -Password $password -ErrorAction Stop
+    Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $account.Name -Password $password -ErrorAction Stop
     $passwordApplied = $true
     $userId = "$env:COMPUTERNAME\$($account.Name)"
     $task = Register-PasswordSupervisorTask $userId $password $installNonce
@@ -394,7 +408,7 @@ catch {
         $recoveryPassword = $null
         try {
             $recoveryPassword = New-CryptographicAccountPassword
-            Set-LocalUser -Name $account.Name -Password $recoveryPassword -ErrorAction Stop
+            Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $account.Name -Password $recoveryPassword -ErrorAction Stop
         }
         catch { $rollbackFailures.Add("credential invalidation failed: $($_.Exception.Message)") }
         finally { if ($null -ne $recoveryPassword) { $recoveryPassword.Dispose() } }

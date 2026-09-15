@@ -6,7 +6,8 @@ param(
     [int]$TimeoutSeconds = 300,
     [switch]$Apply,
     [switch]$AcknowledgeIncusBoundaryMutation,
-    [switch]$AcknowledgeOneTimePasswordRotation
+    [switch]$AcknowledgeOneTimePasswordRotation,
+    [switch]$AcknowledgeSupervisorCredentialInvalidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,6 +21,18 @@ $StderrPath = Join-Path $Root "worker.stderr.log"
 $DiagnosticsRoot = "C:\ProgramData\self-hosted-ci\diagnostics\incus-boundary"
 $PayloadTemplate = Join-Path $PSScriptRoot "install-incus-boundary-wsl-payload.sh.in"
 $PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+function Assert-SupervisorCredentialRotationAllowed {
+    if ($AcknowledgeSupervisorCredentialInvalidation) { return }
+    # Enumeration distinguishes an absent task from a failed scheduler query.
+    # Do not suppress errors: unknown task state must block password rotation.
+    $supervisors = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $_.TaskName -eq "SelfHostedCI-Health-Supervisor"
+    })
+    if ($supervisors.Count -gt 0) {
+        throw ("health supervisor task exists; its stored credential would be invalidated " + [char]0x2014 + " run uninstall-health-supervisor.ps1 first and reinstall it last")
+    }
+}
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -134,6 +147,7 @@ $payloadSha256 = ([Security.Cryptography.SHA256]::Create().ComputeHash($payloadB
     runner_registration = "not_performed"; no_host_changes = (-not [bool]$Apply)
 } | ConvertTo-Json -Compress
 if (-not $Apply) { return }
+Assert-SupervisorCredentialRotationAllowed
 if (-not $AcknowledgeIncusBoundaryMutation -or -not $AcknowledgeOneTimePasswordRotation) { throw "Apply requires both explicit acknowledgements" }
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task already exists" }
 if (Test-Path -LiteralPath $Root) { throw "staging root already exists" }
@@ -217,7 +231,7 @@ if (`$result.storage_driver -ne 'dir' -or `$result.storage_filesystem -ne 'ext4'
 "@
     [IO.File]::WriteAllText($WorkerPath, $worker, [Text.UTF8Encoding]::new($false))
     $temporaryPassword = New-CryptographicAccountPassword
-    Set-LocalUser -Name $service.Name -Password $temporaryPassword
+    Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $temporaryPassword
     $passwordApplied = $true
     [void](Register-OneShot "$env:COMPUTERNAME\$($service.Name)" $temporaryPassword)
     $registered = $true
@@ -243,7 +257,7 @@ if (`$result.storage_driver -ne 'dir' -or `$result.storage_filesystem -ne 'ext4'
     foreach ($property in @('forbidden_devices','bridge_uplink','ipv4_nat','ipv6_nat','external_services_configured')) { if ($result.$property -ne $false) { throw "boundary result violates $property" } }
     if ($result.project_restricted -ne $true -or $result.project_instance_limit -ne 1 -or $result.nesting -ne $false -or $result.process_limit -ne 2048 -or $result.root_disk_size -ne '12GiB' -or $result.storage_driver -ne 'dir' -or $result.storage_filesystem -ne 'ext4' -or $result.storage_filesystem_uuid -notmatch '^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$' -or $result.storage_project_quota -ne $true -or $result.storage_quota_canary_passed -ne $true -or $result.storage_mount_persistent -ne $true -or $result.storage_mount_unit_enabled -ne $true -or $result.storage_mount_unit_active -ne $true -or $result.incus_mount_ordering_verified -ne $true -or $result.storage_mount_root_owned -ne $true -or $result.storage_pool_size -ne '16GiB' -or $result.storage_image_apparent_bytes -ne 17179869184 -or $result.storage_filesystem_bytes -ne 17179869184 -or $result.storage_image_allocated_bytes -le 0 -or $result.storage_image_allocated_bytes -gt $result.storage_image_apparent_bytes -or $result.storage_volumes -ne 0) { throw "boundary hardening postcondition failed" }
     $finalPassword = New-CryptographicAccountPassword
-    try { Set-LocalUser -Name $service.Name -Password $finalPassword -ErrorAction Stop }
+    try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $finalPassword -ErrorAction Stop }
     finally { $finalPassword.Dispose() }
     $passwordApplied = $false
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
@@ -258,7 +272,7 @@ catch {
     catch { $cleanup.Add("diagnostic preservation: $($_.Exception.Message)") }
     if ($passwordApplied) {
         $recoveryPassword = New-CryptographicAccountPassword
-        try { Set-LocalUser -Name $service.Name -Password $recoveryPassword -ErrorAction Stop; $passwordApplied = $false }
+        try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $recoveryPassword -ErrorAction Stop; $passwordApplied = $false }
         catch { $cleanup.Add("credential invalidation: $($_.Exception.Message)") }
         finally { $recoveryPassword.Dispose() }
     }
