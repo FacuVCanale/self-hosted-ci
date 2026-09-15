@@ -15,6 +15,7 @@ Use the installed `self-hosted-ci` CLI as the canonical fail-closed agent interf
 - A one-off phrase such as “corré el CI en mi PC Windows”, “usá mi CI local para este PR”, or “corré este PR ahí” means `self-hosted-ci run-local [OWNER/REPO] --pr N --apply`.
 - A persistent phrase such as “a partir de ahora corré este repo ahí”, “dejá este repo usando mi CI local”, or “hacé opt-in de este repo” means `self-hosted-ci use-local [OWNER/REPO] --apply`. In this release that installs the non-gating JIT pilot; it does not replace required CI checks.
 - “Volvé este repo a GitHub”, “usá GitHub Actions de vuelta”, or “sacalo del self-hosted” means `self-hosted-ci use-github [OWNER/REPO] --apply`.
+- `doctor` exits with code `3` when `doctor=unhealthy`; `status` preserves its existing exit behavior.
 - Questions about routing or health mean `self-hosted-ci status [OWNER/REPO]` or `self-hosted-ci doctor [OWNER/REPO]`.
 
 Resolve a missing repository from the current checkout. Resolve a missing PR only from an unambiguous current PR; otherwise ask for the PR number. Never translate a one-off run into persistent enrollment.

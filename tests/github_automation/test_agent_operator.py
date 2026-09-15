@@ -672,12 +672,20 @@ class HealthSnapshotOperatorTests(unittest.TestCase):
     def test_expired_snapshot_doctor_unhealthy_and_not_effective_local(self):
         payload = self.snapshot(age=3 * 86400)
         with self.serve_snapshot(payload):
-            _, result = self.run_cli("doctor", "FacuVCanale/demo")
+            code, result = self.run_cli("doctor", "FacuVCanale/demo")
+        self.assertEqual(code, 3)
         self.assertEqual(result["doctor"], "unhealthy")
         self.assertFalse(result["health"]["eligible"])
         self.assertFalse(result["effective_local"])
         self.assertEqual(result["health"]["blockers"], ["snapshot_expired"])
         self.assertEqual(result["health"]["snapshot_age_seconds"], 3 * 86400)
+
+    def test_expired_snapshot_status_preserves_zero_exit(self):
+        with self.serve_snapshot(self.snapshot(age=3 * 86400)):
+            code, result = self.run_cli("status", "FacuVCanale/demo")
+        self.assertEqual(code, 0)
+        self.assertFalse(result["health"]["eligible"])
+        self.assertNotIn("doctor", result)
 
     def test_snapshot_timestamps_missing_or_malformed_fail_closed(self):
         for field in ("generated_at", "expires_at"):
