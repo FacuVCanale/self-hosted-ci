@@ -1227,6 +1227,28 @@ if ($script:events[$script:events.Count - 1] -ne 'probe') { throw 'normal probin
         self.assertIn("sshd rejected rollback configuration", source)
         self.assertIn('operation="remove-managed-sftp"', source)
 
+    def test_installer_enables_and_verifies_task_scheduler_operational_log(self) -> None:
+        source = INSTALLER.read_text(encoding="utf-8")
+        enable = source.index(
+            "& wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true"
+        )
+        check_exit = source.index(
+            'if ($LASTEXITCODE -ne 0) { throw "failed to enable Task Scheduler operational log" }',
+            enable,
+        )
+        register = source.index(
+            "$task = Register-PasswordSupervisorTask $userId $password $installNonce"
+        )
+        verify = source.index(
+            'if (-not (Get-WinEvent -ListLog "Microsoft-Windows-TaskScheduler/Operational" -ErrorAction Stop).IsEnabled) { throw "Task Scheduler operational log postcondition failed" }'
+        )
+        start = source.index("Start-ScheduledTask -TaskName $TaskName")
+        self.assertLess(source.index("if (-not $Apply) { return }"), enable)
+        self.assertLess(enable, check_exit)
+        self.assertLess(check_exit, register)
+        self.assertLess(register, verify)
+        self.assertLess(verify, start)
+
     def test_installer_refuses_an_owning_uninstall_transaction(self) -> None:
         source = INSTALLER.read_text(encoding="utf-8")
         guard = source.index("if (Test-Path -LiteralPath $UninstallMarkerPath)")

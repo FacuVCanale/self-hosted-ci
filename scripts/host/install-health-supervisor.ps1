@@ -340,6 +340,8 @@ try {
     Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $account.Name -Password $password -ErrorAction Stop
     $passwordApplied = $true
     $userId = "$env:COMPUTERNAME\$($account.Name)"
+    & wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true
+    if ($LASTEXITCODE -ne 0) { throw "failed to enable Task Scheduler operational log" }
     $task = Register-PasswordSupervisorTask $userId $password $installNonce
     if ($null -eq $task) { throw "Task Scheduler returned no task" }
     $registered = $true
@@ -356,6 +358,7 @@ try {
     $watchdog = $watchdogTriggers[0]
     if (-not $bootTriggers[0].Enabled -or -not $watchdog.Enabled -or $watchdog.DaysInterval -ne 1 -or $watchdog.Repetition.Interval -ne "PT5M" -or $watchdog.Repetition.Duration -or $watchdog.EndBoundary -or $watchdog.Repetition.StopAtDurationEnd) { throw "task watchdog postcondition failed" }
     if ([string]$observed.Settings.MultipleInstances -ne "IgnoreNew" -or $observed.Settings.RestartCount -ne 5 -or $observed.Settings.RestartInterval -ne "PT1M") { throw "task restart policy postcondition failed" }
+    if (-not (Get-WinEvent -ListLog "Microsoft-Windows-TaskScheduler/Operational" -ErrorAction Stop).IsEnabled) { throw "Task Scheduler operational log postcondition failed" }
     Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
     $deadline = (Get-Date).AddSeconds(120)
     $firstSnapshot = $null
