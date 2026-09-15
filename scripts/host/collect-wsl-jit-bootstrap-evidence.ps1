@@ -6,7 +6,8 @@ param(
     [int]$TimeoutSeconds = 600,
     [switch]$Apply,
     [switch]$AcknowledgeBootstrapEvidenceCollection,
-    [switch]$AcknowledgeOneTimePasswordRotation
+    [switch]$AcknowledgeOneTimePasswordRotation,
+    [switch]$AcknowledgeSupervisorCredentialInvalidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,6 +34,18 @@ $WorkerCleanupBudgetSeconds = 60
 $TaskTimeoutSeconds = 570
 $ParentTimeoutSeconds = 600
 $CleanupBudgetSeconds = $ParentTimeoutSeconds - $TaskTimeoutSeconds
+
+function Assert-SupervisorCredentialRotationAllowed {
+    if ($AcknowledgeSupervisorCredentialInvalidation) { return }
+    # Enumeration distinguishes an absent task from a failed scheduler query.
+    # Do not suppress errors: unknown task state must block password rotation.
+    $supervisors = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $_.TaskName -eq "SelfHostedCI-Health-Supervisor"
+    })
+    if ($supervisors.Count -gt 0) {
+        throw ("health supervisor task exists; its stored credential would be invalidated " + [char]0x2014 + " run uninstall-health-supervisor.ps1 first and reinstall it last")
+    }
+}
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -225,6 +238,7 @@ $wslCollectorSha256 = Get-Sha256 $WslCollectorPath
     no_host_changes = (-not [bool]$Apply)
 } | ConvertTo-Json -Compress
 if (-not $Apply) { return }
+Assert-SupervisorCredentialRotationAllowed
 if (-not $AcknowledgeBootstrapEvidenceCollection -or -not $AcknowledgeOneTimePasswordRotation) { throw "Apply requires both explicit acknowledgements" }
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task already exists" }
 if (Test-Path -LiteralPath $Root) { throw "staging root already exists" }
@@ -525,7 +539,7 @@ if (`$collectionFailure) {
     [IO.File]::WriteAllText($WorkerPath, $worker, [Text.UTF8Encoding]::new($false))
 
     $temporaryPassword = New-CryptographicAccountPassword
-    Set-LocalUser -Name $service.Name -Password $temporaryPassword
+    Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $temporaryPassword
     $passwordApplied = $true
     [void](Register-OneShot "$env:COMPUTERNAME\$($service.Name)" $temporaryPassword)
     $registered = $true
@@ -565,7 +579,7 @@ if (`$collectionFailure) {
     $wslSaved = Save-ContentAddressedJson $WslStagingPath "wsl-jit-semantic-observations"
 
     $finalPassword = New-CryptographicAccountPassword
-    try { Set-LocalUser -Name $service.Name -Password $finalPassword -ErrorAction Stop }
+    try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $finalPassword -ErrorAction Stop }
     finally { $finalPassword.Dispose() }
     $passwordApplied = $false
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
@@ -613,7 +627,7 @@ catch {
     catch { $cleanup.Add("diagnostic preservation: $($_.Exception.Message)") }
     if ($passwordApplied) {
         $recoveryPassword = New-CryptographicAccountPassword
-        try { Set-LocalUser -Name $service.Name -Password $recoveryPassword -ErrorAction Stop; $passwordApplied = $false }
+        try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $recoveryPassword -ErrorAction Stop; $passwordApplied = $false }
         catch { $cleanup.Add("credential invalidation: $($_.Exception.Message)") }
         finally { $recoveryPassword.Dispose() }
     }

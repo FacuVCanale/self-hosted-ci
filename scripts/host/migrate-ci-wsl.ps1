@@ -13,7 +13,8 @@ param(
     [switch]$AcknowledgeSourceAndExportWillBePreserved,
     [switch]$AcknowledgeImportRunsAsServiceIdentity,
     [switch]$AcknowledgeGrantBatchLogonRight,
-    [switch]$AcknowledgeOneTimePasswordRotation
+    [switch]$AcknowledgeOneTimePasswordRotation,
+    [switch]$AcknowledgeSupervisorCredentialInvalidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,6 +29,18 @@ $WorkerPath = Join-Path $TaskRoot "import-ci-wsl-worker.ps1"
 $ResultPath = Join-Path $TaskRoot "import-result.json"
 $StdoutPath = Join-Path $TaskRoot "import.stdout.log"
 $StderrPath = Join-Path $TaskRoot "import.stderr.log"
+
+function Assert-SupervisorCredentialRotationAllowed {
+    if ($AcknowledgeSupervisorCredentialInvalidation) { return }
+    # Enumeration distinguishes an absent task from a failed scheduler query.
+    # Do not suppress errors: unknown task state must block password rotation.
+    $supervisors = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $_.TaskName -eq "SelfHostedCI-Health-Supervisor"
+    })
+    if ($supervisors.Count -gt 0) {
+        throw ("health supervisor task exists; its stored credential would be invalidated " + [char]0x2014 + " run uninstall-health-supervisor.ps1 first and reinstall it last")
+    }
+}
 
 function Assert-Windows {
     if ($env:OS -ne "Windows_NT") {
@@ -556,6 +569,8 @@ if (-not $Apply) {
     exit 0
 }
 
+Assert-SupervisorCredentialRotationAllowed
+
 if (-not (Test-IsAdministrator)) {
     throw "Apply must run from an elevated local PowerShell console."
 }
@@ -755,7 +770,7 @@ $completionEvidence = $null
 try {
     $temporaryPassword = New-CryptographicAccountPassword
     $passwordRotationStartedAt = [DateTimeOffset]::UtcNow
-    Set-LocalUser -Name $account.Name -Password $temporaryPassword -ErrorAction Stop
+    Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $account.Name -Password $temporaryPassword -ErrorAction Stop
     $temporaryPasswordApplied = $true
     $passwordRotationCompletedAt = [DateTimeOffset]::UtcNow
 
@@ -849,7 +864,7 @@ finally {
         $finalPassword = $null
         try {
             $finalPassword = New-CryptographicAccountPassword
-            Set-LocalUser -Name $account.Name -Password $finalPassword -ErrorAction Stop
+            Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $account.Name -Password $finalPassword -ErrorAction Stop
             $finalPasswordRotated = $true
             $finalPasswordRotatedAt = [DateTimeOffset]::UtcNow
         }

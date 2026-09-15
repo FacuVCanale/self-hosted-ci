@@ -8,7 +8,8 @@ param(
     [switch]$Apply,
     [switch]$AcknowledgeRemoveDisabledReader,
     [switch]$AcknowledgeRemoveWslHealthPackage,
-    [switch]$AcknowledgeOneTimePasswordRotation
+    [switch]$AcknowledgeOneTimePasswordRotation,
+    [switch]$AcknowledgeSupervisorCredentialInvalidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +26,18 @@ $ServicePath = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $TimerPath = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "packaging/systemd/self-hosted-ci-health-heartbeat.timer"
 $PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $ReaderDescription = "Managed disabled self-hosted-ci health reader"
+
+function Assert-SupervisorCredentialRotationAllowed {
+    if ($AcknowledgeSupervisorCredentialInvalidation) { return }
+    # Enumeration distinguishes an absent task from a failed scheduler query.
+    # Do not suppress errors: unknown task state must block password rotation.
+    $supervisors = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $_.TaskName -eq "SelfHostedCI-Health-Supervisor"
+    })
+    if ($supervisors.Count -gt 0) {
+        throw ("health supervisor task exists; its stored credential would be invalidated " + [char]0x2014 + " run uninstall-health-supervisor.ps1 first and reinstall it last")
+    }
+}
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -102,11 +115,11 @@ $service = Get-LocalUser -Name $ServiceAccount -ErrorAction Stop
 if ($service.SID.Value -ne $ExpectedServiceAccountSid) { throw "service identity mismatch" }
 $reader = Get-LocalUser -Name $ReaderAccount -ErrorAction Stop
 $profile = Join-Path "C:\Users" $ReaderAccount; $ssh = Join-Path $profile ".ssh"; $key = Join-Path $ssh "authorized_keys"
-[ordered]@{ mode="plan"; apply_requested=[bool]$Apply; task_name=$TaskName; remove_wsl_health_package=$true; remove_disabled_reader=$ReaderAccount; persistent_task_must_be_absent=$true; runner_registration="not_performed" } | ConvertTo-Json -Compress
+[ordered]@{ mode="plan"; apply_requested=[bool]$Apply; task_name=$TaskName; remove_wsl_health_package=$true; remove_disabled_reader=$ReaderAccount; persistent_task_must_be_absent=(-not [bool]$AcknowledgeSupervisorCredentialInvalidation); runner_registration="not_performed" } | ConvertTo-Json -Compress
 if (-not $Apply) { return }
+Assert-SupervisorCredentialRotationAllowed
 if (-not $AcknowledgeRemoveDisabledReader -or -not $AcknowledgeRemoveWslHealthPackage -or -not $AcknowledgeOneTimePasswordRotation) { throw "Apply requires all removal acknowledgements" }
 if ($reader.Enabled -or [string]$reader.Description -ne $ReaderDescription) { throw "health reader must be disabled with exact managed provenance" }
-if (Get-ScheduledTask -TaskName $PersistentTaskName -ErrorAction SilentlyContinue) { throw "persistent supervisor must be uninstalled first" }
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task already exists" }
 $expectedStagingRoot = [IO.Path]::GetFullPath("C:\ProgramData\self-hosted-ci\health-bootstrap")
 if ([IO.Path]::GetFullPath($Root) -ne $expectedStagingRoot) { throw "health bootstrap staging root is not canonical" }
@@ -139,7 +152,7 @@ if (`$document.status -ne 'uninstalled') { throw 'WSL uninstall postcondition fa
 [IO.File]::WriteAllText('$ResultPath', (`$document | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new(`$false))
 "@
     [IO.File]::WriteAllText($WorkerPath, $worker, [Text.UTF8Encoding]::new($false))
-    $password = New-RandomPassword; Set-LocalUser -Name $service.Name -Password $password; $passwordApplied = $true
+    $password = New-RandomPassword; Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $password; $passwordApplied = $true
     [void](Register-OneShot "$env:COMPUTERNAME\$($service.Name)" $password); $registered = $true; $password.Dispose(); $password = $null
     $observed = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
     $actualSid = ([Security.Principal.NTAccount]::new([string]$observed.Principal.UserId).Translate([Security.Principal.SecurityIdentifier])).Value
@@ -158,7 +171,7 @@ if (`$document.status -ne 'uninstalled') { throw 'WSL uninstall postcondition fa
     if (-not $finished -or [uint32]$info.LastTaskResult -ne 0 -or -not (Test-Path -LiteralPath $ResultPath)) { throw "one-shot uninstall failed or timed out" }
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false; $registered = $false
     if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "one-shot task remains after unregister" }
-    $final = New-RandomPassword; try { Set-LocalUser -Name $service.Name -Password $final } finally { $final.Dispose() }; $passwordApplied = $false
+    $final = New-RandomPassword; try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $final } finally { $final.Dispose() }; $passwordApplied = $false
     Remove-LocalUser -Name $ReaderAccount
     Remove-Item -LiteralPath $profile -Recurse -Force
     Assert-NoReparsePath $Root
@@ -182,7 +195,7 @@ catch {
     }
     if ($passwordApplied) {
         $recovery = $null
-        try { $recovery = New-RandomPassword; Set-LocalUser -Name $service.Name -Password $recovery; $passwordApplied = $false }
+        try { $recovery = New-RandomPassword; Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $service.Name -Password $recovery; $passwordApplied = $false }
         catch { $cleanup.Add("credential invalidation failed: $($_.Exception.Message)") }
         finally { if ($null -ne $recovery) { $recovery.Dispose() } }
     }

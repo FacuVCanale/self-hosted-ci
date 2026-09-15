@@ -95,6 +95,123 @@ reboot, comprobar que `SelfHostedCI-Health-Supervisor` esté `Running`, que su
 último resultado sea `267009` (`SCHED_S_TASK_RUNNING`) y que dos snapshots
 consecutivos tengan timestamps crecientes sin mantener WSL abierta manualmente.
 
+## El host reinició / run queued sin runner
+
+Esta sección recupera un host cuyo runtime JIT ya estaba activado.
+Síntomas: un job permanece `queued` con label `wsl-jit-*`, la API
+`repos/OWNER/REPO/actions/runners` devuelve cero runners y el snapshot
+`C:\ProgramData\self-hosted-ci\health\current.json` está vencido. Cero runners
+por sí solo es normal en reposo: el problema es esa combinación con trabajo
+pendiente. Una actualización de WSL puede matar el keepalive sin reiniciar
+Windows; un reboot también puede dejar la distro detenida si no dispara la task.
+
+### Diagnóstico de lectura desde la Mac
+
+Usar el SID inventariado de `selfhosted-ci-svc`. El checker descarga la sonda
+existente por SFTP y la valida; no la refresca. El alias SSH debe resolver el
+host y la clave de lectura configurados (por ejemplo, la cuenta
+`selfhosted-ci-health`); el checker no toma la clave de `config.json` del CLI.
+Es lectura del host, con archivos temporales locales:
+
+```bash
+scripts/host/check-self-hosted-ci-health.sh \
+  --ssh-target '<alias-SSH-health-con-su-clave>' \
+  --service-account-sid '<SID-inventariado-de-selfhosted-ci-svc>'
+```
+
+Exit `4 / snapshot_expired` confirma vencimiento; `0` significa snapshot fresco
+y elegible. Para ver la distro correcta y la task, usar SSH **como la identidad
+de servicio**, no `facun`: el registro de distros WSL pertenece a cada usuario.
+Estos comandos no arrancan la distro ni la task:
+
+```bash
+# ssh_target debe identificar a selfhosted-ci-svc@<tailscale-ip-del-host>.
+ci_ssh_target="$(python3 -c 'import json; from pathlib import Path; print(json.loads((Path.home() / ".config/self-hosted-ci/config.json").read_text())["ssh_target"])')"
+ci_ssh_key="$HOME/.local/share/self-hosted-ci/service-ssh/id_ed25519"
+ssh -i "$ci_ssh_key" "$ci_ssh_target" 'wsl.exe --list --verbose'
+ssh -i "$ci_ssh_key" "$ci_ssh_target" 'powershell.exe -NoProfile -NonInteractive -Command "Get-ScheduledTask -TaskName SelfHostedCI-Health-Supervisor | Select-Object TaskName,State; Get-ScheduledTaskInfo -TaskName SelfHostedCI-Health-Supervisor | Select-Object LastRunTime,LastTaskResult,NextRunTime"'
+ssh -i "$ci_ssh_key" "$ci_ssh_target" 'cmd.exe /d /c type C:\ProgramData\self-hosted-ci\health\current.json'
+```
+
+### Si `schtasks /run` no cambia `LastRunTime`
+
+Una rotación de contraseña posterior a la instalación puede invalidar la
+credencial guardada de la task (`LogonType=Password`). En ese caso,
+`schtasks /run` no logra arrancarla y `LastRunTime` no cambia.
+El log `Microsoft-Windows-TaskScheduler/Operational` viene deshabilitado por
+defecto: sin habilitarlo, el fallo puede quedar silencioso.
+
+Para diagnosticarlo, el operador humano habilita el log **desde PowerShell
+elevada en la PC**. Este paso modifica la configuración del log y queda fuera
+del diagnóstico read-only desde la Mac:
+
+```powershell
+wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true
+schtasks /run /tn SelfHostedCI-Health-Supervisor
+Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-TaskScheduler/Operational'; Id = 101,104 } -MaxEvents 20 |
+  Select-Object TimeCreated, Id, Message
+```
+
+Buscar eventos de `SelfHostedCI-Health-Supervisor` con error
+`2147943726 = 0x8007052E` ("usuario o contraseña incorrectos"). Habilitar el log
+no recupera eventos anteriores; el nuevo intento permite registrar el fallo.
+Confirmada la credencial inválida, la **única recuperación** es desinstalar y
+reinstalar el supervisor según el paso del operador humano de abajo. Repetir
+`schtasks /run` no repara la credencial.
+
+### Recuperación canónica
+
+Con la credencial guardada válida, el operador arranca la task existente bajo
+`selfhosted-ci-svc`; la task conserva su identidad y credencial protegida.
+Es una operación de recuperación, **no** parte del diagnóstico read-only:
+
+```bash
+ssh -i "$ci_ssh_key" "$ci_ssh_target" 'schtasks /run /tn SelfHostedCI-Health-Supervisor'
+```
+
+Verificar con los comandos anteriores: task `Running`, `LastTaskResult=267009`
+(`SCHED_S_TASK_RUNNING`), distro `Running` y dos lecturas de `current.json`
+separadas por al menos 30 segundos con `generated_at` creciente. Esperar
+`eligibility.eligible_for_local_ci=true`, `probe_error=null` y checker con exit
+`0`; `status`/`doctor` deben mostrar `health.eligible=true` y `doctor=healthy`.
+Después de confirmar que la distro está levantada, consultar sus unidades:
+
+```bash
+ssh -i "$ci_ssh_key" "$ci_ssh_target" 'wsl.exe -d Ubuntu-24.04-CI -u root --exec systemctl is-active incus.service self-hosted-ci-boundary-verify.service self-hosted-ci-network-policy.service self-hosted-ci-egress-proxy.service self-hosted-ci-garm.service self-hosted-ci-allocation-broker.service self-hosted-ci-outbound-worker.service self-hosted-ci-health-heartbeat.timer'
+```
+
+Todas deben devolver `active`. Arrancar la task no garantiza que un run previo
+conserve su allocation: el broker reconcilia allocations pendientes al reiniciar.
+No registrar runners manuales para reclamar un label viejo.
+
+### Actualizar la task instalada: paso del operador humano
+
+El código nuevo no actualiza una task ya instalada. El operador humano debe
+ejecutar `uninstall-health-supervisor.ps1` y después
+`install-health-supervisor.ps1` **desde PowerShell elevada (admin) en la PC,
+no por SSH: el instalador reinicia `sshd`**. Los scripts del package están en
+`C:\ProgramData\self-hosted-ci\package\scripts\host`; ubicarse allí antes de
+seguir los comandos de desinstalación e instalación, con los acknowledgements
+de contraseña y ACL correspondientes:
+
+```powershell
+Set-Location 'C:\ProgramData\self-hosted-ci\package\scripts\host'
+```
+
+Este procedimiento también es obligatorio cuando los eventos 101/104 confirman
+que la credencial guardada quedó invalidada por una rotación posterior.
+El instalador exige una credencial de contraseña para la cuenta de servicio, **la genera y rota él mismo** y la guarda protegida en Task Scheduler;
+no recibe `-Password` ni requiere publicar la contraseña en comandos o logs.
+Como rechaza una task existente, usar primero el desinstalador canónico
+`uninstall-health-supervisor.ps1`, con sus acknowledgements, y luego instalar.
+Esto es mantenimiento del operador, no parte del arranque con `schtasks /run`.
+
+La instalación actualizada deja dos triggers: boot y watchdog diario con
+repetición indefinida cada cinco minutos. `IgnoreNew` evita duplicar un supervisor
+ya activo; el loop recupera keepalives muertos con backoff de 5 a 60 segundos.
+Después de reinstalar, verificar los dos triggers, task `Running` y dos snapshots
+crecientes antes de dar la recuperación por terminada.
+
 ## Runtime JIT
 
 ### Prerrequisitos Incus y GARM
@@ -981,3 +1098,30 @@ de reconciliar activación o provisionar. Si había una aprobación de activaci�
 la remueve exclusivamente el workflow canónico de deactivación después de probar
 cero runtime. Un fallo conserva sólo diagnósticos redactados y deja el sistema
 inactivo, sin activation/runtime-ready nuevos.
+
+## Deploy del package al host
+
+Desde la Mac, exportá un commit trackeado y revisá primero el plan JSON. Usá
+el alias SSH de administración, nunca la identidad de servicio:
+
+```bash
+python3 scripts/host/deploy-host-package.py --ssh-target <alias-admin> --ref HEAD
+python3 scripts/host/deploy-host-package.py --ssh-target <alias-admin> --ref HEAD --apply
+```
+
+`--dry-run` equivale al plan por defecto. El árbol de trabajo debe coincidir
+con el ref; `--allow-dirty` permite exportar ese ref, excluyendo los cambios
+locales. El deploy genera `PACKAGE_SHA` y `PACKAGE_MANIFEST.json`, verifica
+cada SHA-256 en Windows y conserva el package anterior bajo
+`C:\ProgramData\self-hosted-ci\package-before-<sha-anterior-o-unknown>-<yyyyMMddHHmmss>`.
+Los defaults son `--package-path C:\ProgramData\self-hosted-ci\package` y
+`--backup-root C:\ProgramData\self-hosted-ci`. El host requiere `tar.exe`
+(Windows 10+) y PowerShell; la sesión SSH debe tener privilegios admin.
+El manifest incluye `PACKAGE_SHA` y todos los archivos exportados, excluyendo
+su propio JSON. La salida informa `status`, `deployed_sha`, `previous_sha`,
+`backup_path` y `verified_files`; un fallo devuelve exit 1.
+
+**Deploy primero; después uninstall + install del supervisor** desde una
+PowerShell elevada, siguiendo el procedimiento de reinstalación de este
+runbook. `install-health-supervisor.ps1` copia `run-health-supervisor.ps1`
+desde el package: actualizar solamente el package no actualiza esa copia.

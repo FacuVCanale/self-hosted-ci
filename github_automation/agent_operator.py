@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 
+from github_automation.health_snapshot import snapshot_freshness
+
+
 REPOSITORY = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$"
 )
@@ -379,12 +382,32 @@ class AgentOperator:
         raw = self._ssh('cmd.exe /d /c type C:\\ProgramData\\self-hosted-ci\\health\\current.json')
         try:
             snapshot = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise AgentOperatorError("health_unavailable", "health snapshot is invalid") from exc
+        except json.JSONDecodeError:
+            snapshot = {}
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        code, reason, age = snapshot_freshness(
+            snapshot, datetime.now(timezone.utc), expiry_skew_seconds=30,
+        )
+        eligibility = snapshot.get("eligibility")
+        if not isinstance(eligibility, dict):
+            eligibility = {}
+            code, reason = 5, "invalid_snapshot_contract"
+        blockers = eligibility.get("blocking_reasons", [])
+        if not isinstance(blockers, list) or not all(isinstance(item, str) for item in blockers):
+            blockers = []
+            code, reason = 5, "invalid_snapshot_contract"
+        blockers = list(blockers)
+        if code:
+            blocker = "snapshot_expired" if reason == "snapshot_expired" else "snapshot_invalid"
+            if blocker not in blockers:
+                blockers.append(blocker)
         return {
-            "eligible": snapshot.get("eligibility", {}).get("eligible_for_local_ci") is True,
-            "blockers": snapshot.get("eligibility", {}).get("blocking_reasons", []),
+            "eligible": eligibility.get("eligible_for_local_ci") is True and not blockers and not code,
+            "blockers": blockers,
             "generated_at": snapshot.get("generated_at"),
+            "expires_at": snapshot.get("expires_at"),
+            "snapshot_age_seconds": age,
             "probe_error": snapshot.get("probe_error"),
         }
 
@@ -659,6 +682,8 @@ class AgentOperator:
                 "eligible": False,
                 "blockers": ["host_status_unavailable"],
                 "generated_at": None,
+                "expires_at": None,
+                "snapshot_age_seconds": None,
                 "probe_error": exc.code,
             }
             host_error = {"code": exc.code, "message": str(exc)}
@@ -894,6 +919,18 @@ class AgentOperator:
 
     def run_local(self, repository: str, pr: int, *, apply: bool) -> dict[str, Any]:
         repository, pr = exact_repository(repository), exact_pr(pr)
+        # Reject stale host evidence before even reading repository state from
+        # GitHub. status() rechecks health before any approval can be submitted.
+        health = self._health()
+        if not health["eligible"]:
+            return {
+                "status": "blocked",
+                "operation": "run-local",
+                "repository": repository,
+                "pr": pr,
+                "blockers": ["host_not_eligible", *health["blockers"]],
+                "health": health,
+            }
         status = self.status(repository)
         if not status["effective_local"]:
             return {
@@ -901,7 +938,8 @@ class AgentOperator:
                 "operation": "run-local",
                 "repository": repository,
                 "pr": pr,
-                "blockers": ["repository_not_effectively_local"],
+                "blockers": ["repository_not_effectively_local", *status["health"]["blockers"]],
+                "health": status["health"],
             }
         target = self._github_pr(repository, pr)
         plan = {

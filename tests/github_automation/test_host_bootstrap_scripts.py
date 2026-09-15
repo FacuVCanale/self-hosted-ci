@@ -14,6 +14,25 @@ POWERSHELL_SCRIPT = ROOT / "scripts/host/bootstrap-ubuntu-24.04-wsl.ps1"
 
 
 class HostBootstrapScriptTests(unittest.TestCase):
+    def test_health_supervisor_has_boot_and_indefinite_five_minute_watchdog(self):
+        source = (ROOT / "scripts/host/install-health-supervisor.ps1").read_text()
+        self.assertEqual(1, source.count("$definition.Triggers.Create(8)"))
+        self.assertEqual(1, source.count("$definition.Triggers.Create(2)"))
+        for token in (
+            '$watchdog.DaysInterval = 1',
+            '$watchdog.Repetition.Interval = "PT5M"',
+            '$watchdog.Repetition.StopAtDurationEnd = $false',
+            '$definition.Settings.MultipleInstances = 2 # IgnoreNew',
+            '$definition.Settings.RestartCount = 5',
+            '$definition.Settings.RestartInterval = "PT1M"',
+            '@($observed.Triggers).Count -ne 2',
+            'MSFT_TaskBootTrigger', 'MSFT_TaskDailyTrigger',
+            'task watchdog postcondition failed',
+        ):
+            self.assertIn(token, source)
+        self.assertNotIn('$watchdog.Repetition.Duration =', source)
+        self.assertNotIn('$watchdog.EndBoundary =', source)
+
     def test_bash_is_syntactically_valid_and_renders_fail_closed_wsl_config(self) -> None:
         syntax = subprocess.run(["bash", "-n", str(BASH_SCRIPT)], text=True, capture_output=True, check=False)
         self.assertEqual(0, syntax.returncode, syntax.stderr)
@@ -88,6 +107,107 @@ class HostBootstrapScriptTests(unittest.TestCase):
         self.assertIn("& wsl.exe --distribution $DistroName --user root -- bash -lc $wslCommand", source)
         self.assertIn("[switch]$TerminateAfterBootstrap", source)
 
+
+class SupervisorCredentialGuardTests(unittest.TestCase):
+    GUARD = "Assert-SupervisorCredentialRotationAllowed"
+    ROTATION = re.compile(r"\bSet-LocalUser\b[^\n;{}]*\s-Password\b")
+
+    def rotators(self):
+        scripts = {
+            path: path.read_text(encoding="utf-8")
+            for path in sorted((ROOT / "scripts/host").rglob("*.ps1"))
+        }
+        scripts = {path: source for path, source in scripts.items() if self.ROTATION.search(source)}
+        # Keep discovery non-vacuous and catch removal of protection from any
+        # newly added password rotator without maintaining a fixed allowlist.
+        self.assertGreaterEqual(len(scripts), 12)
+        return scripts
+
+    def guard_source(self, source):
+        match = re.search(r"^function " + self.GUARD + r" \{\n.*?^\}", source, re.M | re.S)
+        self.assertIsNotNone(match, "password rotator has no credential guard")
+        return match.group()
+
+    def test_every_rotator_declares_the_explicit_switch_and_same_fail_closed_guard(self):
+        canonical = None
+        for path, source in self.rotators().items():
+            with self.subTest(script=path.name):
+                header = source[:source.index("$ErrorActionPreference")]
+                self.assertIn("[switch]$AcknowledgeSupervisorCredentialInvalidation", header)
+                guard = self.guard_source(source)
+                if canonical is None:
+                    canonical = guard
+                self.assertEqual(canonical, guard)
+                self.assertIn("if ($AcknowledgeSupervisorCredentialInvalidation) { return }", guard)
+                self.assertIn("Get-ScheduledTask -ErrorAction Stop", guard)
+                self.assertIn('$_.TaskName -eq "SelfHostedCI-Health-Supervisor"', guard)
+                self.assertIn("if ($supervisors.Count -gt 0)", guard)
+                self.assertIn("health supervisor task exists; its stored credential would be invalidated", guard)
+                self.assertIn("run uninstall-health-supervisor.ps1 first and reinstall it last", guard)
+                self.assertNotIn("SilentlyContinue", guard)
+                self.assertNotIn("catch", guard)
+
+    def test_every_password_rotation_checks_guard_including_cleanup_and_rollback(self):
+        for path, source in self.rotators().items():
+            for rotation in self.ROTATION.finditer(source):
+                line = source.count("\n", 0, rotation.start()) + 1
+                with self.subTest(script=path.name, line=line):
+                    self.assertTrue(
+                        source[:rotation.start()].rstrip().endswith(self.GUARD + ";"),
+                        f"{path.name}:{line}: password rotation lacks its immediate credential guard",
+                    )
+
+    def test_preflight_blocks_before_one_shot_staging_but_uninstaller_removes_task_first(self):
+        for path, source in self.rotators().items():
+            with self.subTest(script=path.name):
+                body = source[source.index("if (-not $Apply)"):]
+                if path.name == "uninstall-health-supervisor.ps1":
+                    self.assertLess(body.index("Unregister-ScheduledTask"), body.index(self.GUARD))
+                else:
+                    preflight = re.search(r"^" + self.GUARD + r"$", body, re.M)
+                    self.assertIsNotNone(preflight, "missing guard before staging")
+                    mutations = re.search(r"\b(New-Item|Set-Acl|Grant-ExactBatchLogonRight|Set-LocalUser|WriteAllText|WriteAllBytes)\b", body)
+                    self.assertIsNotNone(mutations)
+                    self.assertLess(preflight.start(), mutations.start())
+
+    def test_guard_runtime_when_powershell_available(self):
+        import shutil
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if powershell is None:
+            self.skipTest("PowerShell is not installed; all rotators have textual coverage")
+        source = next(iter(self.rotators().values()))
+        harness = self.guard_source(source) + r"""
+$ErrorActionPreference = 'Stop'
+$script:AcknowledgeSupervisorCredentialInvalidation = $false
+$script:scenario = 'absent'
+$script:queries = 0
+function Get-ScheduledTask {
+    [CmdletBinding()] param()
+    $script:queries++
+    if ($script:scenario -eq 'error') { Write-Error 'scheduler unavailable'; return }
+    if ($script:scenario -eq 'present') { return [pscustomobject]@{TaskName='SelfHostedCI-Health-Supervisor'} }
+    return [pscustomobject]@{TaskName='UnrelatedTask'}
+}
+Assert-SupervisorCredentialRotationAllowed
+$script:scenario = 'present'
+$blocked = $false
+try { Assert-SupervisorCredentialRotationAllowed } catch {
+    if ($_.Exception.Message -notlike '*health supervisor task exists; its stored credential would be invalidated*') { throw }
+    $blocked = $true
+}
+if (-not $blocked) { throw 'existing supervisor was not blocked' }
+$script:scenario = 'error'
+$blocked = $false
+try { Assert-SupervisorCredentialRotationAllowed } catch { $blocked = $true }
+if (-not $blocked) { throw 'unknown scheduler state was not blocked' }
+$script:AcknowledgeSupervisorCredentialInvalidation = $true
+$script:scenario = 'present'
+$before = $script:queries
+Assert-SupervisorCredentialRotationAllowed
+if ($script:queries -ne $before) { throw 'explicit acknowledgement did not bypass guard' }
+"""
+        result = subprocess.run([powershell, "-NoProfile", "-Command", harness], text=True, capture_output=True, timeout=15)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

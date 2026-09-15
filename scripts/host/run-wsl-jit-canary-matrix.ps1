@@ -13,7 +13,8 @@ param(
     [switch]$AcknowledgeCanaryGitHubContact,
     [switch]$AcknowledgeTransientRunnerRegistration,
     [switch]$AcknowledgeDistroRestart,
-    [switch]$AcknowledgeOneTimePasswordRotation
+    [switch]$AcknowledgeOneTimePasswordRotation,
+    [switch]$AcknowledgeSupervisorCredentialInvalidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,6 +29,18 @@ $StderrPath = Join-Path $Root "worker.stderr.log"
 $DiagnosticsRoot = "C:\ProgramData\self-hosted-ci\diagnostics\canary-matrix\v1"
 $PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $MinimumFreeCommitBytes = 6GB
+
+function Assert-SupervisorCredentialRotationAllowed {
+    if ($AcknowledgeSupervisorCredentialInvalidation) { return }
+    # Enumeration distinguishes an absent task from a failed scheduler query.
+    # Do not suppress errors: unknown task state must block password rotation.
+    $supervisors = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $_.TaskName -eq "SelfHostedCI-Health-Supervisor"
+    })
+    if ($supervisors.Count -gt 0) {
+        throw ("health supervisor task exists; its stored credential would be invalidated " + [char]0x2014 + " run uninstall-health-supervisor.ps1 first and reinstall it last")
+    }
+}
 
 function Test-IsAdministrator {
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -439,6 +452,7 @@ $freeCommitBytes = Assert-FreeCommitReserve
 
 [ordered]@{mode=$(if($Apply){"apply"}else{"plan"});apply_requested=[bool]$Apply;task_name=$TaskName;service_sid=$service.SID.Value;distro=$DistroName;bundle_sha256=$bundleSha256;bundle_bytes=$bundleLength;reviewer_fingerprint=$ExpectedReviewerFingerprint;nonce=$ExpectedCanaryNonce;free_commit_bytes=$freeCommitBytes;minimum_free_commit_bytes=$MinimumFreeCommitBytes;max_allocations=6;max_concurrency=1;production_activation_authorized=$false;required_check_authorized=$false;outbound_worker_authorized=$false;distro_restart_only_after_durable_checkpoint=$true;transport="Windows-to-WSL-stdin-no-drvfs";no_host_changes=(-not [bool]$Apply)} | ConvertTo-Json -Compress
 if (-not $Apply) { return }
+Assert-SupervisorCredentialRotationAllowed
 if (-not ($AcknowledgeCanaryGitHubContact -and $AcknowledgeTransientRunnerRegistration -and $AcknowledgeDistroRestart -and $AcknowledgeOneTimePasswordRotation)) { throw "Apply requires all four explicit canary acknowledgements" }
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "canary one-shot task already exists" }
 if (Test-Path -LiteralPath $Root) { throw "canary staging root already exists" }
@@ -449,7 +463,7 @@ try {
     [void](New-Item -ItemType Directory -Path $Root)
     Set-Acl -LiteralPath $Root -AclObject (New-ProtectedAcl $service.SID)
     $temporaryPassword = New-CryptographicAccountPassword
-    Set-LocalUser -Name $ServiceAccount -Password $temporaryPassword -ErrorAction Stop
+    Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $ServiceAccount -Password $temporaryPassword -ErrorAction Stop
     $passwordApplied = $true
     Write-Worker "initial"
     [void](Register-OneShot "$env:COMPUTERNAME\$ServiceAccount" $temporaryPassword)
@@ -505,7 +519,7 @@ finally {
     if ($passwordApplied) {
         $replacement = New-CryptographicAccountPassword
         try {
-            Set-LocalUser -Name $ServiceAccount -Password $replacement -ErrorAction Stop
+            Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $ServiceAccount -Password $replacement -ErrorAction Stop
             $rotatedService = Get-LocalUser -Name $ServiceAccount -ErrorAction Stop
             if (-not $rotatedService.Enabled -or $rotatedService.SID.Value -ne $ExpectedServiceAccountSid) { throw "service identity drifted during final credential rotation" }
             Assert-NonAdmin $rotatedService

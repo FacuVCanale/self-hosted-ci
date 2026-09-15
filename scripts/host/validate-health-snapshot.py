@@ -8,6 +8,13 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from github_automation.health_snapshot import snapshot_freshness, timestamp
 
 TOP_LEVEL = {
     "schema_version",
@@ -47,15 +54,6 @@ ENABLED_STATES = {
     "self-hosted-ci-health-heartbeat.timer": {"enabled"},
     "self-hosted-ci-network-policy.service": {"enabled", "static"},
 }
-
-
-def timestamp(value: object) -> datetime:
-    if not isinstance(value, str) or not value.endswith("Z"):
-        raise ValueError("timestamp must be UTC")
-    parsed = datetime.fromisoformat(value[:-1] + "+00:00")
-    if parsed.tzinfo is None:
-        raise ValueError("timestamp requires timezone")
-    return parsed.astimezone(timezone.utc)
 
 
 def validate(
@@ -318,8 +316,6 @@ def validate(
             isinstance(item, str) and item for item in eligibility["blocking_reasons"]
         ):
             raise ValueError()
-        if expires <= generated or expires - generated > timedelta(seconds=300):
-            raise ValueError()
         if payload["probe_error"] is not None and (
             not isinstance(payload["probe_error"], str)
             or not payload["probe_error"]
@@ -328,7 +324,7 @@ def validate(
             raise ValueError()
         if payload["probe_error"] is not None and (
             eligibility["eligible_for_local_ci"]
-            or "supervisor_probe_failed" not in eligibility["blocking_reasons"]
+            or not {"supervisor_probe_failed", "supervisor_keepalive_restarting"}.intersection(eligibility["blocking_reasons"])
         ):
             raise ValueError()
         if len(set(eligibility["blocking_reasons"])) != len(
@@ -336,7 +332,11 @@ def validate(
         ):
             raise ValueError()
         if payload["probe_error"] is not None:
-            expected_blockers = {"supervisor_probe_failed"}
+            expected_blockers = {
+                "supervisor_keepalive_restarting"
+                if payload["probe_error"] == "dedicated distro keepalive exited"
+                else "supervisor_probe_failed"
+            }
         else:
             expected_blockers: set[str] = set()
             if (
@@ -385,10 +385,9 @@ def validate(
             raise ValueError()
     except (KeyError, TypeError, ValueError):
         return 5, "invalid_snapshot_contract"
-    if generated > now + timedelta(seconds=30):
-        return 5, "snapshot_from_future"
-    if now >= expires:
-        return 4, "snapshot_expired"
+    code, reason, _ = snapshot_freshness(payload, now)
+    if code:
+        return code, reason
     if not eligibility["eligible_for_local_ci"]:
         return 3, "local_ci_ineligible"
     if (

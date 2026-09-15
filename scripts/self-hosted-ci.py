@@ -68,8 +68,10 @@ def main(argv: list[str] | None = None) -> int:
             result = operator.run_local(repository, args.pr, apply=args.apply)
         else:
             result = operator.status(repository)
-            result["doctor"] = "healthy" if result["health"]["eligible"] else "blocked"
+            result["doctor"] = "healthy" if result["health"]["eligible"] else "unhealthy"
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        if args.command == "doctor" and result["doctor"] == "unhealthy":
+            return 3
         return 0 if result.get("status") not in {"blocked", "error"} else 3
     except AgentOperatorError as exc:
         print(json.dumps({

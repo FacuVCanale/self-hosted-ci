@@ -5,7 +5,8 @@ param(
     [string]$DistroName = "Ubuntu-24.04-CI",
     [switch]$Apply,
     [switch]$AcknowledgePartialTlsCleanup,
-    [switch]$AcknowledgeOneTimePasswordRotation
+    [switch]$AcknowledgeOneTimePasswordRotation,
+    [switch]$AcknowledgeSupervisorCredentialInvalidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,6 +16,18 @@ $root = "C:\ProgramData\self-hosted-ci\partial-bootstrap-cleanup"
 $workerPath = Join-Path $root "worker.ps1"
 $resultPath = Join-Path $root "result.json"
 $powershellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+function Assert-SupervisorCredentialRotationAllowed {
+    if ($AcknowledgeSupervisorCredentialInvalidation) { return }
+    # Enumeration distinguishes an absent task from a failed scheduler query.
+    # Do not suppress errors: unknown task state must block password rotation.
+    $supervisors = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        $_.TaskName -eq "SelfHostedCI-Health-Supervisor"
+    })
+    if ($supervisors.Count -gt 0) {
+        throw ("health supervisor task exists; its stored credential would be invalidated " + [char]0x2014 + " run uninstall-health-supervisor.ps1 first and reinstall it last")
+    }
+}
 
 function New-RandomPassword {
     $bytes = New-Object byte[] 48
@@ -50,6 +63,7 @@ $service = Get-LocalUser -Name $ServiceAccount -ErrorAction Stop
 if ($service.SID.Value -ne $ExpectedServiceAccountSid) { throw "service SID mismatch" }
 [ordered]@{ mode = $(if ($Apply) { "apply" } else { "plan" }); task = $taskName; operation = "remove exact incomplete Incus GARM TLS artifacts only" } | ConvertTo-Json -Compress
 if (-not $Apply) { return }
+Assert-SupervisorCredentialRotationAllowed
 if (-not $AcknowledgePartialTlsCleanup -or -not $AcknowledgeOneTimePasswordRotation) { throw "apply acknowledgements are required" }
 
 $registered = $false; $passwordChanged = $false; $password = $null
@@ -63,7 +77,7 @@ if (`$LASTEXITCODE -ne 0) { throw 'exact WSL cleanup failed' }
 [IO.File]::WriteAllText('$resultPath', '{"status":"cleaned"}', [Text.UTF8Encoding]::new(`$false))
 "@
     [IO.File]::WriteAllText($workerPath, $worker, [Text.UTF8Encoding]::new($false))
-    $password = New-RandomPassword; Set-LocalUser -Name $ServiceAccount -Password $password; $passwordChanged = $true
+    $password = New-RandomPassword; Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $ServiceAccount -Password $password; $passwordChanged = $true
     [void](Register-OneShot "$env:COMPUTERNAME\$ServiceAccount" $password); $registered = $true
     $password.Dispose(); $password = $null
     Start-ScheduledTask -TaskName $taskName
@@ -74,7 +88,7 @@ if (`$LASTEXITCODE -ne 0) { throw 'exact WSL cleanup failed' }
     Get-Content -LiteralPath $resultPath -Raw
 } finally {
     if ($registered) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
-    if ($passwordChanged) { $replacement = New-RandomPassword; try { Set-LocalUser -Name $ServiceAccount -Password $replacement } finally { $replacement.Dispose() } }
+    if ($passwordChanged) { $replacement = New-RandomPassword; try { Assert-SupervisorCredentialRotationAllowed; Set-LocalUser -Name $ServiceAccount -Password $replacement } finally { $replacement.Dispose() } }
     if ($password) { $password.Dispose() }
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
 }
