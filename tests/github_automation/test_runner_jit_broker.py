@@ -28,6 +28,7 @@ from github_automation.runner_jit import (
 )
 from github_automation.runner_jit_broker import (
     AllocationBroker,
+    exception_causes,
     ExternalLiveWorkflowJobVerifier,
     GARM_CLEANUP_CONVERGENCE_SECONDS,
     GARM_CLI_COMMAND_TIMEOUT_SECONDS,
@@ -520,11 +521,76 @@ class AllocationBrokerTests(unittest.TestCase):
             },
             hook,
         )
-        failed = mock.Mock(returncode=1, stdout="", stderr="blocked")
+        failed = mock.Mock(returncode=3, stdout="", stderr="prefix\nbearer_token = abc\nlast line")
         with mock.patch("subprocess.run", return_value=failed) as run:
-            with self.assertRaises(RunnerJitError):
+            with self.assertRaises(RunnerJitError) as raised:
                 driver._run("scaleset", "update", "87", "--enabled=false")
         self.assertEqual(1, run.call_count)
+
+        message = str(raised.exception)
+        self.assertIn("returncode=3", message)
+        self.assertIn("<redacted>", message)
+        self.assertNotIn("abc", message)
+        self.assertNotIn("bearer_token", message)
+        self.assertNotIn("\n", message)
+
+    def test_garm_cli_output_diagnostics_are_bounded_and_redacted_before_slicing(self):
+        driver = GarmCliAllocationDriver(
+            {"garm_cli_home": "/run/garm", "provider_name": "incus",
+             "image_alias": "runner", "image_fingerprint": "b" * 64, "targets": {}},
+            Path(self.tempdir.name) / "hook.py",
+        )
+        for returncode, stdout, stderr, expected in (
+            (3, "", "x" * 300 + "\nend", "stderr=" + "x" * 196 + " end"),
+            (3, "", "TOKEN=" + "secret" * 100, "stderr=<redacted>"),
+            (0, "bad " + "x" * 200, "", "stdout=bad " + "x" * 116),
+            (0, "bad bearer_token = abc\nend", "", "stdout=bad <redacted> end"),
+        ):
+            with self.subTest(returncode=returncode, expected=expected):
+                result = mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+                with mock.patch("subprocess.run", return_value=result):
+                    with self.assertRaises(RunnerJitError) as raised:
+                        driver._run("scaleset", "update", "87")
+                self.assertTrue(str(raised.exception).endswith(expected), str(raised.exception))
+                self.assertNotIn("abc", str(raised.exception))
+                self.assertNotIn("secret", str(raised.exception))
+
+    def test_garm_cli_read_budget_expiry_retains_last_failure(self):
+        driver = GarmCliAllocationDriver(
+            {"garm_cli_home": "/run/garm", "provider_name": "incus",
+             "image_alias": "runner", "image_fingerprint": "b" * 64, "targets": {}},
+            Path(self.tempdir.name) / "hook.py",
+        )
+        result = mock.Mock(returncode=3, stdout="", stderr="bearer_token = abc")
+        with mock.patch("subprocess.run", return_value=result) as run:
+            with self.assertRaisesRegex(RunnerJitError, "budget_seconds=0.1") as raised:
+                driver._run("scaleset", "list", timeout_seconds=0.1)
+        self.assertEqual(1, run.call_count)
+        self.assertEqual([
+            "RunnerJitError: GARM CLI command timed out; budget_seconds=0.1",
+            "RunnerJitError: GARM CLI command failed; returncode=3; stderr=<redacted>",
+        ], exception_causes(raised.exception))
+
+    def test_garm_cli_timeout_reports_effective_budget_without_command_payload(self):
+        driver = GarmCliAllocationDriver(
+            {"garm_cli_home": "/run/garm", "provider_name": "incus",
+             "image_alias": "runner", "image_fingerprint": "b" * 64, "targets": {}},
+            Path(self.tempdir.name) / "hook.py",
+        )
+        with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired(["private-payload"], 7)):
+            with self.assertRaisesRegex(RunnerJitError, "budget_seconds=7") as raised:
+                driver._run("scaleset", "update", "87", timeout_seconds=7)
+        self.assertNotIn("private-payload", str(exception_causes(raised.exception)))
+
+    def test_exception_causes_follow_context_limit_depth_and_stop_cycles(self):
+        errors = [RunnerJitError(str(index)) for index in range(6)]
+        for current, previous in zip(errors, errors[1:]):
+            current.__context__ = previous
+        self.assertEqual([f"RunnerJitError: {index}" for index in range(4)], exception_causes(errors[0]))
+        errors[0].__cause__ = errors[5]
+        errors[5].__cause__ = errors[0]
+        self.assertEqual(["RunnerJitError: 0", "RunnerJitError: 5"], exception_causes(errors[0]))
+        self.assertEqual([], exception_causes(None))
 
     def test_runner_claim_shares_one_timeout_across_both_garm_reads(self):
         hook = Path(self.tempdir.name) / "hook.py"
@@ -868,6 +934,7 @@ class AllocationBrokerTests(unittest.TestCase):
             {
                 "error_code": "context-mismatch",
                 "event": "job_started_denied",
+                "cause": ["JobStartedDenial: context-mismatch"],
                 "mismatched_fields": ["run_id"],
                 "phase": "signed-context",
             },
@@ -881,6 +948,26 @@ class AllocationBrokerTests(unittest.TestCase):
         )
         self.assertNotIn(sensitive_value, lines[0])
         self.assertNotIn(self.payload["allocation_id"], lines[0])
+
+    def test_http_claim_deadline_denial_logs_underlying_error_chain(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        request = {"allocation_id": self.payload["allocation_id"], "context": self.context_mapping()}
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(self.driver, "assert_runner_claim", side_effect=RunnerJitError("GARM claim remains absent")),
+            redirect_stderr(stderr),
+        ):
+            status, _, body = self.post_job_started(self.broker, json.dumps(request).encode())
+        self.assertEqual(403, status)
+        self.assertNotIn("cause", json.loads(body))
+        self.assertEqual([
+            "JobStartedDenial: claim-not-observed",
+            "RunnerJitError: job-started observation deadline expired; last error: RunnerJitError: GARM claim remains absent",
+            "RunnerJitError: GARM claim remains absent",
+        ], json.loads(stderr.getvalue())["cause"])
+        self.assertEqual(45, self.clock.now)
+        self.assertEqual("issued", self.ledger.get(self.payload["allocation_id"]).state)
 
     def test_http_success_emits_no_denial_journal_line(self):
         self.broker.reserve(self.reservation, now=NOW)

@@ -11,6 +11,7 @@ import base64
 import json
 import math
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -56,6 +57,34 @@ JOB_STARTED_ERROR_CODES = {
     "runner-disable": frozenset({"disable-failed"}),
     "ledger-start": frozenset({"start-transition-denied"}),
 }
+
+
+def sanitize_diagnostic(message: str) -> str:
+    """Redact token-bearing line suffixes before callers truncate output."""
+    redacted = re.sub(r"\S*token[^\r\n]*", "<redacted>", message, flags=re.IGNORECASE)
+    return " ".join(redacted.split())
+
+
+def exception_diagnostic(exc: BaseException) -> str:
+    # These exception strings can embed command arguments or raw input bytes.
+    if isinstance(exc, subprocess.TimeoutExpired):
+        message = f"command timed out after {exc.timeout:g} seconds"
+    elif isinstance(exc, UnicodeDecodeError):
+        message = f"invalid {exc.encoding} input: {exc.reason}"
+    else:
+        message = str(exc)
+    return f"{type(exc).__name__}: {sanitize_diagnostic(message)}"
+
+
+def exception_causes(exc: BaseException | None) -> list[str]:
+    """Follow explicit causes, falling back to context, with a cycle guard."""
+    causes = []
+    seen = set()
+    while exc is not None and id(exc) not in seen and len(causes) < 4:
+        seen.add(id(exc))
+        causes.append(exception_diagnostic(exc))
+        exc = exc.__cause__ if exc.__cause__ is not None else exc.__context__
+    return causes
 
 
 @dataclass(frozen=True)
@@ -208,7 +237,10 @@ class AllocationBroker:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise RunnerJitError("job-started observation deadline expired") from last_error
+                message = "job-started observation deadline expired"
+                if last_error is not None:
+                    message += f"; last error: {exception_diagnostic(last_error)}"
+                raise RunnerJitError(message) from last_error
             try:
                 observe(remaining)
             except (OSError, ValueError) as exc:
@@ -216,7 +248,10 @@ class AllocationBroker:
             else:
                 if time.monotonic() < deadline:
                     return
-                raise RunnerJitError("job-started observation deadline expired")
+                message = "job-started observation deadline expired"
+                if last_error is not None:
+                    message += f"; last error: {exception_diagnostic(last_error)}"
+                raise RunnerJitError(message) from last_error
             remaining = deadline - time.monotonic()
             if remaining > 0:
                 time.sleep(min(self.observation_policy.poll_interval_seconds, remaining))
@@ -574,10 +609,13 @@ class GarmCliAllocationDriver:
         if timeout_seconds is not None:
             command_budget = min(command_budget, timeout_seconds)
         deadline = time.monotonic() + command_budget
+        last_error = None
         for attempt in range(attempts):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise RunnerJitError("GARM CLI command failed")
+                raise RunnerJitError(
+                    f"GARM CLI command timed out; budget_seconds={command_budget:g}"
+                ) from last_error
             try:
                 result = subprocess.run(
                     [
@@ -594,7 +632,12 @@ class GarmCliAllocationDriver:
                     timeout=remaining,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
+                last_error = exc
                 if attempt + 1 == attempts:
+                    if isinstance(exc, subprocess.TimeoutExpired):
+                        raise RunnerJitError(
+                            f"GARM CLI command timed out; budget_seconds={command_budget:g}"
+                        ) from exc
                     raise RunnerJitError("GARM CLI command failed") from exc
             else:
                 if result.returncode == 0:
@@ -605,9 +648,16 @@ class GarmCliAllocationDriver:
                             else None
                         )
                     except json.JSONDecodeError as exc:
-                        raise RunnerJitError("GARM CLI returned invalid JSON") from exc
+                        snippet = sanitize_diagnostic(result.stdout)[:120]
+                        raise RunnerJitError(
+                            f"GARM CLI returned invalid JSON; stdout={snippet}"
+                        ) from exc
+                snippet = sanitize_diagnostic(result.stderr)[-200:]
+                last_error = RunnerJitError(
+                    f"GARM CLI command failed; returncode={result.returncode}; stderr={snippet}"
+                )
                 if attempt + 1 == attempts:
-                    raise RunnerJitError("GARM CLI command failed")
+                    raise last_error
             time.sleep(GARM_CLI_READ_RETRY_SECONDS)
         raise AssertionError("unreachable GARM CLI retry state")
 

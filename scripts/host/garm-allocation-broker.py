@@ -25,6 +25,7 @@ from github_automation.runner_jit_broker import (
     JobStartedDenial,
     JobStartedObservationPolicy,
     JobStartedContext,
+    exception_causes,
     utc_now,
 )
 
@@ -107,7 +108,7 @@ def job_started_handler(broker: AllocationBroker):
         def log_message(self, format, *args):
             return
 
-        def deny(self, phase, error_code, mismatched_fields=()):
+        def deny(self, phase, error_code, mismatched_fields=(), exc=None):
             denial = {
                 "error_code": error_code,
                 "mismatched_fields": list(mismatched_fields),
@@ -120,7 +121,7 @@ def job_started_handler(broker: AllocationBroker):
             ).encode("ascii")
             print(
                 json.dumps(
-                    {"event": "job_started_denied", **denial},
+                    {"event": "job_started_denied", **denial, "cause": exception_causes(exc)},
                     sort_keys=True,
                     separators=(",", ":"),
                 ),
@@ -149,8 +150,8 @@ def job_started_handler(broker: AllocationBroker):
                     return
                 try:
                     value = json.loads(self.rfile.read(int(length)))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    denial = ("request", "invalid-json", ())
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    denial = ("request", "invalid-json", (), exc)
                     return
                 if not isinstance(value, dict) or set(value) != {
                     "allocation_id",
@@ -160,8 +161,8 @@ def job_started_handler(broker: AllocationBroker):
                     return
                 try:
                     context = JobStartedContext.from_mapping(value["context"])
-                except RunnerJitError:
-                    denial = ("request", "invalid-context", ())
+                except RunnerJitError as exc:
+                    denial = ("request", "invalid-context", (), exc)
                     return
                 broker.job_started(
                     value["allocation_id"],
@@ -171,11 +172,11 @@ def job_started_handler(broker: AllocationBroker):
                 self.send_response(204)
                 self.end_headers()
             except JobStartedDenial as exc:
-                denial = (exc.phase, exc.error_code, exc.mismatched_fields)
-            except (OSError, ValueError, RunnerJitError):
-                denial = ("broker", "operation-denied", ())
-            except Exception:
-                denial = ("broker", "internal-error", ())
+                denial = (exc.phase, exc.error_code, exc.mismatched_fields, exc)
+            except (OSError, ValueError, RunnerJitError) as exc:
+                denial = ("broker", "operation-denied", (), exc)
+            except Exception as exc:
+                denial = ("broker", "internal-error", (), exc)
             finally:
                 if denial is not None:
                     self.deny(*denial)
@@ -216,7 +217,7 @@ def main(argv=None) -> int:
     sub.add_parser("serve")
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
-        print("allocation broker must run as root", file=sys.stderr)
+        print(json.dumps({"error": "allocation broker must run as root", "cause": []}), file=sys.stderr)
         return 2
     try:
         policy = JobStartedObservationPolicy(
@@ -273,14 +274,14 @@ def main(argv=None) -> int:
     except ReservePartialFailure as exc:
         print(
             json.dumps(
-                {"error": "partial-reserve", "allocation_id": exc.allocation_id},
+                {"error": "partial-reserve", "allocation_id": exc.allocation_id, "cause": exception_causes(exc)},
                 separators=(",", ":"),
             ),
             file=sys.stderr,
         )
         return 21
     except (OSError, ValueError, RunnerJitError, json.JSONDecodeError) as exc:
-        print(f"allocation broker blocked: {exc}", file=sys.stderr)
+        print(json.dumps({"error": "allocation broker blocked", "cause": exception_causes(exc)}, separators=(",", ":")), file=sys.stderr)
         return 1
     return 0
 
