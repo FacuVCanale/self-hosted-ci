@@ -570,7 +570,7 @@ class HostHealthScriptTests(unittest.TestCase):
             'if ($heartbeat.status -ne "fresh")',
             '"--exec", "/bin/sleep", "infinity"',
             "dedicated distro keepalive exited before the supervisor started",
-            "dedicated distro keepalive exited while supervisor was running",
+            "supervisor_keepalive_restarting",
             "finally { Stop-WslKeepalive $keepalive }",
         ):
             self.assertIn(token, source)
@@ -595,6 +595,87 @@ class HostHealthScriptTests(unittest.TestCase):
             "Invoke-WebRequest",
         ):
             self.assertNotIn(forbidden, source)
+
+    def test_dead_keepalive_publishes_fail_closed_before_unlimited_backoff_restart(self):
+        source = SUPERVISOR.read_text()
+        loop = source[source.index("function Invoke-HealthSupervisor"):source.index('if ($env:OS')]
+        death = loop[loop.index("if ($null -ne $keepalive -and $keepalive.HasExited)"):]
+        self.assertLess(death.index("Publish-HealthSnapshot"), death.index("Stop-WslKeepalive"))
+        self.assertLess(death.index("Publish-HealthSnapshot"), death.index("Start-Sleep -Seconds $restartDelay"))
+        self.assertLess(death.index("Start-Sleep -Seconds $restartDelay"), death.index("$keepalive = Start-WslKeepalive"))
+        self.assertIn('"dedicated distro keepalive exited" "supervisor_keepalive_restarting"', death)
+        self.assertIn("$restartDelay = 5", loop)
+        self.assertIn("$restartDelay = [Math]::Min(60, $restartDelay * 2)", loop)
+        self.assertIn("} while (-not $Once)", loop)
+        self.assertNotIn("throw ", loop)
+        retry = loop[loop.index("keepalive restart failed"):loop.index("Publish-HealthSnapshot (Get-Snapshot)")]
+        self.assertIn("$restartPending = $true", retry)
+        self.assertIn("continue", retry)
+        self.assertIn("catch {", source[source.index("function Publish-HealthSnapshot"):])
+
+    def test_validator_accepts_keepalive_restarting_snapshot_as_ineligible(self):
+        now = datetime.now(timezone.utc)
+        payload = snapshot(now)
+        payload["runner"] = {
+            "installed": None, "registered": None,
+            "labels": ["linux", "self-hosted", "wsl-jit", "x64"],
+        }
+        payload["probe_error"] = "dedicated distro keepalive exited"
+        payload["eligibility"] = {
+            "eligible_for_local_ci": False,
+            "blocking_reasons": ["supervisor_keepalive_restarting"],
+        }
+        self.assertEqual((3, "local_ci_ineligible"), MODULE.validate(payload, SID, "Ubuntu-24.04-CI", now))
+        payload["eligibility"]["eligible_for_local_ci"] = True
+        self.assertEqual(5, MODULE.validate(payload, SID, "Ubuntu-24.04-CI", now)[0])
+
+    def test_dead_keepalive_runtime_with_mocked_windows_dependencies_when_available(self):
+        import shutil
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if powershell is None:
+            self.skipTest("PowerShell is not installed; textual supervisor contract is covered")
+        # Load only function definitions, bypassing Windows identity preflight.
+        # Simulate a dead process, six failed restarts, then a live replacement.
+        harness = r"""
+$ErrorActionPreference = 'Stop'
+$ast = [Management.Automation.Language.Parser]::ParseFile('__SUPERVISOR__', [ref]$null, [ref]$null)
+$ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $false) | ForEach-Object { . ([scriptblock]::Create($_.Extent.Text)) }
+$script:Once = $false
+$IntervalSeconds = 30
+$ExpectedServiceAccountSid = 'test-sid'
+$script:starts = 0
+$script:events = [Collections.Generic.List[string]]::new()
+function Start-WslKeepalive {
+    $script:starts++
+    $script:events.Add('start')
+    if ($script:starts -eq 1) { return [pscustomobject]@{ HasExited = $true } }
+    if ($script:starts -le 7) { throw 'WSL update in progress' }
+    return [pscustomobject]@{ HasExited = $false }
+}
+function Stop-WslKeepalive($process) { }
+function Start-Sleep($Seconds) { $script:events.Add("sleep:$Seconds") }
+function New-FailClosedSnapshot($now, $sid, $errorMessage, $reason) {
+    if ($errorMessage -ne 'dedicated distro keepalive exited' -or $reason -ne 'supervisor_keepalive_restarting') { throw 'wrong fail-closed snapshot' }
+    return @{ failed = $true; reason = $reason }
+}
+function Publish-HealthSnapshot($snapshot) {
+    if ($snapshot.failed) { $script:events.Add('fail-closed') }
+    else { $script:events.Add('probe') }
+}
+function Get-Snapshot {
+    if ($script:starts -ge 8) { $script:Once = $true }
+    return @{ failed = $false }
+}
+Invoke-HealthSupervisor
+if ($script:starts -ne 8) { throw 'restart loop ended prematurely' }
+$waits = @($script:events | Where-Object { $_ -like 'sleep:*' -and $_ -ne 'sleep:30' })
+if (($waits -join ',') -ne 'sleep:5,sleep:10,sleep:20,sleep:40,sleep:60,sleep:60,sleep:60') { throw "wrong backoff: $waits" }
+$failed = $script:events.IndexOf('fail-closed')
+if ($failed -lt 0 -or $failed -ge $script:events.IndexOf('sleep:5')) { throw 'restart waited before fail-closed publication' }
+if ($script:events[$script:events.Count - 1] -ne 'probe') { throw 'normal probing did not resume' }
+""".replace("__SUPERVISOR__", str(SUPERVISOR).replace("'", "''"))
+        result = subprocess.run([powershell, "-NoProfile", "-Command", harness], text=True, capture_output=True, timeout=15)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
     def test_installer_is_plan_only_password_lua_acl_and_postcondition_bound(
         self,

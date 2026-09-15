@@ -178,6 +178,13 @@ function Register-PasswordSupervisorTask([string]$UserId, [Security.SecureString
         $definition.Settings.RestartCount = 5
         $definition.Settings.RestartInterval = "PT1M"
         [void]$definition.Triggers.Create(8) # TASK_TRIGGER_BOOT
+        $watchdog = $definition.Triggers.Create(2) # TASK_TRIGGER_DAILY
+        $watchdog.StartBoundary = [DateTime]::Today.ToString("yyyy-MM-ddTHH:mm:ss")
+        $watchdog.DaysInterval = 1
+        $watchdog.Enabled = $true
+        $watchdog.Repetition.Interval = "PT5M"
+        # An omitted Duration and EndBoundary mean repetition never expires.
+        $watchdog.Repetition.StopAtDurationEnd = $false
         $action = $definition.Actions.Create(0)
         $action.Path = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
         $action.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$InstalledSupervisor`" -ExpectedServiceAccountSid `"$ExpectedServiceAccountSid`" -InstallNonce `"$InstallNonce`" -ExpectedServiceAccount `"$ServiceAccount`" -ExpectedDistroName `"$DistroName`" -SnapshotPath `"$SnapshotPath`""
@@ -329,6 +336,12 @@ try {
     $actualSid = ([Security.Principal.NTAccount]::new([string]$observed.Principal.UserId).Translate([Security.Principal.SecurityIdentifier])).Value
     if ($actualSid -ne $serviceSid.Value) { throw "task SID postcondition failed" }
     if ($observed.TaskPath -ne "\" -or @($observed.Actions).Count -ne 1 -or $observed.Actions[0].Execute -ne $PowerShellExe -or $observed.Actions[0].Arguments -ne $expectedArguments) { throw "task path/action postcondition failed" }
+    $bootTriggers = @($observed.Triggers | Where-Object { $_.CimClass.CimClassName -eq "MSFT_TaskBootTrigger" })
+    $watchdogTriggers = @($observed.Triggers | Where-Object { $_.CimClass.CimClassName -eq "MSFT_TaskDailyTrigger" })
+    if (@($observed.Triggers).Count -ne 2 -or $bootTriggers.Count -ne 1 -or $watchdogTriggers.Count -ne 1) { throw "task trigger postcondition failed" }
+    $watchdog = $watchdogTriggers[0]
+    if (-not $bootTriggers[0].Enabled -or -not $watchdog.Enabled -or $watchdog.DaysInterval -ne 1 -or $watchdog.Repetition.Interval -ne "PT5M" -or $watchdog.Repetition.Duration -or $watchdog.EndBoundary -or $watchdog.Repetition.StopAtDurationEnd) { throw "task watchdog postcondition failed" }
+    if ([string]$observed.Settings.MultipleInstances -ne "IgnoreNew" -or $observed.Settings.RestartCount -ne 5 -or $observed.Settings.RestartInterval -ne "PT1M") { throw "task restart policy postcondition failed" }
     Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
     $deadline = (Get-Date).AddSeconds(120)
     $firstSnapshot = $null

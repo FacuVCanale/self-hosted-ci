@@ -324,7 +324,7 @@ def validate(
             raise ValueError()
         if payload["probe_error"] is not None and (
             eligibility["eligible_for_local_ci"]
-            or "supervisor_probe_failed" not in eligibility["blocking_reasons"]
+            or not {"supervisor_probe_failed", "supervisor_keepalive_restarting"}.intersection(eligibility["blocking_reasons"])
         ):
             raise ValueError()
         if len(set(eligibility["blocking_reasons"])) != len(
@@ -332,7 +332,11 @@ def validate(
         ):
             raise ValueError()
         if payload["probe_error"] is not None:
-            expected_blockers = {"supervisor_probe_failed"}
+            expected_blockers = {
+                "supervisor_keepalive_restarting"
+                if payload["probe_error"] == "dedicated distro keepalive exited"
+                else "supervisor_probe_failed"
+            }
         else:
             expected_blockers: set[str] = set()
             if (

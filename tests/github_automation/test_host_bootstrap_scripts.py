@@ -14,6 +14,25 @@ POWERSHELL_SCRIPT = ROOT / "scripts/host/bootstrap-ubuntu-24.04-wsl.ps1"
 
 
 class HostBootstrapScriptTests(unittest.TestCase):
+    def test_health_supervisor_has_boot_and_indefinite_five_minute_watchdog(self):
+        source = (ROOT / "scripts/host/install-health-supervisor.ps1").read_text()
+        self.assertEqual(1, source.count("$definition.Triggers.Create(8)"))
+        self.assertEqual(1, source.count("$definition.Triggers.Create(2)"))
+        for token in (
+            '$watchdog.DaysInterval = 1',
+            '$watchdog.Repetition.Interval = "PT5M"',
+            '$watchdog.Repetition.StopAtDurationEnd = $false',
+            '$definition.Settings.MultipleInstances = 2 # IgnoreNew',
+            '$definition.Settings.RestartCount = 5',
+            '$definition.Settings.RestartInterval = "PT1M"',
+            '@($observed.Triggers).Count -ne 2',
+            'MSFT_TaskBootTrigger', 'MSFT_TaskDailyTrigger',
+            'task watchdog postcondition failed',
+        ):
+            self.assertIn(token, source)
+        self.assertNotIn('$watchdog.Repetition.Duration =', source)
+        self.assertNotIn('$watchdog.EndBoundary =', source)
+
     def test_bash_is_syntactically_valid_and_renders_fail_closed_wsl_config(self) -> None:
         syntax = subprocess.run(["bash", "-n", str(BASH_SCRIPT)], text=True, capture_output=True, check=False)
         self.assertEqual(0, syntax.returncode, syntax.stderr)

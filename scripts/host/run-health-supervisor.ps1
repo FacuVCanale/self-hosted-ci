@@ -52,6 +52,7 @@ function Start-WslKeepalive {
         -WindowStyle Hidden -PassThru
     Start-Sleep -Seconds 2
     if ($process.HasExited) {
+        $process.Dispose()
         throw "dedicated distro keepalive exited before the supervisor started"
     }
     return $process
@@ -65,6 +66,7 @@ function Stop-WslKeepalive([Diagnostics.Process]$Process) {
             $Process.WaitForExit(5000)
         }
     }
+    catch { Write-Warning -WarningAction Continue "keepalive cleanup failed: $($_.Exception.Message)" }
     finally { $Process.Dispose() }
 }
 
@@ -149,7 +151,10 @@ function Get-CoherentHeartbeat([object]$Heartbeat, [DateTimeOffset]$GeneratedAt)
     }
 }
 
-function New-FailClosedSnapshot([DateTimeOffset]$Now, [string]$CurrentSid, [string]$ErrorMessage) {
+function New-FailClosedSnapshot(
+    [DateTimeOffset]$Now, [string]$CurrentSid, [string]$ErrorMessage,
+    [string]$BlockingReason = "supervisor_probe_failed"
+) {
     return [ordered]@{
         schema_version = 2
         install_nonce = $InstallNonce
@@ -162,7 +167,7 @@ function New-FailClosedSnapshot([DateTimeOffset]$Now, [string]$CurrentSid, [stri
         services = Get-UnobservableWslServices
         heartbeat = [ordered]@{ status = "not_observable"; observed_at = $null; age_seconds = $null; max_age_seconds = $SnapshotLifetimeSeconds }
         boundary = [ordered]@{ activation_approved = $null; network_policy_enabled = $null }
-        eligibility = [ordered]@{ eligible_for_local_ci = $false; blocking_reasons = @("supervisor_probe_failed") }
+        eligibility = [ordered]@{ eligible_for_local_ci = $false; blocking_reasons = @($BlockingReason) }
         probe_error = $ErrorMessage
     }
 }
@@ -217,6 +222,63 @@ function Get-Snapshot {
     }
 }
 
+function Publish-HealthSnapshot([object]$Snapshot) {
+    try { Write-AtomicUtf8 $SnapshotPath ($Snapshot | ConvertTo-Json -Depth 8 -Compress) }
+    catch {
+        # A transient filesystem failure must not kill the producer. The last
+        # snapshot expires independently at its readers until publication recovers.
+        Write-Warning -WarningAction Continue "snapshot publication failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-HealthSupervisor {
+    $keepalive = $null
+    $restartDelay = 5
+    $restartPending = $false
+    try {
+        do {
+            try {
+                if (-not $Once) {
+                    if ($null -ne $keepalive -and $keepalive.HasExited) {
+                        Publish-HealthSnapshot (New-FailClosedSnapshot ([DateTimeOffset]::UtcNow) $ExpectedServiceAccountSid `
+                            "dedicated distro keepalive exited" "supervisor_keepalive_restarting")
+                        Stop-WslKeepalive $keepalive
+                        $keepalive = $null
+                        $restartPending = $true
+                    }
+                    elseif ($null -ne $keepalive) {
+                        # Reset only after the replacement survived a full probe interval.
+                        $restartDelay = 5
+                    }
+                    if ($null -eq $keepalive) {
+                        if ($restartPending) {
+                            Start-Sleep -Seconds $restartDelay
+                            $restartDelay = [Math]::Min(60, $restartDelay * 2)
+                        }
+                        try {
+                            $keepalive = Start-WslKeepalive
+                            $restartPending = $false
+                        }
+                        catch {
+                            Publish-HealthSnapshot (New-FailClosedSnapshot ([DateTimeOffset]::UtcNow) $ExpectedServiceAccountSid `
+                                "dedicated distro keepalive exited" "supervisor_keepalive_restarting")
+                            Write-Warning -WarningAction Continue "keepalive restart failed: $($_.Exception.Message)"
+                            $restartPending = $true
+                            continue
+                        }
+                    }
+                }
+                Publish-HealthSnapshot (Get-Snapshot)
+            }
+            catch {
+                Publish-HealthSnapshot (New-FailClosedSnapshot ([DateTimeOffset]::UtcNow) $ExpectedServiceAccountSid $_.Exception.Message)
+            }
+            if (-not $Once) { Start-Sleep -Seconds $IntervalSeconds }
+        } while (-not $Once)
+    }
+    finally { Stop-WslKeepalive $keepalive }
+}
+
 if ($env:OS -ne "Windows_NT") { throw "health supervisor requires Windows" }
 if ($ExpectedServiceAccountSid -notmatch '^S-1-[0-9]+(?:-[0-9]+)+$') { throw "invalid expected service SID" }
 if ($InstallNonce -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') { throw "invalid install nonce" }
@@ -225,16 +287,7 @@ $expectedRoot = [IO.Path]::GetFullPath("C:\ProgramData\self-hosted-ci\health")
 $actualRoot = [IO.Path]::GetFullPath((Split-Path -Parent $SnapshotPath))
 if ($actualRoot -ne $expectedRoot) { throw "snapshot path must remain in the protected health directory" }
 
-$keepalive = $null
-try {
-    if (-not $Once) { $keepalive = Start-WslKeepalive }
-    do {
-        if ($null -ne $keepalive -and $keepalive.HasExited) {
-            throw "dedicated distro keepalive exited while supervisor was running"
-        }
-        $snapshot = Get-Snapshot
-        Write-AtomicUtf8 $SnapshotPath ($snapshot | ConvertTo-Json -Depth 8 -Compress)
-        if (-not $Once) { Start-Sleep -Seconds $IntervalSeconds }
-    } while (-not $Once)
-}
-finally { Stop-WslKeepalive $keepalive }
+# Identity and invocation errors are terminal; runtime failures are retried.
+$currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+if ($currentSid -ne $ExpectedServiceAccountSid) { throw "service identity mismatch" }
+Invoke-HealthSupervisor
