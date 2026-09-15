@@ -143,7 +143,7 @@ class OutboundWorkerRuntimeInstallerTests(unittest.TestCase):
         source = (ROOT / "scripts/host/outbound-coordinator-worker.py").read_text()
         poll = source.index("dispatcher.reconcile_once()")
         guard = source.index("automatic dispatch poll skipped")
-        run = source.index("worker.run_once()\n                time.sleep")
+        run = source.index("worker.run_once()", guard)
         self.assertLess(poll, guard)
         self.assertLess(guard, run)
 

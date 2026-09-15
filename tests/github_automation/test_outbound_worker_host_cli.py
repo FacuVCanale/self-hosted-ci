@@ -14,6 +14,9 @@ import os
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -151,6 +154,11 @@ class HostConfigValidationTests(unittest.TestCase):
             finally:
                 os.lstat = original
         return self.cli.root_config(path)
+
+    def test_serve_still_exits_two_for_startup_and_runtime_authority_errors(self):
+        for error in (ValueError, self.cli.WorkerAuthorityError, self.cli.LocalApprovalError):
+            with self.subTest(error=error), patch.object(self.cli, "runtime", side_effect=error("blocked")), redirect_stderr(StringIO()):
+                self.assertEqual(2, self.cli.main(["serve"]))
 
     def test_a_config_with_neither_optional_block_is_accepted(self):
         value = self.config(base_config())
