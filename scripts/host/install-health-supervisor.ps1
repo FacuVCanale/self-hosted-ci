@@ -192,7 +192,9 @@ function Register-PasswordSupervisorTask([string]$UserId, [Security.SecureString
         $definition.Settings.RestartInterval = "PT1M"
         [void]$definition.Triggers.Create(8) # TASK_TRIGGER_BOOT
         $watchdog = $definition.Triggers.Create(2) # TASK_TRIGGER_DAILY
-        $watchdog.StartBoundary = [DateTime]::Today.ToString("yyyy-MM-ddTHH:mm:ss")
+        # Keep StartWhenAvailable from launching a missed watchdog occurrence
+        # during registration. The installer owns the initial explicit start.
+        $watchdog.StartBoundary = [DateTime]::Now.AddMinutes(10).ToString("yyyy-MM-ddTHH:mm:ss")
         $watchdog.DaysInterval = 1
         $watchdog.Enabled = $true
         $watchdog.Repetition.Interval = "PT5M"
@@ -342,6 +344,7 @@ try {
     $userId = "$env:COMPUTERNAME\$($account.Name)"
     & wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true
     if ($LASTEXITCODE -ne 0) { throw "failed to enable Task Scheduler operational log" }
+    $taskRegistrationStartedAt = [DateTime]::Now
     $task = Register-PasswordSupervisorTask $userId $password $installNonce
     if ($null -eq $task) { throw "Task Scheduler returned no task" }
     $registered = $true
@@ -357,6 +360,10 @@ try {
     if (@($observed.Triggers).Count -ne 2 -or $bootTriggers.Count -ne 1 -or $watchdogTriggers.Count -ne 1) { throw "task trigger postcondition failed" }
     $watchdog = $watchdogTriggers[0]
     if (-not $bootTriggers[0].Enabled -or -not $watchdog.Enabled -or $watchdog.DaysInterval -ne 1 -or $watchdog.Repetition.Interval -ne "PT5M" -or $watchdog.Repetition.Duration -or $watchdog.EndBoundary -or $watchdog.Repetition.StopAtDurationEnd) { throw "task watchdog postcondition failed" }
+    $watchdogStart = [DateTime]::Parse([string]$watchdog.StartBoundary, [Globalization.CultureInfo]::InvariantCulture)
+    # Allow one minute for COM registration and second-resolution serialization,
+    # while requiring a boundary safely in the future at registration time.
+    if ($watchdogStart -lt $taskRegistrationStartedAt.AddMinutes(9) -or $watchdogStart -gt $taskRegistrationStartedAt.AddMinutes(11)) { throw "task watchdog future StartBoundary postcondition failed" }
     if ([string]$observed.Settings.MultipleInstances -ne "IgnoreNew" -or $observed.Settings.RestartCount -ne 5 -or $observed.Settings.RestartInterval -ne "PT1M") { throw "task restart policy postcondition failed" }
     if (-not (Get-WinEvent -ListLog "Microsoft-Windows-TaskScheduler/Operational" -ErrorAction Stop).IsEnabled) { throw "Task Scheduler operational log postcondition failed" }
     Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
@@ -388,7 +395,9 @@ try {
     $runningTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
     $taskInfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
     if ([string]$runningTask.State -ne "Running") { throw "supervisor task is not Running after snapshot publication" }
-    if ([uint32]$taskInfo.LastTaskResult -ne 267009) { throw "supervisor task LastTaskResult does not report SCHED_S_TASK_RUNNING" }
+    # IgnoreNew watchdog starts can leave QUEUED as the last result while the
+    # original instance remains Running and continues publishing snapshots.
+    if ([uint32]$taskInfo.LastTaskResult -notin @(267009, 267045)) { throw "supervisor task LastTaskResult does not report SCHED_S_TASK_RUNNING or SCHED_S_TASK_QUEUED" }
     if ([int]$snapshot.schema_version -ne 2 -or $snapshot.producer.windows_sid -ne $serviceSid.Value) { throw "snapshot producer postcondition failed" }
     if ($null -ne $snapshot.probe_error) { throw "WSL health package postcondition failed: $($snapshot.probe_error)" }
     if ($snapshot.heartbeat.status -ne "fresh") { throw "WSL heartbeat postcondition failed" }

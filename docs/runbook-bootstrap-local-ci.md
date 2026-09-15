@@ -92,7 +92,8 @@ Después de instalar el supervisor no ejecutar ningún instalador o recolector
 one-shot que rote la contraseña de `selfhosted-ci-svc`. Si fuera imprescindible
 repetir uno, desinstalar primero el supervisor y reinstalarlo al final. Tras un
 reboot, comprobar que `SelfHostedCI-Health-Supervisor` esté `Running`, que su
-último resultado sea `267009` (`SCHED_S_TASK_RUNNING`) y que dos snapshots
+último resultado sea `267009` (`SCHED_S_TASK_RUNNING`) o `267045`
+(`SCHED_S_TASK_QUEUED`) y que dos snapshots
 consecutivos tengan timestamps crecientes sin mantener WSL abierta manualmente.
 
 ## El host reinició / run queued sin runner
@@ -169,8 +170,9 @@ Es una operación de recuperación, **no** parte del diagnóstico read-only:
 ssh -i "$ci_ssh_key" "$ci_ssh_target" 'schtasks /run /tn SelfHostedCI-Health-Supervisor'
 ```
 
-Verificar con los comandos anteriores: task `Running`, `LastTaskResult=267009`
-(`SCHED_S_TASK_RUNNING`), distro `Running` y dos lecturas de `current.json`
+Verificar con los comandos anteriores: task `Running`, `LastTaskResult` igual a
+`267009` (`SCHED_S_TASK_RUNNING`) o `267045` (`SCHED_S_TASK_QUEUED`),
+distro `Running` y dos lecturas de `current.json`
 separadas por al menos 30 segundos con `generated_at` creciente. Esperar
 `eligibility.eligible_for_local_ci=true`, `probe_error=null` y checker con exit
 `0`; `status`/`doctor` deben mostrar `health.eligible=true` y `doctor=healthy`.
@@ -207,10 +209,16 @@ Como rechaza una task existente, usar primero el desinstalador canónico
 Esto es mantenimiento del operador, no parte del arranque con `schtasks /run`.
 
 La instalación actualizada deja dos triggers: boot y watchdog diario con
-repetición indefinida cada cinco minutos. `IgnoreNew` evita duplicar un supervisor
-ya activo; el loop recupera keepalives muertos con backoff de 5 a 60 segundos.
-Después de reinstalar, verificar los dos triggers, task `Running` y dos snapshots
-crecientes antes de dar la recuperación por terminada.
+repetición indefinida cada cinco minutos. Su `StartBoundary` inicial es la hora
+local actual +10 minutos; la postcondición exige entre +9 y +11 minutos respecto
+al inicio del registro. Esto evita una corrida perdida por `StartWhenAvailable`
+al registrar la task; el primer arranque lo hace el instalador explícitamente.
+`IgnoreNew` evita duplicar un supervisor ya activo: los intentos del watchdog
+pueden dejar `267045` como último resultado aunque la instancia siga `Running`.
+El loop recupera keepalives muertos con backoff de 5 a 60 segundos.
+Después de reinstalar o reiniciar Windows, verificar los dos triggers, task
+`Running`, `LastTaskResult` igual a `267009` o `267045` y dos snapshots con
+`generated_at` creciente antes de dar la recuperación por terminada.
 
 ## Runtime JIT
 

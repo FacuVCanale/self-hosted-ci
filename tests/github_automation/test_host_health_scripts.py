@@ -98,6 +98,17 @@ def snapshot(now: datetime, *, eligible: bool = True) -> dict[str, object]:
 
 
 class HostHealthScriptTests(unittest.TestCase):
+    def test_supervisor_accepts_running_or_queued_only_with_running_and_fresh_snapshots(self):
+        source = (HOST / "install-health-supervisor.ps1").read_text(encoding="utf-8")
+        snapshots = source.index('supervisor did not publish two distinct post-install snapshots')
+        running = source.index('if ([string]$runningTask.State -ne "Running")')
+        result = source.index('if ([uint32]$taskInfo.LastTaskResult -notin @(267009, 267045))')
+        self.assertLess(snapshots, running)
+        self.assertLess(running, result)
+        self.assertIn('SCHED_S_TASK_RUNNING or SCHED_S_TASK_QUEUED', source)
+        self.assertIn('$candidateAt -gt [DateTimeOffset]::Parse([string]$firstSnapshot.generated_at)', source)
+
+
     def test_powershell_scripts_parse_when_available(self) -> None:
         powershell = next(
             (

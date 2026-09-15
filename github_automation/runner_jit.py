@@ -46,6 +46,10 @@ class RunnerJitError(ValueError):
     """A signed allocation or lifecycle transition violates the contract."""
 
 
+class RunnerJitTemporalError(RunnerJitError):
+    """The allocation cannot be admitted at the validation time."""
+
+
 def allocation_scale_set_name(payload: Mapping[str, Any]) -> str:
     """Return the sole GitHub label for this allocation.
 
@@ -264,13 +268,13 @@ def validate_allocation_payload(payload: Mapping[str, Any], *, now: datetime) ->
     issued = _parse_time(payload["issued_at"], "issued_at")
     expires = _parse_time(payload["expires_at"], "expires_at")
     if expires <= issued or expires - issued > MAX_ALLOCATION_TTL:
-        raise RunnerJitError(
+        raise RunnerJitTemporalError(
             "allocation lifetime must be positive and at most five minutes"
         )
     if now.tzinfo != timezone.utc:
-        raise RunnerJitError("now must be timezone-aware UTC")
+        raise RunnerJitTemporalError("now must be timezone-aware UTC")
     if now < issued - timedelta(seconds=30) or now >= expires:
-        raise RunnerJitError("allocation is not currently valid")
+        raise RunnerJitTemporalError("allocation is not currently valid")
     canonicalize_jcs(payload)
 
 

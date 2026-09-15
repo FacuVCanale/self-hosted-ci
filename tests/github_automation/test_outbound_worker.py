@@ -6,6 +6,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
+from contextlib import redirect_stdout, redirect_stderr
+from io import StringIO
 
 from github_automation.github import ObservedWorkflowJob
 from github_automation.gatestore import GateStore
@@ -14,7 +17,9 @@ from github_automation.local_approval import (
     PilotWorkRequestBuilder,
     ResolvedApprovalTarget,
 )
-from github_automation.outbound_worker import OutboundWorker, PilotWorker, WorkerState
+from github_automation.outbound_worker import OutboundWorker, PilotWorker, WorkerState, WorkerError
+from github_automation.runner_jit import RunnerJitError
+from tests.github_automation.test_outbound_worker_host_cli import load, WORKER_CLI
 from github_automation.pilot_checks import GateCheckError
 from tests.github_automation.test_github_contracts import protocol
 from tests.github_automation.test_runner_jit import reservation
@@ -403,6 +408,85 @@ class OutboundWorkerTests(unittest.TestCase):
         )
         return worker, state, source
 
+    def test_recovered_expired_allocation_closes_checks_and_is_terminal(self):
+        for dispatched in (False, True):
+            with self.subTest(dispatched=dispatched), tempfile.TemporaryDirectory() as directory:
+                publisher = RecordingPublisher()
+                worker, state, source = self._pilot_fixture(directory, publisher)
+                request = source.poll()
+                key = request["request_id"]
+                source.claim(key, request, lease_seconds=7200)
+                state.claim(key, request)
+                progress = {"reserved": worker.broker.reserve(request["reservation"]),
+                            "checks": {"backend lint + test": 1}}
+                if dispatched:
+                    progress["run_id"] = 444
+                state.record(key, "reserved", **progress)
+                state.recover_running()
+                now = source.clock()
+                source.clock = lambda: now + timedelta(minutes=5)
+
+                result = worker.run_once()
+
+                reason = "the local allocation expired before the run started"
+                self.assertEqual("failed", result["status"])
+                self.assertTrue(result["reason"].startswith(reason))
+                self.assertEqual([reason], publisher.abandoned)
+                self.assertEqual(0, worker.github.dispatches)
+                self.assertEqual([("reserve", request["reservation"]["allocation_id"]),
+                                  ("recover", request["reservation"]["allocation_id"])], worker.broker.calls)
+                self.assertEqual("allocation-expired", state.progress(key)["phase"])
+                self.assertEqual("failed", source.status()[0]["state"])
+                self.assertIsNone(state.recoverable())
+                self.assertEqual("failed", state.claim(key, request))
+                self.assertEqual({"status": "idle"}, worker.run_once())
+                if dispatched:
+                    self.assertIn("cancellation is unavailable", result["reason"])
+
+                cli = load(WORKER_CLI, "worker_terminal_status_test")
+                output = StringIO()
+                with patch.object(cli, "runtime", return_value=({}, source, worker, None)), redirect_stdout(output):
+                    self.assertEqual(0, cli.main(["status"]))
+                terminal = json.loads(output.getvalue())["terminal_assignments"][0]
+                self.assertEqual(key, terminal["request_id"])
+                self.assertEqual(result["reason"], terminal["reason"])
+                self.assertEqual("allocation-expired", terminal["phase"])
+
+    def test_serve_isolates_assignment_errors_and_processes_next_approval(self):
+        class StopLoop(Exception):
+            pass
+
+        for error in (WorkerError, RunnerJitError, GateCheckError, OSError):
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as directory:
+                worker, state, source = self._pilot_fixture(directory, RecordingPublisher())
+                first = source.poll()
+                source.claim(first["request_id"], first, lease_seconds=7200)
+                state.claim(first["request_id"], first)
+                state.record(first["request_id"], "claimed")
+                second = source.approve("example-owner/example-repo", 43)
+                original_reserve = worker.broker.reserve
+                calls = []
+
+                def reserve(value):
+                    calls.append(value["allocation_id"])
+                    if len(calls) == 1:
+                        raise error("broken assignment")
+                    return original_reserve(value)
+
+                worker.broker.reserve = reserve
+                cli = load(WORKER_CLI, "worker_serve_isolation_test")
+                stderr = StringIO()
+                with patch.object(cli, "runtime", return_value=({"poll_seconds": 1}, source, worker, None)), patch.object(cli.time, "sleep", side_effect=[None, StopLoop()]), redirect_stderr(stderr):
+                    with self.assertRaises(StopLoop):
+                        cli.main(["serve"])
+                self.assertIn(f"assignment failed: {error.__name__}", stderr.getvalue())
+                self.assertEqual(2, len(calls))
+                self.assertEqual(1, worker.github.dispatches)
+                self.assertEqual("completed", next(row for row in source.status() if row["request_id"] == second["request_id"])["state"])
+                self.assertEqual(1, len(state.terminals()))
+                self.assertIsNone(state.recoverable())
+                self.assertEqual({"status": "idle"}, worker.run_once())
+
     def test_published_checks_target_the_pull_request_head_and_close_green(self):
         publisher = RecordingPublisher()
         with tempfile.TemporaryDirectory() as directory:
@@ -606,7 +690,7 @@ class OutboundWorkerTests(unittest.TestCase):
 
             result = worker.run_once()
 
-            self.assertEqual({"status": "failed", "reason": "JitPilotError"}, result)
+            self.assertEqual({"status": "failed", "reason": "the local allocation expired before the run started"}, result)
             self.assertEqual(
                 [("recover", request["reservation"]["allocation_id"])],
                 [call for call in broker.calls if call[0] == "recover"],
@@ -801,7 +885,7 @@ class OutboundWorkerTests(unittest.TestCase):
                 2, len([call for call in broker.calls if call[0] == "finish"])
             )
 
-    def test_pre_dispatch_cleanup_failure_resumes_cleanup_without_dispatch(self):
+    def test_pre_dispatch_cleanup_failure_is_terminal_without_dispatch(self):
         now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
 
         class Clock:
@@ -834,7 +918,7 @@ class OutboundWorkerTests(unittest.TestCase):
             def recover(self, allocation_id):
                 self.recoveries += 1
                 if self.recoveries == 1:
-                    raise RuntimeError("broker unavailable during cleanup")
+                    raise OSError("broker unavailable during cleanup")
                 return super().recover(allocation_id)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -851,10 +935,10 @@ class OutboundWorkerTests(unittest.TestCase):
             broker = BadReserveBroker()
             github = GitHub()
             worker = PilotWorker(state, source, broker, github, Signer())
-            with self.assertRaisesRegex(RuntimeError, "cleanup"):
+            with self.assertRaises(WorkerError):
                 worker.run_once()
-            result = worker.run_once()
-            self.assertEqual({"status": "failed", "reason": "WorkerError"}, result)
+            self.assertEqual({"status": "idle"}, worker.run_once())
+            self.assertIn("cleanup failed: OSError", state.terminals()[0]["reason"])
             self.assertEqual(0, github.dispatches)
             self.assertEqual("failed", source.status()[0]["state"])
 

@@ -30,6 +30,7 @@ from github_automation.local_approval import (
 )
 from github_automation.pr_autodispatch import AutoDispatchError, OpenPullRequest, plan
 from github_automation.pilot_checks import (
+    GateCheckError,
     GateAppAuthorityV1,
     GateCheckClient,
     PilotCheckPublisher,
@@ -42,6 +43,7 @@ from github_automation.outbound_worker import (
     WorkerError,
     WorkerState,
 )
+from github_automation.runner_jit import RunnerJitError
 from github_automation.worker_authority import (
     HTTPResponse,
     RootPrivateKeySigner,
@@ -507,7 +509,15 @@ def main(argv=None):
         elif a.command == "revoke":
             value = source.revoke(a.repository, a.pr)
         elif a.command == "status":
-            value = {"approvals": source.status(a.repository, a.pr)}
+            approvals = source.status(a.repository, a.pr)
+            keys = {item["request_id"] for item in approvals}
+            value = {
+                "approvals": approvals,
+                "terminal_assignments": [
+                    item for item in worker.state.terminals()
+                    if (a.repository is None and a.pr is None) or item["request_id"] in keys
+                ],
+            }
         elif a.command == "run-once":
             worker.state.recover_running()
             source.recover_claims()
@@ -542,7 +552,10 @@ def main(argv=None):
                             file=sys.stderr,
                         )
                     next_auto = time.monotonic() + auto_interval
-                worker.run_once()
+                try:
+                    worker.run_once()
+                except (WorkerError, RunnerJitError, GateCheckError, OSError) as exc:
+                    print(f"assignment failed: {type(exc).__name__}", file=sys.stderr)
                 time.sleep(c["poll_seconds"])
         print(json.dumps(value, sort_keys=True, separators=(",", ":")))
         return 0

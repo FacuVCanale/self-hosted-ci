@@ -30,7 +30,10 @@ from .github import ObservedWorkflowJob
 from .jit_pilot import JitPilotError, JitPilotPackageV1, PilotTerminalMonitor
 from .local_approval import LocalApprovalError
 from .pilot_checks import GateCheckError, PilotCheckPublisher
+from .worker_authority import WorkerAuthorityError
 from .runner_jit import (
+    RunnerJitError,
+    RunnerJitTemporalError,
     sign_allocation,
     validate_allocation_payload,
     validate_allocation_reservation,
@@ -239,6 +242,8 @@ class WorkerState:
                     (key, encoded, current + lease_seconds),
                 )
                 outcome = "acquired"
+            elif row[0] == "failed":
+                outcome = "failed"
             elif row[0] == "done":
                 outcome = "done"
             elif row[0] == "completing":
@@ -309,6 +314,21 @@ class WorkerState:
             (key,),
         )
 
+    def terminal(self, key: str, phase: str, reason: str) -> None:
+        progress = dict(self.progress(key), phase=phase, failure_reason=reason)
+        self.db.execute(
+            "UPDATE requests SET state='failed',progress=?,result=?,lease_until=NULL WHERE id=?",
+            (json.dumps(progress), json.dumps({"status": "failed", "reason": reason}), key),
+        )
+
+    def terminals(self) -> list[Mapping[str, Any]]:
+        return [
+            {"request_id": key, **json.loads(result), "phase": json.loads(progress).get("phase")}
+            for key, result, progress in self.db.execute(
+                "SELECT id,result,progress FROM requests WHERE state='failed' ORDER BY rowid"
+            )
+        ]
+
     def abort(self, key: str, reason: str) -> None:
         self.db.execute(
             "UPDATE requests SET state='failed',result=?,lease_until=NULL WHERE id=? AND state='running'",
@@ -364,7 +384,59 @@ class _WorkerProgress:
         self.state.record(self.key, "dispatch-ambiguous", dispatch_ambiguous=True)
 
 
-class OutboundWorker:
+class _AssignmentWorker:
+    """Contain failures to the durable request selected for this cycle."""
+
+    def run_once(self) -> Mapping[str, Any]:
+        request = self.state.recoverable() or self.source.poll()
+        if request is None:
+            return {"status": "idle"}
+        try:
+            return self._run_assignment(request)
+        except (WorkerError, RunnerJitError, GateCheckError, OSError) as exc:
+            key = request.get("request_id")
+            if not isinstance(key, str):
+                raise
+            expired = isinstance(exc, RunnerJitTemporalError)
+            reason = (
+                "the local allocation expired before the run started"
+                if expired else f"assignment failed: {type(exc).__name__}"
+            )
+            # Ensure even malformed requests with a usable identity are quarantined.
+            row = self.state.db.execute(
+                "SELECT request FROM requests WHERE id=?", (key,)
+            ).fetchone()
+            if row is None:
+                self.state.claim(key, request)
+            elif json.loads(row[0]) != request:
+                raise WorkerAuthorityError("failed assignment crossed durable request identity") from exc
+            progress = self.state.progress(key)
+            if progress.get("run_id") is not None:
+                reason += "; GitHub run cancellation is unavailable in this worker; manual cancellation may be required"
+            phase = "allocation-expired" if expired else "assignment-failed"
+            try:
+                reason = self._retire_assignment(key, request, progress, reason)
+            finally:
+                self.state.terminal(key, phase, reason)
+            if expired:
+                return {"status": "failed", "reason": reason}
+            raise
+
+    def _retire_assignment(self, key, request, progress, reason):
+        try:
+            if isinstance(self, PilotWorker):
+                self._close_checks(key, reason=reason.split(";", 1)[0])
+                if progress:
+                    self._recover_exact(self._recovery_allocation_id(request))
+        except (WorkerError, RunnerJitError, JitPilotError, GateCheckError, OSError) as exc:
+            reason += f"; cleanup failed: {type(exc).__name__} (manual reconciliation required)"
+            print(f"assignment cleanup failed: {type(exc).__name__}", file=sys.stderr)
+        finally:
+            self.source.fail(key, reason)
+        return reason
+
+
+class OutboundWorker(_AssignmentWorker):
     def __init__(
         self,
         state: WorkerState,
@@ -379,10 +451,7 @@ class OutboundWorker:
         self.github = github
         self.signer = signer
 
-    def run_once(self) -> Mapping[str, Any]:
-        request = self.state.recoverable() or self.source.poll()
-        if request is None:
-            return {"status": "idle"}
+    def _run_assignment(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         if set(request) != {
             "request_id",
             "protocol_package",
@@ -399,6 +468,8 @@ class OutboundWorker:
             if claim == "completing":
                 self.state.delivered(key)
             return prior
+        if claim == "failed":
+            return {"status": "failed", "reason": self.state.progress(key).get("failure_reason")}
         if claim == "busy":
             return {"status": "busy", "request_id": key}
         if self.state.progress(key):
@@ -429,13 +500,15 @@ class OutboundWorker:
             self.source.complete(key, result)
             self.state.delivered(key)
             return result
+        except (WorkerError, RunnerJitError, GateCheckError, OSError):
+            raise
         except Exception as exc:
             self.state.fail(key)
             self.source.fail(key, type(exc).__name__)
             raise
 
 
-class PilotWorker:
+class PilotWorker(_AssignmentWorker):
     """Durable pilot lifecycle. A dispatch receipt is the no-return boundary."""
 
     def __init__(
@@ -555,6 +628,8 @@ class PilotWorker:
     ) -> JitPilotPackageV1:
         package_value = request["pilot_package"]
         now = self.source.clock()
+        if not isinstance(progress.get("finalized"), dict):
+            validate_allocation_reservation(request["reservation"], now=now)
         if progress.get("run_id") is not None:
             # A durable dispatch receipt is the no-return boundary. After it,
             # the package remains the authenticated identity of the active
@@ -632,10 +707,7 @@ class PilotWorker:
         self.state.abort(key, reason)
         return {"status": "failed", "reason": reason}
 
-    def run_once(self) -> Mapping[str, Any]:
-        request = self.state.recoverable() or self.source.poll()
-        if request is None:
-            return {"status": "idle"}
+    def _run_assignment(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         if set(request) != {
             "request_id",
             "pilot_package",
@@ -652,6 +724,8 @@ class PilotWorker:
             if claim == "completing":
                 self.state.delivered(key)
             return result
+        if claim == "failed":
+            return {"status": "failed", "reason": self.state.progress(key).get("failure_reason")}
         if claim == "busy":
             return {"status": "busy", "request_id": key}
         progress = self.state.progress(key)
@@ -786,6 +860,8 @@ class PilotWorker:
             self.source.complete(key, result)
             self.state.delivered(key)
             return result
+        except (WorkerError, RunnerJitError, GateCheckError, OSError):
+            raise
         except Exception as exc:
             latest = self.state.progress(key)
             run_id = latest.get("run_id")
