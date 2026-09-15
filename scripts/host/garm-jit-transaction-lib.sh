@@ -45,7 +45,7 @@ for t in json.load(open(sys.argv[1]))["targets"].values(): print(t["entity_flag"
 PY
 )"||return; while IFS=$'\t' read -r flag id; do [[ -z "$flag" ]]&&continue; inv="$(garm_cli scaleset list "$flag" "$id")"||return; python3 - "$inv" <<'PY' || return
 import json,sys
-if json.loads(sys.argv[1])!=[]: raise SystemExit()
+if json.loads(sys.argv[1])!=[]: raise SystemExit(1)
 PY
 done <<<"$rows"; }
 garm_database_files_safe(){
@@ -97,7 +97,7 @@ configured_runtime_empty(){
 }
 incus_project_empty(){ local v; v="$(incus list --project ci-jit --format json)"||return; python3 - "$v" <<'PY'
 import json,sys
-if json.loads(sys.argv[1])!=[]: raise SystemExit()
+if json.loads(sys.argv[1])!=[]: raise SystemExit(1)
 PY
 }
 zero_runtime_state(){ configured_runtime_empty&&incus_project_empty; }

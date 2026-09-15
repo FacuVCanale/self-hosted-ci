@@ -194,6 +194,26 @@ class GarmActivationTransactionTests(unittest.TestCase):
         self.assertNotIn("UPDATE ", library)
         self.assertNotIn("DELETE FROM", library)
 
+    def test_online_inventory_guards_accept_only_empty_lists(self) -> None:
+        library = LIBRARY.read_text(encoding="utf-8")
+        guards = {
+            "configured_scale_sets_empty": 'python3 - "$inv" <<\'PY\' || return\n',
+            "incus_project_empty": 'python3 - "$v" <<\'PY\'\n',
+        }
+        for guard, marker in guards.items():
+            body = library.split(marker, 1)[1].split("\nPY\n", 1)[0]
+            for inventory in ("[]", '[{"id": "existing"}]', "null", "{}", "invalid"):
+                with self.subTest(guard=guard, inventory=inventory):
+                    result = subprocess.run(
+                        [sys.executable, "-c", body, inventory],
+                        text=True,
+                        capture_output=True,
+                    )
+                    if inventory == "[]":
+                        self.assertEqual(0, result.returncode, result.stderr)
+                    else:
+                        self.assertNotEqual(0, result.returncode)
+
     def test_garm_service_forbids_host_wide_incus_admin(self) -> None:
         source = SERVICE.read_text(encoding="utf-8")
         self.assertNotIn("SupplementaryGroups=incus-admin", source)
