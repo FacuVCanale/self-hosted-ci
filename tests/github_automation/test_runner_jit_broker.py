@@ -35,9 +35,10 @@ from github_automation.runner_jit_broker import (
     GarmCliAllocationDriver,
     JobStartedDenial,
     JobStartedContext,
-    RUNNER_CLAIM_ASSERT_ATTEMPTS,
-    RUNNER_CLAIM_ASSERT_BUDGET_SECONDS,
-    RUNNER_CLAIM_ASSERT_RETRY_SECONDS,
+    JobStartedObservationPolicy,
+    JOB_STARTED_OBSERVATION_TIMEOUT_SECONDS,
+    JOB_STARTED_POLL_INTERVAL_SECONDS,
+    RUNNER_DISABLE_MINIMUM_BUDGET_SECONDS,
     RUNNER_HOOK_DEADLINE_SECONDS,
     RUNNER_HOOK_SAFETY_MARGIN_SECONDS,
 )
@@ -104,7 +105,7 @@ class FakeGarm:
         ):
             raise AssertionError
 
-    def disable_scale_set(self, scale_set_id, scale_set_name):
+    def disable_scale_set(self, scale_set_id, scale_set_name, *, timeout_seconds=None):
         self.events.append("disable")
         self.scales[scale_set_name]["enabled"] = False
 
@@ -141,7 +142,7 @@ class FakeLiveJobVerifier:
     def __init__(self):
         self.calls = []
 
-    def verify(self, payload, context):
+    def verify(self, payload, context, *, timeout_seconds):
         self.calls.append((payload["job_id"], context.run_id))
 
 
@@ -159,6 +160,17 @@ class DelayedCleanupGarm(FakeGarm):
         return super().measure_cleanup(allocation_id, scale_set_name)
 
 
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
 class AllocationBrokerTests(unittest.TestCase):
     def test_garm_cleanup_window_covers_slow_reconciliation_loops(self):
         self.assertGreaterEqual(GARM_CLEANUP_CONVERGENCE_SECONDS, 600)
@@ -169,6 +181,10 @@ class AllocationBrokerTests(unittest.TestCase):
         )
 
     def setUp(self):
+        self.clock = FakeClock()
+        clock_patch = mock.patch("github_automation.runner_jit_broker.time", self.clock)
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
         self.tempdir = tempfile.TemporaryDirectory()
         self.private = ed25519.Ed25519PrivateKey.generate()
         self.driver = FakeGarm()
@@ -485,7 +501,7 @@ class AllocationBrokerTests(unittest.TestCase):
         completed = mock.Mock(returncode=0, stdout='{"id": 87}')
         with (
             mock.patch("subprocess.run", side_effect=[failed, completed]) as run,
-            mock.patch("time.sleep") as sleep,
+            mock.patch("github_automation.runner_jit_broker.time.sleep") as sleep,
         ):
             self.assertEqual({"id": 87}, driver._run("scaleset", "show", "87"))
         self.assertEqual(2, run.call_count)
@@ -637,20 +653,14 @@ class AllocationBrokerTests(unittest.TestCase):
         hook_source = (
             Path(__file__).parents[2] / "scripts/host/runner-job-started-hook.py"
         ).read_text()
-        live_verifier_budget = (
-            ExternalLiveWorkflowJobVerifier.MAX_ATTEMPTS * 15
-            + (ExternalLiveWorkflowJobVerifier.MAX_ATTEMPTS - 1)
-            * ExternalLiveWorkflowJobVerifier.RETRY_DELAY_SECONDS
-        )
-        self.assertEqual(47, live_verifier_budget)
-        self.assertEqual(8, RUNNER_CLAIM_ASSERT_BUDGET_SECONDS)
+        self.assertEqual(45, JOB_STARTED_OBSERVATION_TIMEOUT_SECONDS)
+        self.assertEqual(1, JOB_STARTED_POLL_INTERVAL_SECONDS)
         self.assertIn(
             f"urlopen(request, timeout={RUNNER_HOOK_DEADLINE_SECONDS})",
             hook_source,
         )
         self.assertLessEqual(
-            RUNNER_CLAIM_ASSERT_BUDGET_SECONDS
-            + live_verifier_budget
+            JOB_STARTED_OBSERVATION_TIMEOUT_SECONDS + RUNNER_DISABLE_MINIMUM_BUDGET_SECONDS
             + RUNNER_HOOK_SAFETY_MARGIN_SECONDS,
             RUNNER_HOOK_DEADLINE_SECONDS,
         )
@@ -673,7 +683,7 @@ class AllocationBrokerTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError, "live workflow-job verifier executable is unsafe"
         ):
-            verifier.verify(self.payload, self.context())
+            verifier.verify(self.payload, self.context(), timeout_seconds=12)
 
     def test_external_live_job_verifier_retries_the_complete_authority_check(self):
         executable = Path(self.tempdir.name) / "verify-job"
@@ -698,11 +708,14 @@ class AllocationBrokerTests(unittest.TestCase):
             mock.patch("github_automation.runner_jit_broker.subprocess.run", side_effect=run),
             mock.patch("github_automation.runner_jit_broker.time.sleep") as sleep,
         ):
-            verifier.verify(self.payload, self.context())
+            self.broker._wait_for_observation(
+                lambda remaining: verifier.verify(self.payload, self.context(), timeout_seconds=remaining),
+                self.clock.monotonic() + 12,
+            )
         self.assertEqual(2, attempts)
         sleep.assert_called_once_with(1)
 
-    def test_external_live_job_verifier_normalizes_three_process_timeouts(self):
+    def test_external_live_job_verifier_bounds_one_process_to_remaining_budget(self):
         executable = Path(self.tempdir.name) / "verify-job"
         executable.write_text("#!/bin/sh\n", encoding="utf-8")
         executable.chmod(0o755)
@@ -719,9 +732,10 @@ class AllocationBrokerTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ValueError, "GitHub live workflow-job verification did not converge"
             ):
-                verifier.verify(self.payload, self.context())
-        self.assertEqual(3, run.call_count)
-        self.assertEqual(2, sleep.call_count)
+                verifier.verify(self.payload, self.context(), timeout_seconds=12)
+        self.assertEqual(1, run.call_count)
+        self.assertEqual(12, run.call_args.kwargs["timeout"])
+        sleep.assert_not_called()
 
     def test_job_started_cross_binding_fails_before_disable_or_start(self):
         self.broker.reserve(self.reservation, now=NOW)
@@ -979,7 +993,7 @@ class AllocationBrokerTests(unittest.TestCase):
             broker.job_started(self.payload["allocation_id"], context, now=NOW)
 
         self.assertEqual(2, driver.claim_attempts)
-        sleep.assert_called_once_with(RUNNER_CLAIM_ASSERT_RETRY_SECONDS)
+        sleep.assert_called_once_with(JOB_STARTED_POLL_INTERVAL_SECONDS)
         self.assertEqual(1, len(self.live.calls))
         transitions = [call.args[1] for call in transition.call_args_list]
         self.assertEqual(1, transitions.count("claim"))
@@ -1021,7 +1035,7 @@ class AllocationBrokerTests(unittest.TestCase):
         context = self.context(runner_name=driver.runner_name)
 
         with (
-            mock.patch("github_automation.runner_jit_broker.time.sleep") as sleep,
+            mock.patch("github_automation.runner_jit_broker.time.sleep", wraps=self.clock.sleep) as sleep,
             mock.patch.object(
                 self.ledger, "transition", wraps=self.ledger.transition
             ) as transition,
@@ -1029,8 +1043,9 @@ class AllocationBrokerTests(unittest.TestCase):
         ):
             broker.job_started(self.payload["allocation_id"], context, now=NOW)
 
-        self.assertEqual(RUNNER_CLAIM_ASSERT_ATTEMPTS, driver.claim_attempts)
-        self.assertEqual(RUNNER_CLAIM_ASSERT_ATTEMPTS - 1, sleep.call_count)
+        self.assertEqual(45, driver.claim_attempts)
+        self.assertEqual(45, sleep.call_count)
+        self.assertEqual(45, self.clock.now)
         self.assertEqual([], self.live.calls)
         self.assertEqual([], transition.call_args_list)
         self.assertNotIn("disable", driver.events)
@@ -1093,9 +1108,9 @@ class AllocationBrokerTests(unittest.TestCase):
             broker.job_started(self.payload["allocation_id"], context, now=NOW)
 
         self.assertLessEqual(
-            clock.now - started_at, RUNNER_CLAIM_ASSERT_BUDGET_SECONDS
+            clock.now - started_at, JOB_STARTED_OBSERVATION_TIMEOUT_SECONDS
         )
-        self.assertEqual([RUNNER_CLAIM_ASSERT_BUDGET_SECONDS], driver.timeouts)
+        self.assertEqual([JOB_STARTED_OBSERVATION_TIMEOUT_SECONDS], driver.timeouts)
         sleep.assert_not_called()
         self.assertEqual([], self.live.calls)
         self.assertEqual([], transition.call_args_list)
@@ -1103,6 +1118,97 @@ class AllocationBrokerTests(unittest.TestCase):
         record = self.ledger.get(self.payload["allocation_id"])
         self.assertEqual("issued", record.state)
         self.assertEqual(0, record.jobs_started)
+
+    def test_claim_appearing_after_seven_seconds_is_allowed(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        original = self.driver.assert_runner_claim
+        attempts = []
+
+        def delayed(*args, **kwargs):
+            attempts.append(self.clock.now)
+            if self.clock.now < 7:
+                raise RunnerJitError("claim not yet observed")
+            return original(*args, **kwargs)
+
+        with mock.patch.object(self.driver, "assert_runner_claim", side_effect=delayed):
+            self.broker.job_started(self.payload["allocation_id"], self.context(), now=NOW)
+        self.assertEqual(list(range(8)), attempts)
+        self.assertEqual(7, self.clock.now)
+        self.assertEqual("running", self.ledger.get(self.payload["allocation_id"]).state)
+
+    def test_live_job_and_claim_share_configurable_deadline_and_interval(self):
+        for deadline, allowed in ((10, True), (6, False)):
+            with self.subTest(deadline=deadline):
+                broker = AllocationBroker(
+                    self.ledger, self.driver, self.private.public_key(),
+                    spki_fingerprint(self.private.public_key()), self.live,
+                    observation_policy=JobStartedObservationPolicy(deadline, 2),
+                )
+                # Exercise both phases with the same clock and no durable mutations.
+                self.clock.now = 0
+                observed = []
+                def claim(*args, **kwargs):
+                    if self.clock.now < 4:
+                        raise RunnerJitError("claim pending")
+                def live(*args, **kwargs):
+                    observed.append(kwargs["timeout_seconds"])
+                    if self.clock.now < 8:
+                        raise RunnerJitError("live job pending")
+                with mock.patch.object(self.driver, "assert_runner_claim", side_effect=claim), mock.patch.object(self.live, "verify", side_effect=live), mock.patch.object(self.ledger, "transition"):
+                    if not self.driver.scales:
+                        broker.reserve(self.reservation, now=NOW)
+                        broker.finalize(self.envelope, now=NOW)
+                    if allowed:
+                        broker.job_started(self.payload["allocation_id"], self.context(), now=NOW)
+                        self.assertEqual(8, self.clock.now)
+                        self.assertEqual([6, 4, 2], observed)
+                    else:
+                        with self.assertRaises(JobStartedDenial) as failure:
+                            broker.job_started(self.payload["allocation_id"], self.context(), now=NOW)
+                        self.assertEqual("job-not-verified", failure.exception.error_code)
+                        self.assertEqual(6, self.clock.now)
+                        self.assertEqual([2], observed)
+
+    def test_wait_cannot_admit_an_allocation_that_expires_during_observation(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        expires = datetime.fromisoformat(self.payload["expires_at"].replace("Z", "+00:00"))
+        from datetime import timedelta
+        def claim(*args, **kwargs):
+            self.clock.sleep(7)
+        with mock.patch.object(self.driver, "assert_runner_claim", side_effect=claim):
+            with self.assertRaises(JobStartedDenial) as failure:
+                self.broker.job_started(self.payload["allocation_id"], self.context(), now=expires - timedelta(seconds=5))
+        self.assertEqual("ledger-claim", failure.exception.phase)
+        self.assertEqual(0, self.ledger.get(self.payload["allocation_id"]).jobs_started)
+        self.assertNotIn("disable", self.driver.events)
+
+    def test_late_disable_cannot_start_the_ledger_after_the_hook_budget(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        def disable(*args, timeout_seconds):
+            self.clock.sleep(timeout_seconds)
+        with mock.patch.object(self.driver, "disable_scale_set", side_effect=disable):
+            with self.assertRaises(JobStartedDenial) as failure:
+                self.broker.job_started(self.payload["allocation_id"], self.context(), now=NOW)
+        self.assertEqual("disable-failed", failure.exception.error_code)
+        self.assertEqual(55, self.clock.now)
+        self.assertEqual(0, self.ledger.get(self.payload["allocation_id"]).jobs_started)
+
+    def test_observation_timing_rejects_invalid_or_unsafe_values(self):
+        for timeout, interval in ((0, 1), (-1, 1), (51, 1), (True, 1), (float("nan"), 1), (float("inf"), 1), (45, 0), (45, -1), (45, float("inf")), (45, True), (1, 2)):
+            with self.subTest(timeout=timeout, interval=interval), self.assertRaises(RunnerJitError):
+                JobStartedObservationPolicy(timeout, interval)
+
+    def test_cli_passes_configured_observation_timing_to_broker(self):
+        broker = mock.Mock()
+        with mock.patch.object(BROKER_ENTRY.os, "geteuid", return_value=0), mock.patch.object(BROKER_ENTRY, "load_broker", return_value=broker) as load, mock.patch.object(BROKER_ENTRY, "serve"):
+            self.assertEqual(0, BROKER_ENTRY.main([
+                "--job-started-observation-timeout-seconds", "12",
+                "--job-started-poll-interval-seconds", "0.5", "serve",
+            ]))
+        self.assertEqual(JobStartedObservationPolicy(12, 0.5), load.call_args.args[0])
 
     def test_reboot_recovery_disables_drains_deletes_and_is_idempotent(self):
         self.broker.reserve(self.reservation, now=NOW)
