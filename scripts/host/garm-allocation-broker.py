@@ -23,6 +23,7 @@ from github_automation.runner_jit_broker import (
     ExternalLiveWorkflowJobVerifier,
     GarmCliAllocationDriver,
     JobStartedDenial,
+    JobStartedObservationPolicy,
     JobStartedContext,
     utc_now,
 )
@@ -42,7 +43,7 @@ def root_file(path: Path, maximum_size: int) -> bytes:
     return path.read_bytes()
 
 
-def load_broker() -> AllocationBroker:
+def load_broker(observation_policy: JobStartedObservationPolicy = JobStartedObservationPolicy()) -> AllocationBroker:
     config = json.loads(root_file(CONFIG, 65536))
     public_key = serialization.load_pem_public_key(root_file(PUBLIC_KEY, 4096))
     if not isinstance(public_key, ed25519.Ed25519PublicKey):
@@ -65,6 +66,7 @@ def load_broker() -> AllocationBroker:
         public_key,
         fingerprint,
         ExternalLiveWorkflowJobVerifier(Path(live_job_verifier)),
+        observation_policy=observation_policy,
     )
 
 
@@ -190,6 +192,9 @@ def serve(broker: AllocationBroker) -> None:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
+    defaults = JobStartedObservationPolicy()
+    parser.add_argument("--job-started-observation-timeout-seconds", type=float, default=defaults.timeout_seconds)
+    parser.add_argument("--job-started-poll-interval-seconds", type=float, default=defaults.poll_interval_seconds)
     sub = parser.add_subparsers(dest="command", required=True)
     reserve = sub.add_parser("reserve")
     reserve.add_argument("--reservation", required=True, type=Path)
@@ -214,7 +219,11 @@ def main(argv=None) -> int:
         print("allocation broker must run as root", file=sys.stderr)
         return 2
     try:
-        broker = load_broker()
+        policy = JobStartedObservationPolicy(
+            timeout_seconds=args.job_started_observation_timeout_seconds,
+            poll_interval_seconds=args.job_started_poll_interval_seconds,
+        )
+        broker = load_broker(policy)
         if args.command == "reserve":
             print(
                 json.dumps(

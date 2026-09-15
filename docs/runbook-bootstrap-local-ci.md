@@ -220,6 +220,51 @@ Después de reinstalar o reiniciar Windows, verificar los dos triggers, task
 `Running`, `LastTaskResult` igual a `267009` o `267045` y dos snapshots con
 `generated_at` creciente antes de dar la recuperación por terminada.
 
+### Carrera del job-started hook y observaciones tardías
+
+El broker verifica `runner-claim` con `garm-cli scaleset show` y
+`garm-cli scaleset runner list`; no consulta `garm.db` directamente. La vista
+puede llegar después de que GitHub marque el job `in_progress`. Luego verifica
+`live-job` mediante el helper de autoridad GitHub, cuya observación también
+puede tardar. Ninguna transición claim/start se admite sin ambas pruebas exactas.
+
+Ambas fases comparten un deadline monotónico de 45 segundos, con polling cada
+1 segundo; no consumen dos ventanas de 45 segundos. El CLI del broker acepta
+`--job-started-observation-timeout-seconds` y
+`--job-started-poll-interval-seconds` **antes de** `serve` (también en el
+`ExecStart` del unit correspondiente). Ejemplo de argumentos:
+`--job-started-observation-timeout-seconds 45 --job-started-poll-interval-seconds 1 serve`.
+Los parámetros deben ser números positivos finitos, con intervalo no mayor que
+el timeout; el timeout máximo es 50 segundos. El broker reserva al menos
+5 segundos para deshabilitar el scale set y otros 5 de margen frente al timeout
+HTTP de 60 segundos del hook. El disable comparte el tiempo restante de ese
+presupuesto y las transiciones vuelven a comprobar la vigencia de la allocation.
+Un cambio del unit debe seguir el flujo del live contract firmado; no alcanza
+con modificar una copia del checkout para cambiar el runtime instalado.
+
+Si vence la ventana sin observar el claim, la respuesta sigue siendo
+`phase=runner-claim error_code=claim-not-observed`; si falta la prueba GitHub,
+`phase=live-job error_code=job-not-verified`. No se habilita ejecución por timeout.
+
+### Credencial GARM de un sandbox retirado
+
+La installation `157052386` del sandbox retirado devuelve 404 al pedir
+`access_tokens`, según la evidencia del operador. Sus errores `failed to get
+rate limit` / `updating tools` ensucian el journal; son un problema separado de
+la carrera de observación del hook.
+
+El repositorio no tiene un procedimiento canónico de retiro selectivo por
+installation ID. `configure-garm-jit.sh` sí usa los comandos canónicos
+`github credentials list` y, para revertir una credencial que acaba de crear,
+`github credentials delete <credential-id>`, mediante `garm-cli-session.py run --`.
+Para identificar la credencial se puede inventariar con
+`/usr/local/lib/self-hosted-ci/garm-cli-session.py run -- --format json github credentials list`.
+El ID interno de la credencial no es el installation ID: antes de retirar una
+credencial existente hay que demostrar su vinculación exacta al sandbox y que
+ningún repo/organización activo la usa. El rollback del configurador no prueba
+esas condiciones para una credencial antigua; no ejecutar una baja por similitud
+ni sustituir `157052386` como argumento de `credentials delete`.
+
 ## Runtime JIT
 
 ### Prerrequisitos Incus y GARM

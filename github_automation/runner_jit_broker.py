@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import subprocess
 import tempfile
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -29,9 +30,9 @@ RUNNER_INSTALL_TEMPLATE = Path(
 )
 RUNNER_HOOK_DEADLINE_SECONDS = 60
 RUNNER_HOOK_SAFETY_MARGIN_SECONDS = 5
-RUNNER_CLAIM_ASSERT_ATTEMPTS = 3
-RUNNER_CLAIM_ASSERT_RETRY_SECONDS = 1
-RUNNER_CLAIM_ASSERT_BUDGET_SECONDS = 8
+JOB_STARTED_OBSERVATION_TIMEOUT_SECONDS = 45
+JOB_STARTED_POLL_INTERVAL_SECONDS = 1
+RUNNER_DISABLE_MINIMUM_BUDGET_SECONDS = 5
 SIGNED_CONTEXT_FIELDS = frozenset(
     {
         "repository_id",
@@ -55,6 +56,20 @@ JOB_STARTED_ERROR_CODES = {
     "runner-disable": frozenset({"disable-failed"}),
     "ledger-start": frozenset({"start-transition-denied"}),
 }
+
+
+@dataclass(frozen=True)
+class JobStartedObservationPolicy:
+    timeout_seconds: float = JOB_STARTED_OBSERVATION_TIMEOUT_SECONDS
+    poll_interval_seconds: float = JOB_STARTED_POLL_INTERVAL_SECONDS
+
+    def __post_init__(self):
+        for value in (self.timeout_seconds, self.poll_interval_seconds):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise RunnerJitError("job-started observation timing must be positive and finite")
+        maximum = RUNNER_HOOK_DEADLINE_SECONDS - RUNNER_HOOK_SAFETY_MARGIN_SECONDS - RUNNER_DISABLE_MINIMUM_BUDGET_SECONDS
+        if self.timeout_seconds > maximum or self.poll_interval_seconds > self.timeout_seconds:
+            raise RunnerJitError("job-started observation timing exceeds the hook budget")
 
 
 class JobStartedDenial(RunnerJitError):
@@ -146,7 +161,7 @@ class GarmAllocationDriver(Protocol):
         timeout_seconds: float,
     ) -> None: ...
 
-    def disable_scale_set(self, scale_set_id: str, scale_set_name: str) -> None: ...
+    def disable_scale_set(self, scale_set_id: str, scale_set_name: str, *, timeout_seconds: float | None = None) -> None: ...
 
     def drain_scale_set(self, scale_set_id: str, scale_set_name: str) -> None: ...
 
@@ -163,7 +178,7 @@ class GarmAllocationDriver(Protocol):
 
 class LiveWorkflowJobVerifier(Protocol):
     def verify(
-        self, payload: Mapping[str, Any], context: JobStartedContext
+        self, payload: Mapping[str, Any], context: JobStartedContext, *, timeout_seconds: float
     ) -> None: ...
 
 
@@ -177,50 +192,34 @@ class AllocationBroker:
         public_key: ed25519.Ed25519PublicKey,
         pinned_fingerprint: str,
         live_job_verifier: LiveWorkflowJobVerifier,
+        *,
+        observation_policy: JobStartedObservationPolicy = JobStartedObservationPolicy(),
     ) -> None:
         self.ledger = ledger
         self.driver = driver
         self.public_key = public_key
         self.pinned_fingerprint = pinned_fingerprint
         self.live_job_verifier = live_job_verifier
+        self.observation_policy = observation_policy
 
-    def _assert_runner_claim(
-        self,
-        scale_set_id: str,
-        scale_set_name: str,
-        runner_name: str,
-        payload: Mapping[str, Any],
-    ) -> None:
-        """Bound eventual GARM reads before any durable job transition."""
-
-        deadline = time.monotonic() + RUNNER_CLAIM_ASSERT_BUDGET_SECONDS
-        last_error: RunnerJitError | None = None
-        for attempt in range(RUNNER_CLAIM_ASSERT_ATTEMPTS):
+    def _wait_for_observation(self, observe, deadline: float) -> None:
+        """Retry read-only authority observations within one shared deadline."""
+        last_error = None
+        while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise RunnerJitError(
-                    "GARM runner claim observation exceeded its budget"
-                ) from last_error
+                raise RunnerJitError("job-started observation deadline expired") from last_error
             try:
-                self.driver.assert_runner_claim(
-                    scale_set_id,
-                    scale_set_name,
-                    runner_name,
-                    payload,
-                    timeout_seconds=remaining,
-                )
-                return
-            except RunnerJitError as exc:
+                observe(remaining)
+            except (OSError, ValueError) as exc:
                 last_error = exc
-                if attempt + 1 == RUNNER_CLAIM_ASSERT_ATTEMPTS:
-                    raise
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RunnerJitError(
-                        "GARM runner claim observation exceeded its budget"
-                    ) from exc
-                time.sleep(min(RUNNER_CLAIM_ASSERT_RETRY_SECONDS, remaining))
-        raise AssertionError("unreachable runner claim retry state")
+            else:
+                if time.monotonic() < deadline:
+                    return
+                raise RunnerJitError("job-started observation deadline expired")
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(self.observation_policy.poll_interval_seconds, remaining))
 
     def reserve(
         self, reservation: Mapping[str, Any], *, now: datetime
@@ -316,22 +315,32 @@ class AllocationBroker:
             raise JobStartedDenial(
                 "allocation", "binding-unavailable"
             ) from exc
+        started_at = time.monotonic()
+        observation_deadline = started_at + self.observation_policy.timeout_seconds
+        hook_deadline = started_at + RUNNER_HOOK_DEADLINE_SECONDS - RUNNER_HOOK_SAFETY_MARGIN_SECONDS
         try:
-            self._assert_runner_claim(
-                scale_set_id, scale_set_name, context.runner_name, payload
+            self._wait_for_observation(
+                lambda remaining: self.driver.assert_runner_claim(
+                    scale_set_id, scale_set_name, context.runner_name, payload,
+                    timeout_seconds=remaining,
+                ),
+                observation_deadline,
             )
         except RunnerJitError as exc:
             raise JobStartedDenial(
                 "runner-claim", "claim-not-observed"
             ) from exc
         try:
-            self.live_job_verifier.verify(payload, context)
+            self._wait_for_observation(
+                lambda remaining: self.live_job_verifier.verify(payload, context, timeout_seconds=remaining),
+                observation_deadline,
+            )
         except (OSError, ValueError, RunnerJitError) as exc:
             raise JobStartedDenial(
                 "live-job", "job-not-verified"
             ) from exc
         try:
-            self.ledger.transition(allocation_id, "claim", now=now)
+            self.ledger.transition(allocation_id, "claim", now=now + timedelta(seconds=time.monotonic() - started_at))
         except RunnerJitError as exc:
             raise JobStartedDenial(
                 "ledger-claim", "claim-transition-denied"
@@ -339,13 +348,18 @@ class AllocationBroker:
         # Disabling immediately after the unique runner claims the job prevents
         # a second registration/job while allowing the claimed job to proceed.
         try:
-            self.driver.disable_scale_set(scale_set_id, scale_set_name)
+            self.driver.disable_scale_set(
+                scale_set_id, scale_set_name,
+                timeout_seconds=hook_deadline - time.monotonic(),
+            )
+            if time.monotonic() >= hook_deadline:
+                raise RunnerJitError("job-started hook deadline expired")
         except (OSError, ValueError, RunnerJitError) as exc:
             raise JobStartedDenial(
                 "runner-disable", "disable-failed"
             ) from exc
         try:
-            self.ledger.transition(allocation_id, "start", now=now)
+            self.ledger.transition(allocation_id, "start", now=now + timedelta(seconds=time.monotonic() - started_at))
         except RunnerJitError as exc:
             raise JobStartedDenial(
                 "ledger-start", "start-transition-denied"
@@ -876,10 +890,20 @@ systemctl daemon-reexec
                 "job-started runner is not the sole allocation registration"
             )
 
-    def disable_scale_set(self, scale_set_id: str, scale_set_name: str) -> None:
-        self._show_exact(scale_set_id, scale_set_name)
-        self._run("scaleset", "update", scale_set_id, "--enabled=false")
-        self._show_exact(scale_set_id, scale_set_name, False)
+    def disable_scale_set(self, scale_set_id: str, scale_set_name: str, *, timeout_seconds: float | None = None) -> None:
+        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+
+        def remaining():
+            if deadline is None:
+                return None
+            budget = deadline - time.monotonic()
+            if budget <= 0:
+                raise RunnerJitError("GARM disable deadline expired")
+            return budget
+
+        self._show_exact(scale_set_id, scale_set_name, timeout_seconds=remaining())
+        self._run("scaleset", "update", scale_set_id, "--enabled=false", timeout_seconds=remaining())
+        self._show_exact(scale_set_id, scale_set_name, False, timeout_seconds=remaining())
 
     def drain_scale_set(self, scale_set_id: str, scale_set_name: str) -> None:
         deadline = time.monotonic() + self._timeout
@@ -958,15 +982,13 @@ systemctl daemon-reexec
 class ExternalLiveWorkflowJobVerifier:
     """Fail-closed adapter to the separately authenticated GitHub authority lane."""
 
-    # Three complete, independently authenticated observations fit inside the
-    # runner hook's 60-second fail-closed request deadline: 3*15s + 2*1s.
-    MAX_ATTEMPTS = 3
-    RETRY_DELAY_SECONDS = 1
-
     def __init__(self, executable: Path) -> None:
         self.executable = executable
 
-    def verify(self, payload: Mapping[str, Any], context: JobStartedContext) -> None:
+    def verify(self, payload: Mapping[str, Any], context: JobStartedContext, *, timeout_seconds: float) -> None:
+        # The broker owns retries and shares this budget with runner-claim.
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise RunnerJitError("live workflow-job verifier budget is invalid")
         info = os.lstat(self.executable)
         if (
             not self.executable.is_file()
@@ -990,27 +1012,19 @@ class ExternalLiveWorkflowJobVerifier:
             "labels": payload["labels"],
             "required_status": "in_progress",
         }
-        result = None
-        for attempt in range(self.MAX_ATTEMPTS):
-            try:
-                result = subprocess.run(
-                    [str(self.executable)],
-                    input=json.dumps(request, sort_keys=True, separators=(",", ":")),
-                    text=True,
-                    capture_output=True,
-                    timeout=15,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired:
-                result = None
-            if result is not None and result.returncode == 0:
-                break
-            if attempt + 1 == self.MAX_ATTEMPTS:
-                raise RunnerJitError(
-                    "GitHub live workflow-job verification did not converge"
-                )
-            time.sleep(self.RETRY_DELAY_SECONDS)
-        assert result is not None
+        try:
+            result = subprocess.run(
+                [str(self.executable)],
+                input=json.dumps(request, sort_keys=True, separators=(",", ":")),
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RunnerJitError("GitHub live workflow-job verification did not converge") from exc
+        if result.returncode != 0:
+            raise RunnerJitError("GitHub live workflow-job verification did not converge")
         try:
             observed = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
