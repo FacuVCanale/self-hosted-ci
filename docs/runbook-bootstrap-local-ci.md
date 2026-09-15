@@ -1098,3 +1098,30 @@ de reconciliar activación o provisionar. Si había una aprobación de activaci�
 la remueve exclusivamente el workflow canónico de deactivación después de probar
 cero runtime. Un fallo conserva sólo diagnósticos redactados y deja el sistema
 inactivo, sin activation/runtime-ready nuevos.
+
+## Deploy del package al host
+
+Desde la Mac, exportá un commit trackeado y revisá primero el plan JSON. Usá
+el alias SSH de administración, nunca la identidad de servicio:
+
+```bash
+python3 scripts/host/deploy-host-package.py --ssh-target <alias-admin> --ref HEAD
+python3 scripts/host/deploy-host-package.py --ssh-target <alias-admin> --ref HEAD --apply
+```
+
+`--dry-run` equivale al plan por defecto. El árbol de trabajo debe coincidir
+con el ref; `--allow-dirty` permite exportar ese ref, excluyendo los cambios
+locales. El deploy genera `PACKAGE_SHA` y `PACKAGE_MANIFEST.json`, verifica
+cada SHA-256 en Windows y conserva el package anterior bajo
+`C:\ProgramData\self-hosted-ci\package-before-<sha-anterior-o-unknown>-<yyyyMMddHHmmss>`.
+Los defaults son `--package-path C:\ProgramData\self-hosted-ci\package` y
+`--backup-root C:\ProgramData\self-hosted-ci`. El host requiere `tar.exe`
+(Windows 10+) y PowerShell; la sesión SSH debe tener privilegios admin.
+El manifest incluye `PACKAGE_SHA` y todos los archivos exportados, excluyendo
+su propio JSON. La salida informa `status`, `deployed_sha`, `previous_sha`,
+`backup_path` y `verified_files`; un fallo devuelve exit 1.
+
+**Deploy primero; después uninstall + install del supervisor** desde una
+PowerShell elevada, siguiendo el procedimiento de reinstalación de este
+runbook. `install-health-supervisor.ps1` copia `run-health-supervisor.ps1`
+desde el package: actualizar solamente el package no actualiza esa copia.
