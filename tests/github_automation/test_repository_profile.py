@@ -38,7 +38,7 @@ INVENTORY_TESTS = {
     "src/modules/inference/mrv-share.pg.test.ts",
     "src/modules/inference/mrv-share-boundaries.pg.test.ts",
 }
-INVENTORY_MINIMUM_COMMANDS = (
+INVENTORY_COMMANDS = (
     (
         "run", "test", "--pattern", "src/modules/inference/mrv-share.pg.test.ts",
         "--min-tests", "10",
@@ -46,6 +46,12 @@ INVENTORY_MINIMUM_COMMANDS = (
     (
         "run", "test", "--pattern",
         "src/modules/inference/mrv-share-boundaries.pg.test.ts", "--min-tests", "4",
+    ),
+    ("test", "src/database/migration-0072-site-inflight.pg.test.ts"),
+    ("test", "src/modules/inference/inference-run-site-inflight.pg.test.ts"),
+    (
+        "test",
+        "src/modules/inference/inventory-to-report.stage-push.contract.pg.test.ts",
     ),
 )
 E2E_PG_TESTS = {
@@ -982,7 +988,7 @@ test -d {component}/node_modules
         self.assertEqual(INVENTORY_TESTS, set(re.findall(r"src/[A-Za-z0-9_./-]+\.pg\.test\.ts", inventory_block)))
         self.assertEqual(1, text.count("export INVENTORY_REPORT_CONTRACT=true"))
 
-    def test_inventory_minimum_commands_preserve_argv_environment_and_fail_fast(self):
+    def test_inventory_commands_preserve_exact_sequence_argv_environment_and_fail_fast(self):
         text = SCRIPT.read_text()
         backend_phase = text[
             text.index("phase_backend() {") : text.index("\nphase_frontend() {")
@@ -1003,10 +1009,13 @@ WATERFALL_ROOT=/opt/self-hosted-ci/overworld-deps/waterfall
 BACKEND_PGPORT=55432
 MINIO_PORT=59002
 bun() {{
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$*" "$PWD" "$INVENTORY_REPORT_CONTRACT" "$TEST_DATABASE_URL" \
-    "$WATERFALL_SOURCE_PATH" "$S3_BUCKET" "$S3_ENDPOINT" \
-    "$S3_PUBLIC_ENDPOINT" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"
+  "$PYTHON" -c 'import json, os, sys; print(json.dumps({{
+    "argv": sys.argv[1:], "cwd": os.getcwd(),
+    "env": [os.environ.get(key) for key in (
+      "INVENTORY_REPORT_CONTRACT", "TEST_DATABASE_URL", "WATERFALL_SOURCE_PATH",
+      "S3_BUCKET", "S3_ENDPOINT", "S3_PUBLIC_ENDPOINT",
+      "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")]
+  }}))' "$@"
   [[ -z "{fail_pattern}" || "$*" != *"{fail_pattern}"* ]] || return 23
 }}
 {inventory_block}
@@ -1017,11 +1026,12 @@ bun() {{
                     cwd=root,
                     capture_output=True,
                     text=True,
+                    env={**os.environ, "PYTHON": sys.executable},
                 )
 
         passed = run()
         self.assertEqual(0, passed.returncode, passed.stderr)
-        rows = [line.split("\t") for line in passed.stdout.splitlines()]
+        observed = [json.loads(line) for line in passed.stdout.splitlines()]
         expected_environment = [
             "true",
             "postgresql://overworld@127.0.0.1:55432/postgres",
@@ -1032,23 +1042,22 @@ bun() {{
             "minioadmin",
             "minioadmin",
         ]
-        minimum_rows = [
-            row
-            for row in rows
-            if tuple(row[0].split()) in INVENTORY_MINIMUM_COMMANDS
-        ]
         self.assertEqual(
-            [" ".join(command) for command in INVENTORY_MINIMUM_COMMANDS],
-            [row[0] for row in minimum_rows],
+            [list(command) for command in INVENTORY_COMMANDS],
+            [call["argv"] for call in observed],
         )
-        for row in minimum_rows:
-            self.assertTrue(row[1].endswith("/backend"))
-            self.assertEqual(expected_environment, row[2:])
+        for call in observed:
+            self.assertTrue(call["cwd"].endswith("/backend"))
+            self.assertEqual(expected_environment, call["env"])
 
-        failed = run(fail_pattern="src/modules/inference/mrv-share.pg.test.ts")
-        self.assertEqual(23, failed.returncode, failed.stderr)
-        self.assertIn(" ".join(INVENTORY_MINIMUM_COMMANDS[0]), failed.stdout)
-        self.assertNotIn(" ".join(INVENTORY_MINIMUM_COMMANDS[1]), failed.stdout)
+        for failed_index in (0, 1):
+            failed = run(fail_pattern=INVENTORY_COMMANDS[failed_index][3])
+            self.assertEqual(23, failed.returncode, failed.stderr)
+            failed_calls = [json.loads(line) for line in failed.stdout.splitlines()]
+            self.assertEqual(
+                [list(command) for command in INVENTORY_COMMANDS[: failed_index + 1]],
+                [call["argv"] for call in failed_calls],
+            )
 
     def test_e2e_defers_frontend_until_all_pg_regressions_finish(self):
         text = SCRIPT.read_text()
