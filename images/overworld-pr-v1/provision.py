@@ -244,7 +244,7 @@ def require_profile(value: object, waterfall_commit: str) -> dict[str, object]:
     }:
         raise SystemExit("repository profile shape drifted")
     expected_toolchain = {
-        "bun": "1.4.0", "garm": "0.2.1", "minio": "RELEASE.2025-07-23T15-54-02Z",
+        "bun": "1.4.0", "garm": "0.2.1", "minio": "RELEASE.2025-09-07T16-13-09Z",
         "node": "22.23.2",
         "playwright": "1.59.1", "postgresql_backend": "16", "postgis_backend": "3.4",
         "postgresql_e2e": "17", "postgis_e2e": "3.5", "python": "3.12", "uv": "0.8.22",
