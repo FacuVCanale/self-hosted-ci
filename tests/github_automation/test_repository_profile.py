@@ -48,6 +48,7 @@ INVENTORY_COMMANDS = (
         "src/modules/inference/inventory-to-report.stage-push.contract.pg.test.ts",
     ),
 )
+SILVER_PG_TEST = "src/modules/producer/sites/towers/sensor-data/gapfill/service.pg.test.ts"
 E2E_PG_TESTS = {
     "src/modules/organization/invitations/service.pg.test.ts",
     "src/modules/auth/session.pg.test.ts",
@@ -76,7 +77,7 @@ E2E_PG_TESTS = {
     "src/metrics/engine-adoption.pg.test.ts",
     "src/metrics/metrics-mv-gated.pg.test.ts",
     "src/database/migrate.pg.test.ts",
-    "src/modules/producer/sites/towers/sensor-data/gapfill/service.pg.test.ts",
+    SILVER_PG_TEST,
     "src/modules/internal/inference/idempotency.pg.test.ts",
     "src/modules/internal/inference/runs/runs.pg.test.ts",
     "src/modules/internal/cycles/closure-inputs/closure-inputs.pg.test.ts",
@@ -86,7 +87,6 @@ E2E_PG_TESTS = {
     "src/modules/internal/towers/sensor-data/export.pg.test.ts",
 }
 BACKFILL_TEST = "src/modules/internal/towers/sensor-data/platform-export-backfill.test.ts"
-SILVER_PG_TEST = "src/modules/producer/sites/towers/sensor-data/gapfill/service.pg.test.ts"
 
 
 class RepositoryProfileTests(unittest.TestCase):
@@ -1210,6 +1210,8 @@ printf 'after:%s\n' "${{BUN_OPTIONS-unset}}" >> "$TRACE"
         ]
         pg_calls = [call for call in bun_calls if call["argv"][0] == "test"]
         self.assertEqual(len(E2E_PG_TESTS), len(pg_calls))
+        for call in pg_calls:
+            self.assertIsNone(call["env"][3])
         silver_index = next(
             index
             for index, call in enumerate(pg_calls)
