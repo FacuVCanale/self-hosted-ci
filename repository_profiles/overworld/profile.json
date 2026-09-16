@@ -5,7 +5,7 @@
   "image_marker": "overworld-ci-jit-v1",
   "runner_memory_bytes": 4294967296,
   "source_workflow_path": ".github/workflows/ci.yml",
-  "source_workflow_sha256": "05f0ad971741a116e72423e80c9a7f83c49a423d1f68b2dfea908378f01781f0",
+  "source_workflow_sha256": "d02746bb0ac067961fb11c31375c78a55946eea2d8bbe3e23f3046e7fb661cef",
   "dependency_snapshots": {
     "backend": {
       "lock_path": "backend/bun.lock",
@@ -19,7 +19,7 @@
     }
   },
   "runner_script": "repository_profiles/overworld/run-overworld-ci.sh",
-  "runner_script_sha256": "4aa265c496ad6931a61db51dc5039a07664931ab3fc6d5e26684a7fb2c214e35",
+  "runner_script_sha256": "97e3586a3f5b408e3104bf9e709c8d36a4142793a73ff6c3020671af261c254a",
   "phases": ["backend", "frontend", "e2e"],
   "toolchain": {
     "bun": "1.4.0",
