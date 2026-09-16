@@ -13,6 +13,7 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import urllib.parse
 from unittest import mock
 
 
@@ -734,6 +735,38 @@ class OverworldProfileImageTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "broken"):
                 module.verify_frontend_eslint_link(root)
 
+    def verify_expected_toolchain(self) -> dict[str, str]:
+        tree = ast.parse((PROFILE / "verify.py").read_text(encoding="utf-8"))
+        literals = [
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "expected_toolchain"
+                for target in node.targets
+            )
+        ]
+        self.assertEqual(1, len(literals))
+        return ast.literal_eval(literals[0])
+
+    def test_in_image_toolchain_pins_match_the_repository_profile(self) -> None:
+        profile = json.loads(
+            (ROOT / "repository_profiles/overworld/profile.json").read_text(encoding="utf-8")
+        )
+        waterfall = profile["toolchain"]["waterfall_revision"]
+        spec = importlib.util.spec_from_file_location(
+            "overworld_image_provision_toolchain", PROFILE / "provision.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertIs(module.require_profile(profile, waterfall), profile)
+        drifted = json.loads(json.dumps(profile))
+        drifted["toolchain"]["minio"] = "RELEASE.1970-01-01T00-00-00Z"
+        with self.assertRaisesRegex(SystemExit, "repository profile identity drifted"):
+            module.require_profile(drifted, waterfall)
+        self.assertEqual(profile["toolchain"], self.verify_expected_toolchain())
+
     def test_manifest_has_exact_profile_and_immutable_artifact_sources(self) -> None:
         manifest = json.loads((PROFILE / "manifest.json").read_text(encoding="utf-8"))
         spec = importlib.util.spec_from_file_location("overworld_image_provision_manifest", PROFILE / "provision.py")
@@ -782,6 +815,34 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertEqual("16.2.3", manifest["artifacts"]["next"]["version"])
         self.assertEqual("1217", manifest["artifacts"]["chromium"]["revision"])
         self.assertEqual("1217", manifest["artifacts"]["chromium_headless_shell"]["revision"])
+        self.assertEqual(
+            {
+                "version": "RELEASE.2025-09-07T16-13-09Z",
+                "url": (
+                    "https://github.com/minio/minio/releases/download/"
+                    "RELEASE.2025-09-07T16-13-09Z/minio.linux-amd64.RELEASE.2025-09-07T16-13-09Z"
+                ),
+                "sha256": "7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f",
+            },
+            manifest["artifacts"]["minio"],
+        )
+        self.assertEqual(
+            {
+                "version": "RELEASE.2025-08-13T08-35-41Z",
+                "url": (
+                    "https://github.com/minio/mc/releases/download/"
+                    "RELEASE.2025-08-13T08-35-41Z/mc.linux-amd64.RELEASE.2025-08-13T08-35-41Z"
+                ),
+                "sha256": "01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891",
+            },
+            manifest["artifacts"]["mc"],
+        )
+        profile = json.loads(
+            (ROOT / "repository_profiles/overworld/profile.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            manifest["artifacts"]["minio"]["version"], profile["toolchain"]["minio"]
+        )
         for artifact in manifest["artifacts"].values():
             self.assertTrue(artifact["url"].startswith("https://"))
             self.assertRegex(artifact["sha256"], r"^[0-9a-f]{64}$")
@@ -1218,12 +1279,21 @@ cleanup
             "registry.npmjs.org",
             "pypi.org",
             "files.pythonhosted.org",
-            "dl.min.io",
         ):
             self.assertIn(domain, policy)
         self.assertNotIn("dstdomain .githubusercontent.com", policy)
         self.assertNotIn("dstdomain .com", policy)
         self.assertIn("http_access deny all", policy)
+        acl = [line for line in policy.splitlines() if line.startswith("acl build_domains dstdomain ")]
+        self.assertEqual(1, len(acl))
+        allowed = set(acl[0].removeprefix("acl build_domains dstdomain ").split())
+        manifest = json.loads((PROFILE / "manifest.json").read_text(encoding="utf-8"))
+        pinned_hosts = {
+            urllib.parse.urlsplit(artifact["url"]).hostname
+            for artifact in manifest["artifacts"].values()
+        }
+        pinned_hosts.add(urllib.parse.urlsplit(manifest["pgdg"]["key_url"]).hostname)
+        self.assertLessEqual(pinned_hosts, allowed)
 
     def test_provisioner_emits_marker_inventory_and_rejects_credentials(self) -> None:
         source = (PROFILE / "provision.py").read_text(encoding="utf-8")

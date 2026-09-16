@@ -93,7 +93,7 @@ def _exact_toolchain(value: object) -> Mapping[str, str]:
     expected = {
         "bun": "1.4.0",
         "garm": "0.2.1",
-        "minio": "RELEASE.2025-07-23T15-54-02Z",
+        "minio": "RELEASE.2025-09-07T16-13-09Z",
         "node": "22.23.2",
         "playwright": "1.59.1",
         "postgresql_backend": "16",
