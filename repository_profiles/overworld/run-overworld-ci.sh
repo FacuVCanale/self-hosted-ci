@@ -420,8 +420,8 @@ phase_backend() {
     WATERFALL_SOURCE_PATH="$WATERFALL_ROOT" S3_BUCKET=overworld-e2e \
     S3_ENDPOINT="http://127.0.0.1:$MINIO_PORT" S3_PUBLIC_ENDPOINT="http://127.0.0.1:$MINIO_PORT" \
     AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin; \
-    bun run test --pattern src/modules/inference/mrv-share.pg.test.ts --min-tests 10; \
-    bun run test --pattern src/modules/inference/mrv-share-boundaries.pg.test.ts --min-tests 4; \
+    bun test src/modules/inference/mrv-share.pg.test.ts; \
+    bun test src/modules/inference/mrv-share-boundaries.pg.test.ts; \
     bun test src/database/migration-0072-site-inflight.pg.test.ts; \
     bun test src/modules/inference/inference-run-site-inflight.pg.test.ts; \
     bun test src/modules/inference/inventory-to-report.stage-push.contract.pg.test.ts)

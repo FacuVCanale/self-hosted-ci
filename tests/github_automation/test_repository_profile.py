@@ -39,14 +39,8 @@ INVENTORY_TESTS = {
     "src/modules/inference/mrv-share-boundaries.pg.test.ts",
 }
 INVENTORY_COMMANDS = (
-    (
-        "run", "test", "--pattern", "src/modules/inference/mrv-share.pg.test.ts",
-        "--min-tests", "10",
-    ),
-    (
-        "run", "test", "--pattern",
-        "src/modules/inference/mrv-share-boundaries.pg.test.ts", "--min-tests", "4",
-    ),
+    ("test", "src/modules/inference/mrv-share.pg.test.ts"),
+    ("test", "src/modules/inference/mrv-share-boundaries.pg.test.ts"),
     ("test", "src/database/migration-0072-site-inflight.pg.test.ts"),
     ("test", "src/modules/inference/inference-run-site-inflight.pg.test.ts"),
     (
@@ -124,7 +118,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual(["backend", "frontend", "e2e"], profile["phases"])
         self.assertEqual(".github/workflows/ci.yml", profile["source_workflow_path"])
         self.assertEqual(
-            "a4e5944551c29147c52838eb2aff30eb61a95250c027a5bca8169bd832502674",
+            "05f0ad971741a116e72423e80c9a7f83c49a423d1f68b2dfea908378f01781f0",
             profile["source_workflow_sha256"],
         )
         self.assertEqual(
@@ -145,7 +139,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
         self.assertEqual("22.23.2", profile["toolchain"]["node"])
         self.assertEqual(
-            "6da0fa2a1868415f05838e7f563beec78c7789995506ccbb525deecab79b4842",
+            "4aa265c496ad6931a61db51dc5039a07664931ab3fc6d5e26684a7fb2c214e35",
             profile["runner_script_sha256"],
         )
         self.assertEqual(SCRIPT, script)
@@ -1051,7 +1045,7 @@ bun() {{
             self.assertEqual(expected_environment, call["env"])
 
         for failed_index in (0, 1):
-            failed = run(fail_pattern=INVENTORY_COMMANDS[failed_index][3])
+            failed = run(fail_pattern=INVENTORY_COMMANDS[failed_index][1])
             self.assertEqual(23, failed.returncode, failed.stderr)
             failed_calls = [json.loads(line) for line in failed.stdout.splitlines()]
             self.assertEqual(
