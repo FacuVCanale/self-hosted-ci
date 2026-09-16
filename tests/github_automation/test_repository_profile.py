@@ -35,7 +35,20 @@ INVENTORY_TESTS = {
     "src/database/migration-0072-site-inflight.pg.test.ts",
     "src/modules/inference/inference-run-site-inflight.pg.test.ts",
     "src/modules/inference/inventory-to-report.stage-push.contract.pg.test.ts",
+    "src/modules/inference/mrv-share.pg.test.ts",
+    "src/modules/inference/mrv-share-boundaries.pg.test.ts",
 }
+INVENTORY_COMMANDS = (
+    ("test", "src/modules/inference/mrv-share.pg.test.ts"),
+    ("test", "src/modules/inference/mrv-share-boundaries.pg.test.ts"),
+    ("test", "src/database/migration-0072-site-inflight.pg.test.ts"),
+    ("test", "src/modules/inference/inference-run-site-inflight.pg.test.ts"),
+    (
+        "test",
+        "src/modules/inference/inventory-to-report.stage-push.contract.pg.test.ts",
+    ),
+)
+SILVER_PG_TEST = "src/modules/producer/sites/towers/sensor-data/gapfill/service.pg.test.ts"
 E2E_PG_TESTS = {
     "src/modules/organization/invitations/service.pg.test.ts",
     "src/modules/auth/session.pg.test.ts",
@@ -64,6 +77,7 @@ E2E_PG_TESTS = {
     "src/metrics/engine-adoption.pg.test.ts",
     "src/metrics/metrics-mv-gated.pg.test.ts",
     "src/database/migrate.pg.test.ts",
+    SILVER_PG_TEST,
     "src/modules/internal/inference/idempotency.pg.test.ts",
     "src/modules/internal/inference/runs/runs.pg.test.ts",
     "src/modules/internal/cycles/closure-inputs/closure-inputs.pg.test.ts",
@@ -72,6 +86,7 @@ E2E_PG_TESTS = {
     "src/modules/methodology-obligations/service.pg.test.ts",
     "src/modules/internal/towers/sensor-data/export.pg.test.ts",
 }
+BACKFILL_TEST = "src/modules/internal/towers/sensor-data/platform-export-backfill.test.ts"
 
 
 class RepositoryProfileTests(unittest.TestCase):
@@ -106,7 +121,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual(["backend", "frontend", "e2e"], profile["phases"])
         self.assertEqual(".github/workflows/ci.yml", profile["source_workflow_path"])
         self.assertEqual(
-            "b829e0b180bd1ae1ecd9809f33e218ac1df6ff9d37935e2ba5ddd98e7d33baa5",
+            "d02746bb0ac067961fb11c31375c78a55946eea2d8bbe3e23f3046e7fb661cef",
             profile["source_workflow_sha256"],
         )
         self.assertEqual(
@@ -127,7 +142,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
         self.assertEqual("22.23.2", profile["toolchain"]["node"])
         self.assertEqual(
-            "0af175f2a43609f9d2d78ed4a7e048ce096f6a7e21eada3e082b36efec246eb6",
+            "97e3586a3f5b408e3104bf9e709c8d36a4142793a73ff6c3020671af261c254a",
             profile["runner_script_sha256"],
         )
         self.assertEqual(SCRIPT, script)
@@ -970,6 +985,145 @@ test -d {component}/node_modules
         self.assertEqual(INVENTORY_TESTS, set(re.findall(r"src/[A-Za-z0-9_./-]+\.pg\.test\.ts", inventory_block)))
         self.assertEqual(1, text.count("export INVENTORY_REPORT_CONTRACT=true"))
 
+    def test_inventory_commands_preserve_exact_sequence_argv_environment_and_fail_fast(self):
+        text = SCRIPT.read_text()
+        backend_phase = text[
+            text.index("phase_backend() {") : text.index("\nphase_frontend() {")
+        ]
+        inventory_block = backend_phase[
+            backend_phase.index(
+                "  (cd backend && export INVENTORY_REPORT_CONTRACT=true"
+            ) : backend_phase.index("\n  stop_local_services")
+        ]
+
+        def run(*, fail_pattern: str = "") -> subprocess.CompletedProcess[str]:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "backend").mkdir()
+                command = f"""
+set -euo pipefail
+WATERFALL_ROOT=/opt/self-hosted-ci/overworld-deps/waterfall
+BACKEND_PGPORT=55432
+MINIO_PORT=59002
+bun() {{
+  "$PYTHON" -c 'import json, os, sys; print(json.dumps({{
+    "argv": sys.argv[1:], "cwd": os.getcwd(),
+    "env": [os.environ.get(key) for key in (
+      "INVENTORY_REPORT_CONTRACT", "TEST_DATABASE_URL", "WATERFALL_SOURCE_PATH",
+      "S3_BUCKET", "S3_ENDPOINT", "S3_PUBLIC_ENDPOINT",
+      "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")]
+  }}))' "$@"
+  [[ -z "{fail_pattern}" || "$*" != *"{fail_pattern}"* ]] || return 23
+}}
+{inventory_block}
+"""
+                return subprocess.run(
+                    ["bash"],
+                    input=command,
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "PYTHON": sys.executable},
+                )
+
+        passed = run()
+        self.assertEqual(0, passed.returncode, passed.stderr)
+        observed = [json.loads(line) for line in passed.stdout.splitlines()]
+        expected_environment = [
+            "true",
+            "postgresql://overworld@127.0.0.1:55432/postgres",
+            "/opt/self-hosted-ci/overworld-deps/waterfall",
+            "overworld-e2e",
+            "http://127.0.0.1:59002",
+            "http://127.0.0.1:59002",
+            "minioadmin",
+            "minioadmin",
+        ]
+        self.assertEqual(
+            [list(command) for command in INVENTORY_COMMANDS],
+            [call["argv"] for call in observed],
+        )
+        for call in observed:
+            self.assertTrue(call["cwd"].endswith("/backend"))
+            self.assertEqual(expected_environment, call["env"])
+
+        for failed_index in (0, 1):
+            failed = run(fail_pattern=INVENTORY_COMMANDS[failed_index][1])
+            self.assertEqual(23, failed.returncode, failed.stderr)
+            failed_calls = [json.loads(line) for line in failed.stdout.splitlines()]
+            self.assertEqual(
+                [list(command) for command in INVENTORY_COMMANDS[: failed_index + 1]],
+                [call["argv"] for call in failed_calls],
+            )
+
+    def test_waterfall_backfill_preserves_order_argv_cwd_environment_and_exit_status(self):
+        text = SCRIPT.read_text()
+        backend_phase = text[
+            text.index("phase_backend() {") : text.index("\nphase_frontend() {")
+        ]
+        command = f"  (cd backend && bun test {BACKFILL_TEST})"
+        self.assertEqual(1, backend_phase.count(command))
+        lint = "  (cd backend && bun run lint)"
+        typecheck = "  (cd backend && bun run typecheck)"
+        self.assertLess(backend_phase.index(command), backend_phase.index(lint))
+        environment = "\n".join(
+            line
+            for line in backend_phase.splitlines()
+            if line.startswith("  export ") and "WATERFALL_SOURCE_PATH" in line
+        )
+        self.assertEqual(
+            '  export NODE_ENV=test WATERFALL_SOURCE_PATH="$WATERFALL_ROOT"',
+            environment,
+        )
+        commands = backend_phase[
+            backend_phase.index(command) : backend_phase.index(typecheck)
+            + len(typecheck)
+        ]
+
+        for expected_status in (0, 23):
+            with self.subTest(
+                expected_status=expected_status
+            ), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "backend").mkdir()
+                harness = f"""
+set -euo pipefail
+WATERFALL_ROOT=/opt/self-hosted-ci/overworld-deps/waterfall
+{environment}
+bun() {{
+  "$PYTHON" -c 'import json, os, sys; print(json.dumps({{
+    "argv": sys.argv[1:], "cwd": os.getcwd(),
+    "waterfall_source_path": os.environ.get("WATERFALL_SOURCE_PATH")
+  }}))' "$@"
+  [[ "$*" != "test {BACKFILL_TEST}" || "$FAKE_BUN_EXIT" == 0 ]] || return "$FAKE_BUN_EXIT"
+}}
+{commands}
+"""
+                result = subprocess.run(
+                    ["bash"],
+                    cwd=root,
+                    input=harness,
+                    capture_output=True,
+                    text=True,
+                    env={
+                        **os.environ,
+                        "PYTHON": sys.executable,
+                        "FAKE_BUN_EXIT": str(expected_status),
+                    },
+                )
+                self.assertEqual(expected_status, result.returncode, result.stderr)
+                observed = [json.loads(line) for line in result.stdout.splitlines()]
+                self.assertEqual(["test", BACKFILL_TEST], observed[0]["argv"])
+                self.assertEqual((root / "backend").resolve(), Path(observed[0]["cwd"]))
+                self.assertEqual(
+                    "/opt/self-hosted-ci/overworld-deps/waterfall",
+                    observed[0]["waterfall_source_path"],
+                )
+                expected_commands = [["test", BACKFILL_TEST]]
+                if expected_status == 0:
+                    expected_commands.extend((["run", "lint"], ["run", "typecheck"]))
+                self.assertEqual(expected_commands, [call["argv"] for call in observed])
+
     def test_e2e_defers_frontend_until_all_pg_regressions_finish(self):
         text = SCRIPT.read_text()
         playwright_function = text[
@@ -994,8 +1148,12 @@ test -d {component}/node_modules
         self.assertLess(clean_backend, frontend)
         self.assertLess(frontend, playwright)
 
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+        def run(
+            *, fail_pattern: str = ""
+        ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+            directory = tempfile.TemporaryDirectory()
+            self.addCleanup(directory.cleanup)
+            root = Path(directory.name)
             (root / "backend").mkdir()
             (root / "frontend").mkdir()
             trace = root / "trace"
@@ -1018,7 +1176,14 @@ stop_local_service() {{ printf 'stop:%s\n' "$1" >> "$TRACE"; }}
 start_frontend() {{ printf 'frontend\n' >> "$TRACE"; }}
 stop_local_services() {{ printf 'stop:all\n' >> "$TRACE"; }}
 stop_postgres() {{ printf 'stop:postgres\n' >> "$TRACE"; }}
-bun() {{ printf 'bun:%s:%s\n' "${{BUN_OPTIONS-unset}}" "$*" >> "$TRACE"; }}
+bun() {{
+  "$PYTHON" -c 'import json, os, sys; print("bun-json:" + json.dumps({{
+    "argv": sys.argv[1:], "cwd": os.getcwd(),
+    "env": [os.environ.get(key) for key in (
+      "TEST_DATABASE_URL", "JWT_SECRET", "BETTER_AUTH_SECRET", "BUN_OPTIONS")]
+  }}))' "$@" >> "$TRACE"
+  [[ -z "{fail_pattern}" || "$*" != *"{fail_pattern}"* ]] || return 23
+}}
 phase_e2e
 printf 'after:%s\n' "${{BUN_OPTIONS-unset}}" >> "$TRACE"
 """
@@ -1028,17 +1193,89 @@ printf 'after:%s\n' "${{BUN_OPTIONS-unset}}" >> "$TRACE"
                 input=command,
                 capture_output=True,
                 text=True,
+                env={**os.environ, "PYTHON": sys.executable},
             )
-            self.assertEqual(0, result.returncode, result.stderr)
-            events = trace.read_text().splitlines()
-            self.assertEqual(["build:standalone", "postgres", "minio", "backend", "stop:backend"], events[:5])
-            pg_events = [event for event in events if event.startswith("bun:unset:test ")]
-            self.assertEqual(len(E2E_PG_TESTS), len(pg_events))
-            last_pg = max(events.index(event) for event in pg_events)
-            self.assertEqual("backend", events[last_pg + 1])
-            self.assertEqual("frontend", events[last_pg + 2])
-            self.assertTrue(events[last_pg + 3].startswith("bun:--smol:--smol ./node_modules/.bin/playwright test "))
-            self.assertEqual(["stop:all", "stop:postgres", "after:unset"], events[-3:])
+            return result, trace.read_text().splitlines()
+
+        result, events = run()
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            ["build:standalone", "postgres", "minio", "backend", "stop:backend"],
+            events[:5],
+        )
+        bun_calls = [
+            json.loads(event.removeprefix("bun-json:"))
+            for event in events
+            if event.startswith("bun-json:")
+        ]
+        pg_calls = [call for call in bun_calls if call["argv"][0] == "test"]
+        self.assertEqual(len(E2E_PG_TESTS), len(pg_calls))
+        for call in pg_calls:
+            self.assertIsNone(call["env"][3])
+        silver_index = next(
+            index
+            for index, call in enumerate(pg_calls)
+            if call["argv"] == ["test", SILVER_PG_TEST]
+        )
+        self.assertEqual(
+            ["test", "src/database/migrate.pg.test.ts"],
+            pg_calls[silver_index - 1]["argv"],
+        )
+        self.assertEqual(
+            ["test", "src/modules/internal/inference/idempotency.pg.test.ts"],
+            pg_calls[silver_index + 1]["argv"],
+        )
+        silver = pg_calls[silver_index]
+        self.assertTrue(silver["cwd"].endswith("/backend"))
+        self.assertEqual(
+            [
+                "postgresql://overworld@127.0.0.1:55433/overworld",
+                "ci-jwt-secret-not-a-real-key",
+                "ci-better-auth-secret-not-a-real-key",
+                None,
+            ],
+            silver["env"],
+        )
+        pg_event_indexes = [
+            index
+            for index, event in enumerate(events)
+            if event.startswith("bun-json:")
+            and json.loads(event.removeprefix("bun-json:"))["argv"][0] == "test"
+        ]
+        last_pg = pg_event_indexes[-1]
+        self.assertEqual("backend", events[last_pg + 1])
+        self.assertEqual("frontend", events[last_pg + 2])
+        playwright_call = json.loads(events[last_pg + 3].removeprefix("bun-json:"))
+        self.assertEqual(
+            [
+                "--smol",
+                "./node_modules/.bin/playwright",
+                "test",
+                "e2e/auth-flow.spec.ts",
+                "e2e/a11y.spec.ts",
+                "--reporter=list",
+            ],
+            playwright_call["argv"],
+        )
+        self.assertEqual("--smol", playwright_call["env"][3])
+        self.assertEqual(["stop:all", "stop:postgres", "after:unset"], events[-3:])
+
+        failed, failed_events = run(fail_pattern=SILVER_PG_TEST)
+        self.assertEqual(23, failed.returncode, failed.stderr)
+        failed_calls = [
+            json.loads(event.removeprefix("bun-json:"))
+            for event in failed_events
+            if event.startswith("bun-json:")
+        ]
+        self.assertEqual(["test", SILVER_PG_TEST], failed_calls[-1]["argv"])
+        self.assertFalse(
+            any(
+                call["argv"]
+                == ["test", "src/modules/internal/inference/idempotency.pg.test.ts"]
+                for call in failed_calls
+            )
+        )
+        self.assertNotIn("frontend", failed_events)
 
     def test_playwright_smol_contract_is_executable_and_propagates_exit_status(self):
         runner = SCRIPT.read_text()

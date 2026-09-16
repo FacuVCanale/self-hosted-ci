@@ -408,6 +408,7 @@ phase_backend() {
   uv --no-config pip check --python "$WATERFALL_ROOT/.venv/bin/python"
   PYTHONPATH="$WATERFALL_ROOT:$WATERFALL_ROOT/src" "$WATERFALL_ROOT/.venv/bin/pyright" \
     backend/src/modules/methodology-obligations/waterfall-stage-push-contract.py
+  (cd backend && bun test src/modules/internal/towers/sensor-data/platform-export-backfill.test.ts)
   (cd backend && bun run lint)
   (cd backend && bun run typecheck)
   (cd backend && bun run db:check-drift --database-url "postgresql://overworld@127.0.0.1:$BACKEND_PGPORT/drift")
@@ -420,6 +421,8 @@ phase_backend() {
     WATERFALL_SOURCE_PATH="$WATERFALL_ROOT" S3_BUCKET=overworld-e2e \
     S3_ENDPOINT="http://127.0.0.1:$MINIO_PORT" S3_PUBLIC_ENDPOINT="http://127.0.0.1:$MINIO_PORT" \
     AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin; \
+    bun test src/modules/inference/mrv-share.pg.test.ts; \
+    bun test src/modules/inference/mrv-share-boundaries.pg.test.ts; \
     bun test src/database/migration-0072-site-inflight.pg.test.ts; \
     bun test src/modules/inference/inference-run-site-inflight.pg.test.ts; \
     bun test src/modules/inference/inventory-to-report.stage-push.contract.pg.test.ts)
@@ -563,6 +566,7 @@ phase_e2e() {
     src/metrics/engine-adoption.pg.test.ts
     src/metrics/metrics-mv-gated.pg.test.ts
     src/database/migrate.pg.test.ts
+    src/modules/producer/sites/towers/sensor-data/gapfill/service.pg.test.ts
     src/modules/internal/inference/idempotency.pg.test.ts
     src/modules/internal/inference/runs/runs.pg.test.ts
     src/modules/internal/cycles/closure-inputs/closure-inputs.pg.test.ts
