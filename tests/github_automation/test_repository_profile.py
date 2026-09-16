@@ -35,7 +35,19 @@ INVENTORY_TESTS = {
     "src/database/migration-0072-site-inflight.pg.test.ts",
     "src/modules/inference/inference-run-site-inflight.pg.test.ts",
     "src/modules/inference/inventory-to-report.stage-push.contract.pg.test.ts",
+    "src/modules/inference/mrv-share.pg.test.ts",
+    "src/modules/inference/mrv-share-boundaries.pg.test.ts",
 }
+INVENTORY_MINIMUM_COMMANDS = (
+    (
+        "run", "test", "--pattern", "src/modules/inference/mrv-share.pg.test.ts",
+        "--min-tests", "10",
+    ),
+    (
+        "run", "test", "--pattern",
+        "src/modules/inference/mrv-share-boundaries.pg.test.ts", "--min-tests", "4",
+    ),
+)
 E2E_PG_TESTS = {
     "src/modules/organization/invitations/service.pg.test.ts",
     "src/modules/auth/session.pg.test.ts",
@@ -106,7 +118,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual(["backend", "frontend", "e2e"], profile["phases"])
         self.assertEqual(".github/workflows/ci.yml", profile["source_workflow_path"])
         self.assertEqual(
-            "b829e0b180bd1ae1ecd9809f33e218ac1df6ff9d37935e2ba5ddd98e7d33baa5",
+            "a4e5944551c29147c52838eb2aff30eb61a95250c027a5bca8169bd832502674",
             profile["source_workflow_sha256"],
         )
         self.assertEqual(
@@ -127,7 +139,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
         self.assertEqual("22.23.2", profile["toolchain"]["node"])
         self.assertEqual(
-            "0af175f2a43609f9d2d78ed4a7e048ce096f6a7e21eada3e082b36efec246eb6",
+            "6da0fa2a1868415f05838e7f563beec78c7789995506ccbb525deecab79b4842",
             profile["runner_script_sha256"],
         )
         self.assertEqual(SCRIPT, script)
@@ -969,6 +981,74 @@ test -d {component}/node_modules
         inventory_block = inventory_block.split("local pg_test", 1)[0]
         self.assertEqual(INVENTORY_TESTS, set(re.findall(r"src/[A-Za-z0-9_./-]+\.pg\.test\.ts", inventory_block)))
         self.assertEqual(1, text.count("export INVENTORY_REPORT_CONTRACT=true"))
+
+    def test_inventory_minimum_commands_preserve_argv_environment_and_fail_fast(self):
+        text = SCRIPT.read_text()
+        backend_phase = text[
+            text.index("phase_backend() {") : text.index("\nphase_frontend() {")
+        ]
+        inventory_block = backend_phase[
+            backend_phase.index(
+                "  (cd backend && export INVENTORY_REPORT_CONTRACT=true"
+            ) : backend_phase.index("\n  stop_local_services")
+        ]
+
+        def run(*, fail_pattern: str = "") -> subprocess.CompletedProcess[str]:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "backend").mkdir()
+                command = f"""
+set -euo pipefail
+WATERFALL_ROOT=/opt/self-hosted-ci/overworld-deps/waterfall
+BACKEND_PGPORT=55432
+MINIO_PORT=59002
+bun() {{
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$*" "$PWD" "$INVENTORY_REPORT_CONTRACT" "$TEST_DATABASE_URL" \
+    "$WATERFALL_SOURCE_PATH" "$S3_BUCKET" "$S3_ENDPOINT" \
+    "$S3_PUBLIC_ENDPOINT" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"
+  [[ -z "{fail_pattern}" || "$*" != *"{fail_pattern}"* ]] || return 23
+}}
+{inventory_block}
+"""
+                return subprocess.run(
+                    ["bash"],
+                    input=command,
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                )
+
+        passed = run()
+        self.assertEqual(0, passed.returncode, passed.stderr)
+        rows = [line.split("\t") for line in passed.stdout.splitlines()]
+        expected_environment = [
+            "true",
+            "postgresql://overworld@127.0.0.1:55432/postgres",
+            "/opt/self-hosted-ci/overworld-deps/waterfall",
+            "overworld-e2e",
+            "http://127.0.0.1:59002",
+            "http://127.0.0.1:59002",
+            "minioadmin",
+            "minioadmin",
+        ]
+        minimum_rows = [
+            row
+            for row in rows
+            if tuple(row[0].split()) in INVENTORY_MINIMUM_COMMANDS
+        ]
+        self.assertEqual(
+            [" ".join(command) for command in INVENTORY_MINIMUM_COMMANDS],
+            [row[0] for row in minimum_rows],
+        )
+        for row in minimum_rows:
+            self.assertTrue(row[1].endswith("/backend"))
+            self.assertEqual(expected_environment, row[2:])
+
+        failed = run(fail_pattern="src/modules/inference/mrv-share.pg.test.ts")
+        self.assertEqual(23, failed.returncode, failed.stderr)
+        self.assertIn(" ".join(INVENTORY_MINIMUM_COMMANDS[0]), failed.stdout)
+        self.assertNotIn(" ".join(INVENTORY_MINIMUM_COMMANDS[1]), failed.stdout)
 
     def test_e2e_defers_frontend_until_all_pg_regressions_finish(self):
         text = SCRIPT.read_text()
