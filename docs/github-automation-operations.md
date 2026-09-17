@@ -59,6 +59,37 @@ El instalador enlaza la fuente canónica de `skills/self-hosted-ci` en
 `/self-hosted-ci`; Codex expone `$self-hosted-ci`. Ambos pueden descubrirla por
 las frases naturales descriptas en la skill.
 
+### Estado durante un run local
+
+Mientras un run local está en vuelo, y durante los minutos que puede tardar su
+limpieza terminal, `doctor` informa `unhealthy` y `run-local --apply` puede
+responder `blocked`. Blockers como `idle_jit_instances_present`,
+`transient_scale_sets_not_clean` y los `*_not_configured` asociados al estado
+transitorio describen el scale set y la instancia JIT del propio run; no
+demuestran por sí solos una caída de infraestructura.
+
+Antes de declarar un bloqueo o volver a despachar, consultar `gh run list` y
+esperar la limpieza del run vigente. El estado converge solo a `healthy` con
+`blockers=[]`; en ese mismo cierre el gate publica sus Check Runs. Esa
+convergencia puede ocurrir unos tres minutos después de terminar el job, por lo
+que no se relanza durante esa ventana. En el run `35210651238`, por ejemplo, el
+job terminó a las `10:45:52Z` y los Check Runs se publicaron alrededor de las
+`10:49Z`.
+
+### Precondiciones de `run-local`
+
+El piloto admite un solo run local a la vez. El PR debe tener como base la rama
+por defecto del repositorio y su rama debe estar actualizada con esa base. Antes
+del apply, esperar `mergeable=MERGEABLE` y verificar que el merge ref de GitHub
+tenga como padres exactos el head actual de la rama por defecto y el head del
+PR; de lo contrario, el worker bloquea con `GitHub merge ref is stale`.
+
+Desde que se emite el run hasta que termina y se reconcilia su limpieza, no
+mergear ningún cambio a la rama por defecto. La revalidación del piloto compara
+la base viva con la base autorizada y bloquea la ejecución si la rama por
+defecto cambia. Estas restricciones mantienen una sola identidad de base, head
+y merge por despacho y evitan que un segundo trabajo invalide el run activo.
+
 ## Incorporar un repositorio
 
 1. Autorizar explícitamente la cuenta u organización y el repositorio.
