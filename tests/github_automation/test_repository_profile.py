@@ -145,7 +145,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
         self.assertEqual("22.23.2", profile["toolchain"]["node"])
         self.assertEqual(
-            "5c3ce9f14ee3d2de1e6ef28aa7f9b623b5c6dafb46d6ff10d25314d30c64c7b6",
+            "ef71e617f0066f4e058272e54f3465634ea2decb4a5be4ab8ce66b81b8be8573",
             profile["runner_script_sha256"],
         )
         self.assertEqual(SCRIPT, script)
@@ -460,9 +460,11 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertIn('temporary="$STATE_ROOT/bun-tmp-$component"', text)
         self.assertIn("install_prebaked_node_modules backend", text)
         self.assertIn("install_prebaked_node_modules frontend", text)
-        self.assertIn("bun ./node_modules/.bin/eslint --max-warnings 0", text)
-        self.assertIn("bun ./node_modules/.bin/tsc --noEmit", text)
-        self.assertIn("NODE_ENV=test bun ./node_modules/.bin/jest --ci", text)
+        self.assertIn('"$NEXT_NODE" ./node_modules/.bin/eslint --max-warnings 0', text)
+        self.assertIn('"$NEXT_NODE" ./node_modules/.bin/tsc --noEmit', text)
+        self.assertIn('NODE_ENV=test "$NEXT_NODE" ./node_modules/.bin/jest --ci', text)
+        for bun_runtime_launcher in ("eslint", "tsc", "jest"):
+            self.assertNotIn(f"bun ./node_modules/.bin/{bun_runtime_launcher}", text)
         self.assertIn(
             '"$NEXT_NODE" ./node_modules/next/dist/bin/next build --webpack',
             text,
@@ -1351,6 +1353,65 @@ printf 'STATUS=%s\n' "$status"
         )
         self.assertNotIn("SCRIPT_DIR", runner)
         self.assertNotIn("repository_profiles/overworld/fonts", runner)
+
+    def test_frontend_launchers_run_on_the_pinned_node_like_the_source_workflow(self):
+        # ci.yml runs `bun run lint`, `bunx tsc` and `bun run test`; each one reaches
+        # its launcher through the `#!/usr/bin/env node` shebang, so ESLint, tsc and
+        # Jest execute on Node. Running them on the Bun runtime instead made Jest's
+        # memory grow file after file until the frontend phase hit memory.high.
+        runner = SCRIPT.read_text()
+        frontend = runner[runner.index("phase_frontend() {") : runner.index("\nrequire_pinned_root_executable() {")]
+        frontend = frontend[: frontend.index("\n}\n") + 3]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "backend").mkdir()
+            (root / "frontend").mkdir()
+            calls = root / "calls"
+            fake_node = root / "pinned-node"
+            fake_node.write_text(
+                "#!/bin/sh\n"
+                "printf 'node|%s|%s|%s\\n' \"$(basename \"$PWD\")\" \"${NODE_ENV-unset}\" \"$*\" >> \"$CALLS\"\n"
+            )
+            fake_node.chmod(0o755)
+            for guard_status, expected_status in ((0, 0), (1, 1)):
+                if calls.exists():
+                    calls.unlink()
+                command = f"""
+set -euo pipefail
+require_pinned_root_executable() {{
+  printf 'guard|%s|%s\\n' "$1" "$2" >> "$CALLS"
+  return {guard_status}
+}}
+bun() {{ printf 'bun|%s|%s\\n' "$(basename "$PWD")" "$*" >> "$CALLS"; }}
+NEXT_NODE="$FAKE_NODE"
+NEXT_NODE_SHA256=pinned-node-digest
+unset NODE_ENV
+{frontend}
+phase_frontend
+"""
+                result = subprocess.run(
+                    ["bash"],
+                    cwd=root,
+                    input=command,
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "FAKE_NODE": str(fake_node), "CALLS": str(calls)},
+                )
+                self.assertEqual(expected_status, result.returncode, result.stderr)
+                recorded = calls.read_text().splitlines()
+                if guard_status:
+                    self.assertEqual([f"guard|{fake_node}|pinned-node-digest"], recorded)
+                    continue
+                self.assertEqual(
+                    [
+                        f"guard|{fake_node}|pinned-node-digest",
+                        "node|frontend|unset|./node_modules/.bin/eslint --max-warnings 0",
+                        "bun|backend|run build:types",
+                        "node|frontend|unset|./node_modules/.bin/tsc --noEmit",
+                        "node|frontend|test|./node_modules/.bin/jest --ci",
+                    ],
+                    recorded,
+                )
 
     def test_next_font_mock_is_exact_scoped_and_fails_closed_on_drift(self):
         expected_urls = {
