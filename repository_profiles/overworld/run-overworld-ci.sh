@@ -550,9 +550,12 @@ phase_e2e() {
     src/audit/routes-lot-mutations.pg.test.ts
     src/audit/routes-profile.pg.test.ts
     src/audit/routes-admin-ingest.pg.test.ts
+    src/modules/admin/files/audit.pg.test.ts
+    src/modules/admin/files/author-constraint.pg.test.ts
     src/modules/portfolio/service.pg.test.ts
     src/modules/organization/projects/registry-submissions/service.pg.test.ts
     src/modules/observability/series-qc-data.pg.test.ts
+    src/modules/observability/alert-state-store.pg.test.ts
     src/modules/quantification/flux-provenance.pg.test.ts
     src/modules/quantification/declared-deduction-assessments.pg.test.ts
     src/modules/inference/methodology-gate-migration.pg.test.ts

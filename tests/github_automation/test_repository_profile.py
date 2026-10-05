@@ -61,9 +61,12 @@ E2E_PG_TESTS = {
     "src/audit/routes-lot-mutations.pg.test.ts",
     "src/audit/routes-profile.pg.test.ts",
     "src/audit/routes-admin-ingest.pg.test.ts",
+    "src/modules/admin/files/audit.pg.test.ts",
+    "src/modules/admin/files/author-constraint.pg.test.ts",
     "src/modules/portfolio/service.pg.test.ts",
     "src/modules/organization/projects/registry-submissions/service.pg.test.ts",
     "src/modules/observability/series-qc-data.pg.test.ts",
+    "src/modules/observability/alert-state-store.pg.test.ts",
     "src/modules/quantification/flux-provenance.pg.test.ts",
     "src/modules/quantification/declared-deduction-assessments.pg.test.ts",
     "src/modules/inference/methodology-gate-migration.pg.test.ts",
@@ -121,7 +124,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual(["backend", "frontend", "e2e"], profile["phases"])
         self.assertEqual(".github/workflows/ci.yml", profile["source_workflow_path"])
         self.assertEqual(
-            "d02746bb0ac067961fb11c31375c78a55946eea2d8bbe3e23f3046e7fb661cef",
+            "c91ef6e3c42f884c72ae9f6c982e575af0ce84b8a1dd9c17898d5b6859873d60",
             profile["source_workflow_sha256"],
         )
         self.assertEqual(
@@ -142,7 +145,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
         self.assertEqual("22.23.2", profile["toolchain"]["node"])
         self.assertEqual(
-            "97e3586a3f5b408e3104bf9e709c8d36a4142793a73ff6c3020671af261c254a",
+            "5c3ce9f14ee3d2de1e6ef28aa7f9b623b5c6dafb46d6ff10d25314d30c64c7b6",
             profile["runner_script_sha256"],
         )
         self.assertEqual(SCRIPT, script)
