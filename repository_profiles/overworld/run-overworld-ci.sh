@@ -432,10 +432,11 @@ phase_backend() {
 }
 
 phase_frontend() {
-  (cd frontend && bun ./node_modules/.bin/eslint --max-warnings 0)
+  require_pinned_root_executable "$NEXT_NODE" "$NEXT_NODE_SHA256" || return 1
+  (cd frontend && "$NEXT_NODE" ./node_modules/.bin/eslint --max-warnings 0)
   (cd backend && bun run build:types)
-  (cd frontend && bun ./node_modules/.bin/tsc --noEmit)
-  (cd frontend && NODE_ENV=test bun ./node_modules/.bin/jest --ci)
+  (cd frontend && "$NEXT_NODE" ./node_modules/.bin/tsc --noEmit)
+  (cd frontend && NODE_ENV=test "$NEXT_NODE" ./node_modules/.bin/jest --ci)
 }
 
 start_backend() {
