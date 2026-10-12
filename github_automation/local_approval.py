@@ -224,12 +224,16 @@ class PilotWorkRequestBuilder:
 
     def build(self, target, *, head_generation, request_id, nonce, now, ttl):
         allocation_id = str(uuid4())
+        approval_issued_at = LocalApprovalStore._stamp(now)
+        approval_expires_at = LocalApprovalStore._stamp(now + ttl)
         reservation = {
-            "allocation_reservation_version": 1,
+            "allocation_reservation_version": 2,
             "allocation_id": allocation_id,
             "repository_id": target.repository_id,
             "repository": target.repository,
+            "pr_number": target.pr_number,
             "head_sha": target.head_sha,
+            "base_sha": target.base_sha,
             "workflow_ref": target.workflow_ref,
             "job_name": "local-quality",
             "authority_kind": self.authority_kind,
@@ -238,8 +242,8 @@ class PilotWorkRequestBuilder:
             "labels": [],
             "image_fingerprint": self.image_fingerprint,
             "nonce": nonce,
-            "issued_at": LocalApprovalStore._stamp(now),
-            "expires_at": LocalApprovalStore._stamp(now + ttl),
+            "approval_issued_at": approval_issued_at,
+            "approval_expires_at": approval_expires_at,
             "max_jobs": 1,
             "ephemeral": True,
         }
@@ -258,8 +262,8 @@ class PilotWorkRequestBuilder:
             "backend": "local",
             "allocation_id": allocation_id,
             "runner_label": reservation["scale_set_name"],
-            "issued_at": reservation["issued_at"],
-            "expires_at": reservation["expires_at"],
+            "issued_at": approval_issued_at,
+            "expires_at": approval_expires_at,
         }
         JitPilotPackageV1.from_mapping(package, now=now)
         return {
@@ -508,6 +512,8 @@ class LocalApprovalStore:
             "workflow_ref": target.workflow_ref,
             "nonce": nonce,
         }
+        if reservation.get("allocation_reservation_version") == 2:
+            expected.update(pr_number=target.pr_number, base_sha=target.base_sha)
         if any(reservation.get(key) != value for key, value in expected.items()):
             raise LocalApprovalError("reservation crossed resolved GitHub authority")
         if "pilot_package" in raw:

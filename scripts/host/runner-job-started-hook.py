@@ -44,7 +44,7 @@ DIAGNOSTIC_CODES = {
     "signed-context": frozenset({"context-mismatch"}),
     "runner-claim": frozenset({"claim-not-observed"}),
     "live-job": frozenset({"job-not-verified"}),
-    "ledger-claim": frozenset({"claim-transition-denied"}),
+    "ledger-claim": frozenset({"claim-expired", "claim-state-conflict"}),
     "runner-disable": frozenset({"disable-failed"}),
     "ledger-start": frozenset({"start-transition-denied"}),
     "broker": frozenset({"operation-denied", "internal-error"}),

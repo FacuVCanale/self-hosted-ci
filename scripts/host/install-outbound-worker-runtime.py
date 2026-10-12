@@ -59,7 +59,7 @@ REQUIRED_FIELDS = {
 #: The `gate` block is optional: a host without it simply publishes no pull
 #: request Check Runs, which is the fail-closed default. Its private key is a
 #: distinct managed secret, never the dispatcher's.
-OPTIONAL_FIELDS = {"gate", "auto_dispatch"}
+OPTIONAL_FIELDS = {"gate", "auto_dispatch", "claim_deadline_seconds"}
 GATE_FIELDS = {"app_id", "app_slug", "installation_id", "private_key_file"}
 GATE_PERMISSIONS = {"checks": "write", "metadata": "read"}
 EXACT_PERMISSIONS = {
@@ -140,6 +140,15 @@ def load_config(path: Path) -> dict[str, Any]:
             raise InstallError(f"{field} must be a positive integer")
     if value["approval_ttl_seconds"] > 300:
         raise InstallError("approval_ttl_seconds must not exceed five minutes")
+    claim_deadline_seconds = value.get("claim_deadline_seconds", 720)
+    if (
+        isinstance(claim_deadline_seconds, bool)
+        or not isinstance(claim_deadline_seconds, int)
+        or not 1 <= claim_deadline_seconds <= 900
+    ):
+        raise InstallError(
+            "claim_deadline_seconds must be between one and 900 seconds"
+        )
     if (
         value["repository_selection"] != "selected"
         or value["permissions"] != EXACT_PERMISSIONS

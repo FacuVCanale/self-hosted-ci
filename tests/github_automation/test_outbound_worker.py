@@ -153,6 +153,59 @@ class RecordingPublisher:
 
 
 class OutboundWorkerTests(unittest.TestCase):
+    def test_pilot_mints_claim_deadline_after_nine_minute_job_observation(self):
+        class Clock:
+            now = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+
+            def __call__(self):
+                return self.now
+
+        class Resolver:
+            def resolve(self, repository, pr):
+                return ResolvedApprovalTarget(
+                    "123", repository, pr, "a" * 40, "main",
+                    f"{repository}/.github/workflows/ci-jit-pilot-child.yml@refs/heads/main",
+                    "b" * 40, "c" * 40,
+                )
+
+        class DelayedGitHub(GitHub):
+            def observe_exact_job(self, run_id, label):
+                clock.now += timedelta(minutes=9)
+                self.label = label
+                return super().observe_exact_job(run_id, label)
+
+        class CapturingBroker(Broker):
+            payload = None
+
+            def finalize(self, envelope):
+                self.payload = envelope["payload"]
+                return super().finalize(envelope)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = Clock()
+            source = LocalApprovalStore(
+                root / "approvals.sqlite3",
+                GateStore(root / "gate.sqlite3", clock=clock),
+                Resolver(),
+                PilotWorkRequestBuilder("d" * 64),
+                clock=clock,
+            )
+            source.approve("example-owner/example-repo", 42)
+            broker = CapturingBroker()
+            result = PilotWorker(
+                WorkerState(root / "worker.sqlite3"),
+                source,
+                broker,
+                DelayedGitHub(),
+                Signer(),
+            ).run_once()
+
+            self.assertEqual("completed", result["status"])
+            self.assertEqual("2026-08-27T12:04:00Z", broker.payload["approval_expires_at"])
+            self.assertEqual("2026-08-27T12:09:00Z", broker.payload["issued_at"])
+            self.assertEqual("2026-08-27T12:21:00Z", broker.payload["claim_deadline"])
+
     def test_sqlite_idempotency_is_durable(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.sqlite3"

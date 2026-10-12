@@ -174,7 +174,7 @@ def root_config(path: Path):
     }
     if (
         not isinstance(value, dict)
-        or set(value) - {"gate", "auto_dispatch"} != required
+        or set(value) - {"gate", "auto_dispatch", "claim_deadline_seconds"} != required
         or value["schema_version"] != 1
         or value["mode"] not in {"ci-jit-pilot", "ci-gate-full"}
     ):
@@ -199,6 +199,15 @@ def root_config(path: Path):
         "organization-runner-group",
     }:
         raise LocalApprovalError("outbound worker authority kind is invalid")
+    claim_deadline_seconds = value.get("claim_deadline_seconds", 720)
+    if (
+        isinstance(claim_deadline_seconds, bool)
+        or not isinstance(claim_deadline_seconds, int)
+        or not 1 <= claim_deadline_seconds <= 900
+    ):
+        raise LocalApprovalError(
+            "claim_deadline_seconds must be between one and 900 seconds"
+        )
     gate = value.get("gate")
     if gate is not None and (
         not isinstance(gate, dict)
@@ -370,6 +379,7 @@ def runtime(config_path):
         PilotWorker(
             state, source, broker, github, signer,
             checks=checks, repository=c["repository"],
+            claim_ttl=timedelta(seconds=c.get("claim_deadline_seconds", 720)),
         )
         if c["mode"] == "ci-jit-pilot"
         else OutboundWorker(state, source, broker, github, signer)

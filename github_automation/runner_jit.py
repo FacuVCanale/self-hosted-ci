@@ -24,8 +24,12 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 from .crypto import canonicalize_jcs, sign_detached, spki_fingerprint, verify_detached
 
 
-ALLOCATION_DOMAIN = b"self-hosted-ci/runner-jit-allocation/v1"
-MAX_ALLOCATION_TTL = timedelta(minutes=5)
+ALLOCATION_DOMAINS = {
+    1: b"self-hosted-ci/runner-jit-allocation/v1",
+    2: b"self-hosted-ci/runner-jit-allocation/v2",
+}
+MAX_APPROVAL_TTL = timedelta(minutes=5)
+MAX_ALLOCATION_CLAIM_TTL = timedelta(minutes=15)
 TERMINAL_OUTCOMES = frozenset(
     {"success", "failure", "cancel", "timeout", "force-cancel", "reboot"}
 )
@@ -50,6 +54,18 @@ class RunnerJitTemporalError(RunnerJitError):
     """The allocation cannot be admitted at the validation time."""
 
 
+class ApprovalExpired(RunnerJitTemporalError):
+    """The short-lived approval/reservation window is no longer valid."""
+
+
+class AllocationClaimExpired(RunnerJitTemporalError):
+    """The exact allocation was not claimed before its own deadline."""
+
+
+class InvalidLifecycleTransition(RunnerJitError):
+    """The requested lifecycle transition is not valid from the durable state."""
+
+
 def allocation_scale_set_name(payload: Mapping[str, Any]) -> str:
     """Return the sole GitHub label for this allocation.
 
@@ -69,7 +85,7 @@ def allocation_scale_set_name(payload: Mapping[str, Any]) -> str:
     return f"wsl-jit-{digest[:32]}"
 
 
-RESERVATION_FIELDS = frozenset(
+LEGACY_RESERVATION_FIELDS = frozenset(
     {
         "allocation_reservation_version",
         "allocation_id",
@@ -91,14 +107,38 @@ RESERVATION_FIELDS = frozenset(
     }
 )
 
+RESERVATION_V2_FIELDS = frozenset(
+    (LEGACY_RESERVATION_FIELDS - {"issued_at", "expires_at"})
+    | {"pr_number", "base_sha", "approval_issued_at", "approval_expires_at"}
+)
+
 
 def validate_allocation_reservation(
     reservation: Mapping[str, Any], *, now: datetime
 ) -> None:
-    if not isinstance(reservation, Mapping) or set(reservation) != RESERVATION_FIELDS:
+    if not isinstance(reservation, Mapping):
         raise RunnerJitError("allocation reservation requires exact v1 fields")
+    version = reservation.get("allocation_reservation_version")
+    expected = LEGACY_RESERVATION_FIELDS if version == 1 else RESERVATION_V2_FIELDS
+    if version not in {1, 2} or set(reservation) != expected:
+        raise RunnerJitError("allocation reservation requires exact versioned fields")
     synthetic = dict(reservation)
     synthetic.pop("allocation_reservation_version")
+    if version == 2:
+        if (
+            isinstance(synthetic["pr_number"], bool)
+            or not isinstance(synthetic["pr_number"], int)
+            or synthetic["pr_number"] < 1
+        ):
+            raise RunnerJitError("pr_number must be a positive integer")
+        if not isinstance(synthetic["base_sha"], str) or not _SHA1.fullmatch(
+            synthetic["base_sha"]
+        ):
+            raise RunnerJitError("base_sha must be lowercase full SHA-1")
+        synthetic.pop("pr_number")
+        synthetic.pop("base_sha")
+        synthetic["issued_at"] = synthetic.pop("approval_issued_at")
+        synthetic["expires_at"] = synthetic.pop("approval_expires_at")
     synthetic.update(
         {
             "runner_allocation_version": 1,
@@ -109,26 +149,30 @@ def validate_allocation_reservation(
             "tested_sha": synthetic["head_sha"],
         }
     )
-    validate_allocation_payload(synthetic, now=now)
-    if reservation["allocation_reservation_version"] != 1:
-        raise RunnerJitError("allocation_reservation_version must be 1")
+    try:
+        validate_allocation_payload(synthetic, now=now)
+    except RunnerJitTemporalError as exc:
+        raise ApprovalExpired(str(exc)) from exc
 
 
 def reservation_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
+    dynamic = {
+        "runner_allocation_version",
+        "run_id",
+        "run_attempt",
+        "job_id",
+        "dispatch_sha",
+        "tested_sha",
+        "claim_deadline",
+    }
+    if payload.get("runner_allocation_version") == 2:
+        dynamic.add("issued_at")
     projected = {
         key: value
         for key, value in payload.items()
-        if key
-        not in {
-            "runner_allocation_version",
-            "run_id",
-            "run_attempt",
-            "job_id",
-            "dispatch_sha",
-            "tested_sha",
-        }
+        if key not in dynamic
     }
-    projected["allocation_reservation_version"] = 1
+    projected["allocation_reservation_version"] = payload["runner_allocation_version"]
     return projected
 
 
@@ -157,7 +201,7 @@ def _validate_uuid(value: Any, field: str) -> str:
 
 
 def validate_allocation_payload(payload: Mapping[str, Any], *, now: datetime) -> None:
-    required = {
+    legacy_required = {
         "runner_allocation_version",
         "allocation_id",
         "repository_id",
@@ -181,10 +225,24 @@ def validate_allocation_payload(payload: Mapping[str, Any], *, now: datetime) ->
         "max_jobs",
         "ephemeral",
     }
-    if not isinstance(payload, Mapping) or set(payload) != required:
-        raise RunnerJitError("allocation payload requires exact v1 fields")
-    if payload["runner_allocation_version"] != 1:
-        raise RunnerJitError("runner_allocation_version must be 1")
+    if not isinstance(payload, Mapping):
+        raise RunnerJitError("allocation payload requires exact versioned fields")
+    version = payload.get("runner_allocation_version")
+    required = (
+        legacy_required
+        if version == 1
+        else (legacy_required - {"expires_at"})
+        | {
+            "pr_number",
+            "base_sha",
+            "approval_issued_at",
+            "approval_expires_at",
+            "claim_deadline",
+        }
+    )
+    if version not in {1, 2} or set(payload) != required:
+        suffix = "v1" if version == 1 else "versioned"
+        raise RunnerJitError(f"allocation payload requires exact {suffix} fields")
     _validate_uuid(payload["allocation_id"], "allocation_id")
     if not isinstance(payload["repository_id"], str) or not re.fullmatch(
         r"[1-9][0-9]*", payload["repository_id"]
@@ -200,6 +258,17 @@ def validate_allocation_payload(payload: Mapping[str, Any], *, now: datetime) ->
         payload["head_sha"]
     ):
         raise RunnerJitError("head_sha must be lowercase full SHA-1")
+    if version == 2:
+        if (
+            isinstance(payload["pr_number"], bool)
+            or not isinstance(payload["pr_number"], int)
+            or payload["pr_number"] < 1
+        ):
+            raise RunnerJitError("pr_number must be a positive integer")
+        if not isinstance(payload["base_sha"], str) or not _SHA1.fullmatch(
+            payload["base_sha"]
+        ):
+            raise RunnerJitError("base_sha must be lowercase full SHA-1")
     for field in ("tested_sha", "dispatch_sha"):
         if not isinstance(payload[field], str) or not _SHA1.fullmatch(payload[field]):
             raise RunnerJitError(f"{field} must be lowercase full SHA-1")
@@ -265,16 +334,36 @@ def validate_allocation_payload(payload: Mapping[str, Any], *, now: datetime) ->
         raise RunnerJitError(
             "allocations must be ephemeral and limited to exactly one job"
         )
-    issued = _parse_time(payload["issued_at"], "issued_at")
-    expires = _parse_time(payload["expires_at"], "expires_at")
-    if expires <= issued or expires - issued > MAX_ALLOCATION_TTL:
-        raise RunnerJitTemporalError(
-            "allocation lifetime must be positive and at most five minutes"
-        )
     if now.tzinfo != timezone.utc:
         raise RunnerJitTemporalError("now must be timezone-aware UTC")
-    if now < issued - timedelta(seconds=30) or now >= expires:
-        raise RunnerJitTemporalError("allocation is not currently valid")
+    issued = _parse_time(payload["issued_at"], "issued_at")
+    if version == 1:
+        deadline = _parse_time(payload["expires_at"], "expires_at")
+        if deadline <= issued or deadline - issued > MAX_APPROVAL_TTL:
+            raise RunnerJitTemporalError(
+                "legacy allocation lifetime must be positive and at most five minutes"
+            )
+    else:
+        approval_issued = _parse_time(
+            payload["approval_issued_at"], "approval_issued_at"
+        )
+        approval_expires = _parse_time(
+            payload["approval_expires_at"], "approval_expires_at"
+        )
+        if (
+            approval_expires <= approval_issued
+            or approval_expires - approval_issued > MAX_APPROVAL_TTL
+        ):
+            raise RunnerJitTemporalError(
+                "approval lifetime must be positive and at most five minutes"
+            )
+        deadline = _parse_time(payload["claim_deadline"], "claim_deadline")
+        if deadline <= issued or deadline - issued > MAX_ALLOCATION_CLAIM_TTL:
+            raise RunnerJitTemporalError(
+                "allocation claim lifetime must be positive and at most fifteen minutes"
+            )
+    if now < issued - timedelta(seconds=30) or now >= deadline:
+        raise AllocationClaimExpired("allocation claim deadline is not currently valid")
     canonicalize_jcs(payload)
 
 
@@ -285,7 +374,11 @@ def sign_allocation(
     return {
         "payload": dict(payload),
         "signer_fingerprint": spki_fingerprint(private_key.public_key()),
-        "signature": sign_detached(payload, private_key, domain=ALLOCATION_DOMAIN),
+        "signature": sign_detached(
+            payload,
+            private_key,
+            domain=ALLOCATION_DOMAINS[payload["runner_allocation_version"]],
+        ),
     }
 
 
@@ -315,7 +408,10 @@ def verify_allocation(
     validate_allocation_payload(payload, now=now)
     try:
         verify_detached(
-            payload, envelope["signature"], public_key, domain=ALLOCATION_DOMAIN
+            payload,
+            envelope["signature"],
+            public_key,
+            domain=ALLOCATION_DOMAINS[payload["runner_allocation_version"]],
         )
     except ValueError as exc:
         raise RunnerJitError("allocation signature is invalid") from exc
@@ -331,6 +427,7 @@ class AllocationRecord:
     cleanup_complete: bool
     issued_at: datetime
     expires_at: datetime
+    claim_deadline: datetime
     recovery_required: bool
     cleanup_pending: bool
     cleanup_idempotency_key: str | None
@@ -350,7 +447,7 @@ class SqliteAllocationLedger:
                 allocation_id TEXT PRIMARY KEY, binding_digest TEXT NOT NULL UNIQUE,
                 payload_digest TEXT NOT NULL, state TEXT NOT NULL, outcome TEXT,
                 jobs_started INTEGER NOT NULL DEFAULT 0, cleanup_complete INTEGER NOT NULL DEFAULT 0,
-                issued_at TEXT, expires_at TEXT,
+                issued_at TEXT, expires_at TEXT, claim_deadline TEXT,
                 recovery_required INTEGER NOT NULL DEFAULT 0,
                 cleanup_pending INTEGER NOT NULL DEFAULT 0,
                 cleanup_idempotency_key TEXT,
@@ -368,6 +465,10 @@ class SqliteAllocationLedger:
             if "expires_at" not in columns:
                 connection.execute(
                     "ALTER TABLE runner_allocations ADD COLUMN expires_at TEXT"
+                )
+            if "claim_deadline" not in columns:
+                connection.execute(
+                    "ALTER TABLE runner_allocations ADD COLUMN claim_deadline TEXT"
                 )
             for name, declaration in (
                 ("recovery_required", "INTEGER NOT NULL DEFAULT 0"),
@@ -433,16 +534,17 @@ class SqliteAllocationLedger:
                 raise RunnerJitError("allocation binding replay detected")
             connection.execute(
                 """INSERT INTO runner_allocations(
-                allocation_id,binding_digest,payload_digest,state,issued_at,expires_at
-                ,payload_json,scale_set_name
-                ) VALUES(?,?,?,?,?,?,?,?)""",
+                allocation_id,binding_digest,payload_digest,state,issued_at,expires_at,
+                claim_deadline,payload_json,scale_set_name
+                ) VALUES(?,?,?,?,?,?,?,?,?)""",
                 (
                     payload["allocation_id"],
                     binding_digest,
                     payload_digest,
                     "issued",
                     payload["issued_at"],
-                    payload["expires_at"],
+                    payload.get("approval_expires_at", payload.get("expires_at")),
+                    payload.get("claim_deadline", payload.get("expires_at")),
                     canonicalize_jcs(payload).decode("utf-8"),
                     payload["scale_set_name"],
                 ),
@@ -473,6 +575,12 @@ class SqliteAllocationLedger:
             ).fetchone():
                 connection.rollback()
                 raise RunnerJitError("allocation reservation nonce replay detected")
+            approval_issued_at = reservation.get(
+                "approval_issued_at", reservation.get("issued_at")
+            )
+            approval_expires_at = reservation.get(
+                "approval_expires_at", reservation.get("expires_at")
+            )
             connection.execute(
                 """INSERT INTO runner_allocations(
                 allocation_id,binding_digest,payload_digest,state,issued_at,expires_at,
@@ -483,8 +591,8 @@ class SqliteAllocationLedger:
                     binding_digest,
                     reservation_digest,
                     "reserved",
-                    reservation["issued_at"],
-                    reservation["expires_at"],
+                    approval_issued_at,
+                    approval_expires_at,
                     reservation["scale_set_name"],
                     body,
                 ),
@@ -526,8 +634,16 @@ class SqliteAllocationLedger:
                     "signed allocation crossed its immutable reservation"
                 )
             connection.execute(
-                "UPDATE runner_allocations SET payload_digest=?,payload_json=?,state='issued' WHERE allocation_id=?",
-                (digest, body, payload["allocation_id"]),
+                """UPDATE runner_allocations
+                SET payload_digest=?,payload_json=?,state='issued',issued_at=?,claim_deadline=?
+                WHERE allocation_id=?""",
+                (
+                    digest,
+                    body,
+                    payload["issued_at"],
+                    payload.get("claim_deadline", payload.get("expires_at")),
+                    payload["allocation_id"],
+                ),
             )
             connection.commit()
             return "issued"
@@ -637,7 +753,7 @@ class SqliteAllocationLedger:
         with self._lock, closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                """SELECT state,outcome,jobs_started,cleanup_complete,issued_at,expires_at,
+                """SELECT state,outcome,jobs_started,cleanup_complete,issued_at,expires_at,claim_deadline,
                 recovery_required,cleanup_pending,cleanup_idempotency_key,cleanup_evidence_digest,
                 payload_digest
                 FROM runner_allocations WHERE allocation_id=?""",
@@ -653,6 +769,7 @@ class SqliteAllocationLedger:
                 cleaned,
                 issued_text,
                 expires_text,
+                claim_deadline_text,
                 recovery_required,
                 cleanup_pending,
                 stored_cleanup_key,
@@ -664,12 +781,20 @@ class SqliteAllocationLedger:
                 raise RunnerJitError("allocation lease timestamps are absent")
             issued_at = _parse_time(issued_text, "issued_at")
             expires_at = _parse_time(expires_text, "expires_at")
-            if action in {"claim", "start"} and (
-                now < issued_at - timedelta(seconds=30) or now >= expires_at
+            claim_deadline = _parse_time(
+                claim_deadline_text or expires_text, "claim_deadline"
+            )
+            if action == "claim" and state != "issued":
+                connection.rollback()
+                raise InvalidLifecycleTransition(
+                    f"invalid lifecycle transition: {state}->{action}"
+                )
+            if action == "claim" and (
+                now < issued_at - timedelta(seconds=30) or now >= claim_deadline
             ):
                 connection.rollback()
-                raise RunnerJitError(
-                    "allocation lease expired before lifecycle transition"
+                raise AllocationClaimExpired(
+                    "allocation claim deadline expired before lifecycle transition"
                 )
             if action == "claim" and state == "issued":
                 state = "claimed"
@@ -700,6 +825,7 @@ class SqliteAllocationLedger:
                     bool(cleaned),
                     issued_at,
                     expires_at,
+                    claim_deadline,
                     bool(recovery_required),
                     bool(cleanup_pending),
                     stored_cleanup_key,
@@ -735,6 +861,7 @@ class SqliteAllocationLedger:
                     bool(cleaned),
                     issued_at,
                     expires_at,
+                    claim_deadline,
                     bool(recovery_required),
                     bool(cleanup_pending),
                     stored_cleanup_key,
@@ -801,6 +928,7 @@ class SqliteAllocationLedger:
                         bool(cleaned),
                         issued_at,
                         expires_at,
+                        claim_deadline,
                         bool(recovery_required),
                         bool(cleanup_pending),
                         stored_cleanup_key,
@@ -813,7 +941,9 @@ class SqliteAllocationLedger:
                     )
             else:
                 connection.rollback()
-                raise RunnerJitError(f"invalid lifecycle transition: {state}->{action}")
+                raise InvalidLifecycleTransition(
+                    f"invalid lifecycle transition: {state}->{action}"
+                )
             connection.execute(
                 """UPDATE runner_allocations SET state=?,outcome=?,jobs_started=?,cleanup_complete=?,
                 recovery_required=?,cleanup_pending=?,cleanup_idempotency_key=?,cleanup_evidence_digest=?
@@ -839,6 +969,7 @@ class SqliteAllocationLedger:
                 bool(cleaned),
                 issued_at,
                 expires_at,
+                claim_deadline,
                 bool(recovery_required),
                 bool(cleanup_pending),
                 stored_cleanup_key,
@@ -848,7 +979,7 @@ class SqliteAllocationLedger:
     def get(self, allocation_id: str) -> AllocationRecord:
         with closing(self._connect()) as connection:
             row = connection.execute(
-                """SELECT state,outcome,jobs_started,cleanup_complete,issued_at,expires_at,
+                """SELECT state,outcome,jobs_started,cleanup_complete,issued_at,expires_at,claim_deadline,
                 recovery_required,cleanup_pending,cleanup_idempotency_key,cleanup_evidence_digest
                 FROM runner_allocations WHERE allocation_id=?""",
                 (allocation_id,),
@@ -865,8 +996,9 @@ class SqliteAllocationLedger:
             bool(row[3]),
             _parse_time(row[4], "issued_at"),
             _parse_time(row[5], "expires_at"),
-            bool(row[6]),
+            _parse_time(row[6] or row[5], "claim_deadline"),
             bool(row[7]),
-            row[8],
+            bool(row[8]),
             row[9],
+            row[10],
         )

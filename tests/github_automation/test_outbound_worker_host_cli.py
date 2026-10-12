@@ -230,7 +230,10 @@ class InstallerOptionalBlockTests(unittest.TestCase):
         source = WORKER_CLI.read_text(encoding="utf-8")
         for name in sorted(self.installer.OPTIONAL_FIELDS):
             self.assertIn(f'"{name}"', source)
-        self.assertEqual(self.installer.OPTIONAL_FIELDS, {"gate", "auto_dispatch"})
+        self.assertEqual(
+            self.installer.OPTIONAL_FIELDS,
+            {"gate", "auto_dispatch", "claim_deadline_seconds"},
+        )
 
 
 if __name__ == "__main__":
