@@ -9,6 +9,7 @@ bootstrap repository.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -134,6 +135,7 @@ class DispatchProgress(Protocol):
     def dispatching(self) -> None: ...
     def dispatched(self, run_id: int) -> None: ...
     def observed(self, value: ObservedWorkflowJob) -> None: ...
+    def allocation_window(self, issued_at: str, claim_deadline: str) -> None: ...
     def finalizing(self) -> None: ...
     def finalized(self, value: Mapping[str, str]) -> None: ...
     def recovered(self) -> None: ...
@@ -195,6 +197,8 @@ def outbound_local_dispatch(
     signer: BoundedAllocationSigner,
     progress: DispatchProgress | None = None,
     resume: Mapping[str, Any] | None = None,
+    clock=lambda: datetime.now(timezone.utc),
+    claim_ttl: timedelta = timedelta(minutes=12),
 ) -> tuple[ProtocolPackage, ObservedWorkflowJob | None]:
     """Run reserve→dispatch→observe→external-sign→finalize from the local host.
 
@@ -285,8 +289,26 @@ def outbound_local_dispatch(
             progress.observed(observed)
         payload = dict(reservation)
         payload.pop("allocation_reservation_version", None)
+        version = reservation.get("allocation_reservation_version")
+        allocation_issued_at_text = resume.get("allocation_issued_at")
+        claim_deadline_text = resume.get("claim_deadline")
+        if version == 2 and (
+            not isinstance(allocation_issued_at_text, str)
+            or not isinstance(claim_deadline_text, str)
+        ):
+            allocation_issued_at = clock().replace(microsecond=0)
+            allocation_issued_at_text = allocation_issued_at.isoformat().replace(
+                "+00:00", "Z"
+            )
+            claim_deadline_text = (allocation_issued_at + claim_ttl).isoformat().replace(
+                "+00:00", "Z"
+            )
+            if progress is not None:
+                progress.allocation_window(
+                    allocation_issued_at_text, claim_deadline_text
+                )
         payload.update(
-            runner_allocation_version=1,
+            runner_allocation_version=version,
             run_id=str(observed.run_id),
             run_attempt=observed.run_attempt,
             job_id=str(observed.job_id),
@@ -294,6 +316,11 @@ def outbound_local_dispatch(
             dispatch_sha=observed.dispatch_sha,
             tested_sha=protocol.values["tested_sha"],
         )
+        if version == 2:
+            payload.update(
+                issued_at=allocation_issued_at_text,
+                claim_deadline=claim_deadline_text,
+            )
         envelope = signer.sign_allocation(payload)
         if resume.get("phase") == "finalizing" and "finalized" not in resume:
             raise CoordinatorUnavailable(

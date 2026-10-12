@@ -3,12 +3,15 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from github_automation.crypto import spki_fingerprint
 from github_automation.runner_jit import (
+    AllocationClaimExpired,
+    InvalidLifecycleTransition,
     RunnerJitError,
     SqliteAllocationLedger,
     allocation_scale_set_name,
@@ -68,6 +71,39 @@ def reservation(**kwargs) -> dict:
     ):
         value.pop(field)
     value["allocation_reservation_version"] = 1
+    return value
+
+
+def payload_v2(
+    *,
+    allocation_id: str = "0198ef24-f800-7000-8000-000000000101",
+    nonce: str = "V" * 43,
+) -> dict:
+    value = payload(allocation_id=allocation_id, nonce=nonce)
+    value["runner_allocation_version"] = 2
+    value["pr_number"] = 42
+    value["base_sha"] = "b" * 40
+    value["approval_issued_at"] = value["issued_at"]
+    value["approval_expires_at"] = value.pop("expires_at")
+    value["issued_at"] = "2026-08-27T12:09:00Z"
+    value["claim_deadline"] = "2026-08-27T12:21:00Z"
+    return value
+
+
+def reservation_v2(**kwargs) -> dict:
+    value = payload_v2(**kwargs)
+    for field in (
+        "runner_allocation_version",
+        "run_id",
+        "run_attempt",
+        "job_id",
+        "dispatch_sha",
+        "tested_sha",
+        "issued_at",
+        "claim_deadline",
+    ):
+        value.pop(field)
+    value["allocation_reservation_version"] = 2
     return value
 
 
@@ -175,6 +211,111 @@ class RunnerAllocationTests(unittest.TestCase):
             )
             self.assertEqual("issued", ledger.get(value["allocation_id"]).state)
 
+    def test_v2_keeps_short_approval_and_mints_claim_window_at_exact_job(self) -> None:
+        private = ed25519.Ed25519PrivateKey.generate()
+        fingerprint = spki_fingerprint(private.public_key())
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = SqliteAllocationLedger(Path(directory) / "ledger.sqlite3")
+            value = payload_v2()
+            ledger.reserve(reservation_v2(), now=NOW + timedelta(minutes=3))
+            ledger.finalize(
+                sign_allocation(value, private, now=NOW + timedelta(minutes=9)),
+                private.public_key(),
+                pinned_fingerprint=fingerprint,
+                now=NOW + timedelta(minutes=9),
+            )
+            record = ledger.transition(
+                value["allocation_id"], "claim", now=NOW + timedelta(minutes=20)
+            )
+            self.assertEqual("claimed", record.state)
+            self.assertEqual(
+                NOW + timedelta(minutes=21), record.claim_deadline
+            )
+
+    def test_v2_claim_deadline_rejects_equality_and_later(self) -> None:
+        for offset in (0, 1):
+            with self.subTest(offset=offset), tempfile.TemporaryDirectory() as directory:
+                ledger = SqliteAllocationLedger(Path(directory) / "ledger.sqlite3")
+                private = ed25519.Ed25519PrivateKey.generate()
+                value = payload_v2(
+                    allocation_id=f"0198ef24-f800-7000-8004-{offset + 1:012d}",
+                    nonce=chr(87 + offset) * 43,
+                )
+                ledger.reserve(
+                    reservation_v2(
+                        allocation_id=value["allocation_id"], nonce=value["nonce"]
+                    ),
+                    now=NOW,
+                )
+                ledger.finalize(
+                    sign_allocation(value, private, now=NOW + timedelta(minutes=9)),
+                    private.public_key(),
+                    pinned_fingerprint=spki_fingerprint(private.public_key()),
+                    now=NOW + timedelta(minutes=9),
+                )
+                with self.assertRaises(AllocationClaimExpired):
+                    ledger.transition(
+                        value["allocation_id"],
+                        "claim",
+                        now=NOW + timedelta(minutes=21, seconds=offset),
+                    )
+
+    def test_recovery_never_reopens_a_v2_allocation_with_time_remaining(self) -> None:
+        value = payload_v2()
+        private = ed25519.Ed25519PrivateKey.generate()
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = SqliteAllocationLedger(Path(directory) / "ledger.sqlite3")
+            ledger.admit(
+                sign_allocation(value, private, now=NOW + timedelta(minutes=9)),
+                private.public_key(),
+                pinned_fingerprint=spki_fingerprint(private.public_key()),
+                now=NOW + timedelta(minutes=9),
+            )
+            ledger.transition(value["allocation_id"], "recover")
+            with self.assertRaises(InvalidLifecycleTransition):
+                ledger.transition(
+                    value["allocation_id"],
+                    "claim",
+                    now=NOW + timedelta(minutes=10),
+                )
+
+    def test_v1_ledger_migration_preserves_legacy_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.sqlite3"
+            db = sqlite3.connect(path)
+            db.execute(
+                """CREATE TABLE runner_allocations (
+                allocation_id TEXT PRIMARY KEY, binding_digest TEXT NOT NULL UNIQUE,
+                payload_digest TEXT NOT NULL, state TEXT NOT NULL, outcome TEXT,
+                jobs_started INTEGER NOT NULL DEFAULT 0,
+                cleanup_complete INTEGER NOT NULL DEFAULT 0,
+                issued_at TEXT, expires_at TEXT,
+                recovery_required INTEGER NOT NULL DEFAULT 0,
+                cleanup_pending INTEGER NOT NULL DEFAULT 0,
+                cleanup_idempotency_key TEXT, cleanup_evidence_digest TEXT
+                )"""
+            )
+            db.execute(
+                """INSERT INTO runner_allocations(
+                allocation_id,binding_digest,payload_digest,state,issued_at,expires_at
+                ) VALUES(?,?,?,?,?,?)""",
+                (
+                    "0198ef24-f800-7000-8000-000000000999",
+                    "a" * 64,
+                    "b" * 64,
+                    "issued",
+                    "2026-08-27T12:00:00Z",
+                    "2026-08-27T12:05:00Z",
+                ),
+            )
+            db.commit()
+            db.close()
+
+            record = SqliteAllocationLedger(path).get(
+                "0198ef24-f800-7000-8000-000000000999"
+            )
+            self.assertEqual(record.expires_at, record.claim_deadline)
+
 
 class RunnerLedgerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -246,7 +387,7 @@ class RunnerLedgerTests(unittest.TestCase):
                 value["allocation_id"], "finish", outcome="force-cancel"
             )
 
-    def test_claim_and_start_revalidate_persisted_ttl_at_boundaries(self) -> None:
+    def test_claim_revalidates_deadline_but_start_uses_durable_claim(self) -> None:
         for offset, accepted in ((-1, True), (0, False), (1, False)):
             allocation_id = f"0198ef24-f800-7000-8001-{offset + 2:012d}"
             value = payload(allocation_id=allocation_id, nonce=chr(70 + offset) * 43)
@@ -266,15 +407,20 @@ class RunnerLedgerTests(unittest.TestCase):
             allocation_id="0198ef24-f800-7000-8002-000000000001", nonce="Z" * 43
         )
         self.admit(value)
-        self.ledger.transition(value["allocation_id"], "claim", now=NOW)
-        with self.assertRaises(RunnerJitError):
-            self.ledger.transition(
-                value["allocation_id"], "start", now=NOW + timedelta(minutes=5)
-            )
+        self.ledger.transition(
+            value["allocation_id"],
+            "claim",
+            now=NOW + timedelta(minutes=4, seconds=59),
+        )
+        self.ledger.transition(
+            value["allocation_id"],
+            "start",
+            now=NOW + timedelta(minutes=5, seconds=1),
+        )
         record = self.ledger.get(value["allocation_id"])
         self.assertEqual(NOW, record.issued_at)
         self.assertEqual(NOW + timedelta(minutes=5), record.expires_at)
-        self.assertEqual("claimed", record.state)
+        self.assertEqual("running", record.state)
 
     def test_reboot_recovery_is_atomic_and_idempotent_from_all_live_states(
         self,

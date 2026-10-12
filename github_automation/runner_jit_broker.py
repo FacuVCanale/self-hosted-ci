@@ -24,7 +24,12 @@ from typing import Any, Protocol
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from .coordinator import ReservePartialFailure
-from .runner_jit import RunnerJitError, SqliteAllocationLedger
+from .runner_jit import (
+    AllocationClaimExpired,
+    InvalidLifecycleTransition,
+    RunnerJitError,
+    SqliteAllocationLedger,
+)
 
 RUNNER_INSTALL_TEMPLATE = Path(
     "/usr/local/share/self-hosted-ci/runner-install-offline.sh.tmpl"
@@ -53,7 +58,7 @@ JOB_STARTED_ERROR_CODES = {
     "signed-context": frozenset({"context-mismatch"}),
     "runner-claim": frozenset({"claim-not-observed"}),
     "live-job": frozenset({"job-not-verified"}),
-    "ledger-claim": frozenset({"claim-transition-denied"}),
+    "ledger-claim": frozenset({"claim-expired", "claim-state-conflict"}),
     "runner-disable": frozenset({"disable-failed"}),
     "ledger-start": frozenset({"start-transition-denied"}),
 }
@@ -376,9 +381,13 @@ class AllocationBroker:
             ) from exc
         try:
             self.ledger.transition(allocation_id, "claim", now=now + timedelta(seconds=time.monotonic() - started_at))
-        except RunnerJitError as exc:
+        except AllocationClaimExpired as exc:
             raise JobStartedDenial(
-                "ledger-claim", "claim-transition-denied"
+                "ledger-claim", "claim-expired"
+            ) from exc
+        except InvalidLifecycleTransition as exc:
+            raise JobStartedDenial(
+                "ledger-claim", "claim-state-conflict"
             ) from exc
         # Disabling immediately after the unique runner claims the job prevents
         # a second registration/job while allowing the claimed job to proceed.

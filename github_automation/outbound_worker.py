@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -371,6 +371,14 @@ class _WorkerProgress:
             },
         )
 
+    def allocation_window(self, issued_at: str, claim_deadline: str) -> None:
+        self.state.record(
+            self.key,
+            "allocation-window",
+            allocation_issued_at=issued_at,
+            claim_deadline=claim_deadline,
+        )
+
     def finalizing(self) -> None:
         self.state.record(self.key, "finalizing")
 
@@ -520,7 +528,10 @@ class PilotWorker(_AssignmentWorker):
         signer: Any,
         checks: PilotCheckPublisher | None = None,
         repository: str | None = None,
+        claim_ttl: timedelta = timedelta(minutes=12),
     ):
+        if claim_ttl <= timedelta(0) or claim_ttl > timedelta(minutes=15):
+            raise ValueError("claim TTL must be in (0, 15 minutes]")
         self.state = state
         self.source = source
         self.broker = broker
@@ -528,6 +539,7 @@ class PilotWorker(_AssignmentWorker):
         self.signer = signer
         self.checks = checks
         self.repository = repository
+        self.claim_ttl = claim_ttl
 
     def _details_url(self, run_id: int, job_id: int) -> str:
         """The exact job page a published Check Run points its author at."""
@@ -626,10 +638,9 @@ class PilotWorker(_AssignmentWorker):
     def _package(
         self, request: Mapping[str, Any], progress: Mapping[str, Any]
     ) -> JitPilotPackageV1:
-        package_value = request["pilot_package"]
-        now = self.source.clock()
-        if not isinstance(progress.get("finalized"), dict):
-            validate_allocation_reservation(request["reservation"], now=now)
+        package_value = progress.get("dispatch_package", request["pilot_package"])
+        package_now = self.source.clock()
+        reservation_now = package_now
         if progress.get("run_id") is not None:
             # A durable dispatch receipt is the no-return boundary. After it,
             # the package remains the authenticated identity of the active
@@ -638,12 +649,23 @@ class PilotWorker(_AssignmentWorker):
             if not isinstance(issued_at, str):
                 raise JitPilotError("issued_at must be canonical UTC")
             try:
-                now = datetime.fromisoformat(
+                package_now = datetime.fromisoformat(
                     issued_at.removesuffix("Z") + "+00:00"
                 )
+                if isinstance(progress.get("dispatch_package"), dict):
+                    reservation_issued = request["reservation"].get(
+                        "approval_issued_at", request["reservation"].get("issued_at")
+                    )
+                    reservation_now = datetime.fromisoformat(
+                        str(reservation_issued).removesuffix("Z") + "+00:00"
+                    )
             except ValueError as exc:
                 raise JitPilotError("issued_at must be canonical UTC") from exc
-        return JitPilotPackageV1.from_mapping(package_value, now=now)
+        if not isinstance(progress.get("finalized"), dict):
+            validate_allocation_reservation(
+                request["reservation"], now=reservation_now
+            )
+        return JitPilotPackageV1.from_mapping(package_value, now=package_now)
 
     @staticmethod
     def _recovery_allocation_id(request: Mapping[str, Any]) -> str:
@@ -660,7 +682,12 @@ class PilotWorker(_AssignmentWorker):
                 str(package_value.get("issued_at", "")).removesuffix("Z") + "+00:00"
             )
             reservation_issued = datetime.fromisoformat(
-                str(reservation.get("issued_at", "")).removesuffix("Z") + "+00:00"
+                str(
+                    reservation.get(
+                        "approval_issued_at", reservation.get("issued_at", "")
+                    )
+                ).removesuffix("Z")
+                + "+00:00"
             )
             package = JitPilotPackageV1.from_mapping(
                 package_value, now=package_issued
@@ -748,6 +775,26 @@ class PilotWorker(_AssignmentWorker):
         self.state_request = request
         reservation = request["reservation"]
         try:
+            progress = self.state.progress(key)
+            if (
+                not isinstance(progress.get("dispatch_package"), dict)
+                and progress.get("run_id") is None
+            ):
+                package_now = self.source.clock().replace(microsecond=0)
+                dispatch_package = dict(request["pilot_package"])
+                dispatch_package.update(
+                    issued_at=package_now.isoformat().replace("+00:00", "Z"),
+                    expires_at=(package_now + timedelta(minutes=15))
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                )
+                JitPilotPackageV1.from_mapping(dispatch_package, now=package_now)
+                self.state.record(
+                    key,
+                    "package-issued",
+                    dispatch_package=dispatch_package,
+                )
+                progress = self.state.progress(key)
             package = self._package(request, progress)
         except JitPilotError as exc:
             return self._terminal_reconcile(
@@ -773,7 +820,7 @@ class PilotWorker(_AssignmentWorker):
                         "pilot dispatch receipt is ambiguous; refusing redispatch"
                     )
                 self._record(key, "dispatching")
-                run_id = self.github.dispatch_package(request["pilot_package"])
+                run_id = self.github.dispatch_package(progress["dispatch_package"])
                 if (
                     isinstance(run_id, bool)
                     or not isinstance(run_id, int)
@@ -808,6 +855,23 @@ class PilotWorker(_AssignmentWorker):
                 )
             if observed.run_id != run_id or observed.job_name != "local-quality":
                 raise WorkerError("pilot observation crossed dispatch identity")
+            progress = self.state.progress(key)
+            if reservation.get("allocation_reservation_version") == 2 and not (
+                isinstance(progress.get("allocation_issued_at"), str)
+                and isinstance(progress.get("claim_deadline"), str)
+            ):
+                allocation_now = self.source.clock().replace(microsecond=0)
+                self._record(
+                    key,
+                    "allocation-window",
+                    allocation_issued_at=allocation_now.isoformat().replace(
+                        "+00:00", "Z"
+                    ),
+                    claim_deadline=(allocation_now + self.claim_ttl)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                )
+                progress = self.state.progress(key)
             # The pull request Check Runs open only once the exact job identity
             # is proven, so nothing is ever published for a run we do not own.
             self._open_checks(
@@ -816,13 +880,20 @@ class PilotWorker(_AssignmentWorker):
             payload = dict(reservation)
             payload.pop("allocation_reservation_version")
             payload.update(
-                runner_allocation_version=1,
+                runner_allocation_version=reservation[
+                    "allocation_reservation_version"
+                ],
                 run_id=str(run_id),
                 run_attempt=observed.run_attempt,
                 job_id=str(observed.job_id),
                 dispatch_sha=observed.dispatch_sha,
                 tested_sha=package.tested_merge_sha,
             )
+            if reservation["allocation_reservation_version"] == 2:
+                payload.update(
+                    issued_at=progress["allocation_issued_at"],
+                    claim_deadline=progress["claim_deadline"],
+                )
             finalized = progress.get("finalized")
             if not isinstance(finalized, dict):
                 envelope = self.signer.sign_allocation(payload)

@@ -1268,7 +1268,20 @@ class AllocationBrokerTests(unittest.TestCase):
             with self.assertRaises(JobStartedDenial) as failure:
                 self.broker.job_started(self.payload["allocation_id"], self.context(), now=expires - timedelta(seconds=5))
         self.assertEqual("ledger-claim", failure.exception.phase)
+        self.assertEqual("claim-expired", failure.exception.error_code)
         self.assertEqual(0, self.ledger.get(self.payload["allocation_id"]).jobs_started)
+        self.assertNotIn("disable", self.driver.events)
+
+    def test_recovered_allocation_reports_claim_state_conflict(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        self.ledger.transition(self.payload["allocation_id"], "recover")
+        with self.assertRaises(JobStartedDenial) as failure:
+            self.broker.job_started(
+                self.payload["allocation_id"], self.context(), now=NOW
+            )
+        self.assertEqual("ledger-claim", failure.exception.phase)
+        self.assertEqual("claim-state-conflict", failure.exception.error_code)
         self.assertNotIn("disable", self.driver.events)
 
     def test_late_disable_cannot_start_the_ledger_after_the_hook_budget(self):
