@@ -10,14 +10,14 @@ readonly GARM_BLOB_DATABASE=/var/lib/self-hosted-ci/garm/blob-garm.db
 readonly LIVE_VERIFIER_CONFIG=/etc/self-hosted-ci/github-live-job-verifier.json
 readonly OUTBOUND_RUNTIME_INSTALLER=/usr/local/lib/self-hosted-ci/install-outbound-worker-runtime.py
 readonly SESSION_HELPER=/usr/local/lib/self-hosted-ci/garm-cli-session.py
-readonly RUNTIME_CLI_HOME=/run/self-hosted-ci/garm-cli
+readonly RUNTIME_CLI_HOME=/run/self-hosted-ci-broker/garm-cli
 readonly TRANSIENT_UNIT=self-hosted-ci-garm-configure.service
 readonly CALLBACK_URL=http://10.254.0.1:8080/api/v1/callbacks
 readonly METADATA_URL=http://10.254.0.1:8080/api/v1/metadata
 
 die() { printf 'garm-jit configuration blocked: %s\n' "$*" >&2; exit 1; }
 usage() {
-  printf 'usage: %s [--plan] | --apply --config-template FILE --jwt-secret-file FILE --database-passphrase-file FILE --garm-admin-username-file FILE --garm-admin-password-file FILE --runner-manager-app-config-file FILE --dispatcher-app-config-file FILE --live-job-verifier-app-config-file FILE --garm-cli-home /run/self-hosted-ci/garm-cli --authority-kind personal-repository|organization-runner-group --repository OWNER/REPO --repository-id ID --default-branch BRANCH [--entity-id UUID] --entity-name OWNER/REPO|ORGANIZATION [--runner-group GROUP] --image-alias ALIAS --image-fingerprint SHA256 --expected-previous-image-fingerprint SHA256 --allocation-authority-public-key FILE --live-job-verifier /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py --acknowledge-root-secret-installation --acknowledge-garm-database-mutation --acknowledge-external-github-configuration\n' "$0" >&2
+  printf 'usage: %s [--plan] | --apply --config-template FILE --jwt-secret-file FILE --database-passphrase-file FILE --garm-admin-username-file FILE --garm-admin-password-file FILE --runner-manager-app-config-file FILE --dispatcher-app-config-file FILE --live-job-verifier-app-config-file FILE --garm-cli-home /run/self-hosted-ci-broker/garm-cli --authority-kind personal-repository|organization-runner-group --repository OWNER/REPO --repository-id ID --default-branch BRANCH [--entity-id UUID] --entity-name OWNER/REPO|ORGANIZATION [--runner-group GROUP] --image-alias ALIAS --image-fingerprint SHA256 --expected-previous-image-fingerprint SHA256 --allocation-authority-public-key FILE --live-job-verifier /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py --acknowledge-root-secret-installation --acknowledge-garm-database-mutation --acknowledge-external-github-configuration\n' "$0" >&2
   exit 2
 }
 
@@ -196,7 +196,7 @@ for name in sys.argv[1:]:
 if len(set(fingerprints))!=3: raise SystemExit("GitHub App public-key fingerprints must be pairwise distinct")
 PY
 [[ -f "${template}" && ! -L "${template}" ]] || die 'config template must be a regular file'
-[[ "${cli_home}" == "${RUNTIME_CLI_HOME}" ]] || die 'garm-cli home must be exactly /run/self-hosted-ci/garm-cli'
+[[ "${cli_home}" == "${RUNTIME_CLI_HOME}" ]] || die 'garm-cli home must be exactly /run/self-hosted-ci-broker/garm-cli'
 [[ -x "${SESSION_HELPER}" && ! -L "${SESSION_HELPER}" ]] || die 'GARM CLI session helper is absent or unsafe'
 [[ -f "${PROVIDER_CONFIG}" && ! -L "${PROVIDER_CONFIG}" ]] || die 'Incus provider config is absent'
 [[ "$(stat -c '%U:%G:%a' "${PROVIDER_CONFIG}")" == root:garm-manager:640 ]] || die 'Incus provider config metadata drifted'

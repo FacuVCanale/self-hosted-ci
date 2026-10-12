@@ -595,7 +595,7 @@ forma idempotente: una respuesta `409 already initialized` es esperable en un
 retry y luego se prueba el login con las credenciales root-only. El bearer se
 valida como JWT `HS256`
 administrador firmado por el secreto configurado, se renueva si falta o vence
-en menos de cinco minutos y sólo existe en `/run/self-hosted-ci/garm-cli`
+en menos de cinco minutos y sólo existe en `/run/self-hosted-ci-broker/garm-cli`
 (`0700`, config `0600`), por lo que desaparece al reiniciar.
 
 La entidad ya no se prepara a mano. El comando valida primero tres identidades:
@@ -656,7 +656,7 @@ sudo /usr/local/lib/self-hosted-ci/configure-garm-jit.sh --apply \
   --runner-manager-app-config-file /etc/self-hosted-ci/runner-manager-app.json \
   --dispatcher-app-config-file /etc/self-hosted-ci/dispatcher-app.json \
   --live-job-verifier-app-config-file /etc/self-hosted-ci/live-job-verifier-app.json \
-  --garm-cli-home /run/self-hosted-ci/garm-cli \
+  --garm-cli-home /run/self-hosted-ci-broker/garm-cli \
   --authority-kind personal-repository \
   --repository <owner/repo> \
   --entity-name <owner/repo> \
@@ -883,7 +883,7 @@ broker. Revisar el plan y aplicar:
 ```bash
 sudo /usr/local/lib/self-hosted-ci/activate-garm-jit.sh --plan
 sudo /usr/local/lib/self-hosted-ci/activate-garm-jit.sh --apply \
-  --incus-project ci-jit --garm-cli-home /run/self-hosted-ci/garm-cli \
+  --incus-project ci-jit --garm-cli-home /run/self-hosted-ci-broker/garm-cli \
   --acknowledge-external-github-mutation \
   --acknowledge-local-ci-activation
 ```
@@ -940,7 +940,7 @@ efímeras antes de retirar GARM o la policy de red. No recibe IDs manuales:
 ```bash
 sudo /usr/local/lib/self-hosted-ci/deactivate-garm-jit.sh --plan
 sudo /usr/local/lib/self-hosted-ci/deactivate-garm-jit.sh --apply \
-  --incus-project ci-jit --garm-cli-home /run/self-hosted-ci/garm-cli \
+  --incus-project ci-jit --garm-cli-home /run/self-hosted-ci-broker/garm-cli \
   --acknowledge-external-github-mutation \
   --acknowledge-local-ci-deactivation
 ```

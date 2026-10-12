@@ -3,7 +3,7 @@ readonly GARM_SERVICE=self-hosted-ci-garm.service BROKER_SERVICE=self-hosted-ci-
 readonly GARM_TRANSACTION_LOCK=/run/self-hosted-ci-garm-jit.lock
 readonly ACTIVATION_SENTINEL=/etc/self-hosted-ci/ACTIVATION_APPROVED NETWORK_SENTINEL=/etc/self-hosted-ci/runner-network-v2.enabled HEALTH_STATE=/etc/self-hosted-ci/garm/health-state.json BROKER_CONFIG=/etc/self-hosted-ci/garm/allocation-broker.json BROKER_PUBLIC_KEY=/etc/self-hosted-ci/garm/allocation-authority-public-key.pem
 readonly OUTBOUND_CONFIG=/etc/self-hosted-ci/outbound-worker.json
-readonly GARM_CONFIG=/etc/self-hosted-ci/garm/config.toml PROVIDER_CONFIG=/etc/self-hosted-ci/garm/garm-provider-incus.toml GARM_SESSION_HELPER=/usr/local/lib/self-hosted-ci/garm-cli-session.py BROKER_CLI=/usr/local/lib/self-hosted-ci/garm-allocation-broker.py LIVE_JOB_VERIFIER=/usr/local/libexec/self-hosted-ci/github-live-job-verifier.py LIVE_CONTRACT_VERIFIER=/usr/local/lib/self-hosted-ci/verify-live-artifact-contract.py CANARY_MATRIX_CLI=/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py GARM_RUNTIME_HOME=/run/self-hosted-ci/garm-cli NETWORK_POLICY_SCRIPT=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh
+readonly GARM_CONFIG=/etc/self-hosted-ci/garm/config.toml PROVIDER_CONFIG=/etc/self-hosted-ci/garm/garm-provider-incus.toml GARM_SESSION_HELPER=/usr/local/lib/self-hosted-ci/garm-cli-session.py BROKER_CLI=/usr/local/lib/self-hosted-ci/garm-allocation-broker.py LIVE_JOB_VERIFIER=/usr/local/libexec/self-hosted-ci/github-live-job-verifier.py LIVE_CONTRACT_VERIFIER=/usr/local/lib/self-hosted-ci/verify-live-artifact-contract.py CANARY_MATRIX_CLI=/usr/local/lib/self-hosted-ci/run-wsl-jit-canary-matrix.py GARM_RUNTIME_HOME=/run/self-hosted-ci-broker/garm-cli NETWORK_POLICY_SCRIPT=/usr/local/lib/self-hosted-ci/apply-runner-network-policy.sh
 readonly GARM_DATABASE=/var/lib/self-hosted-ci/garm/garm.db
 die(){ printf 'garm-jit transaction blocked: %s\n' "$*" >&2; exit 1; }
 acquire_transaction_lock(){ command -v flock >/dev/null||die "flock is required"; exec 9>"$GARM_TRANSACTION_LOCK"; flock -n 9||die "another transaction is active"; }
@@ -22,13 +22,13 @@ require_live_artifact_contract(){ require_root_regular_file "$LIVE_CONTRACT_VERI
 require_canary_production_fence(){ require_root_regular_file "$CANARY_MATRIX_CLI" 0755; "$CANARY_MATRIX_CLI" production-fence >/dev/null||die "canary lane has not reached a clean terminal fence"; }
 require_real_policy_units(){ local u c; for u in "$POLICY_SERVICE" "$PROXY_SERVICE" "$GARM_SERVICE" "$BROKER_SERVICE" "$OUTBOUND_WORKER_SERVICE"; do c="$(systemctl cat "$u")"||die "cannot inspect $u"; [[ "$c" == *ExecStart=* && "$c" != */usr/bin/false* ]]||die "$u is inert"; done; [[ "$(systemctl cat "$GARM_SERVICE")" != *SupplementaryGroups=incus-admin* ]]||die "host-wide Incus admin forbidden"; }
 require_base_health(){ systemctl is-active --quiet incus.service; systemctl is-active --quiet "$BOUNDARY_SERVICE"; systemctl is-active --quiet "$HEALTH_TIMER"; }
-require_health_configuration(){ python3 - "$HEALTH_STATE" "$BROKER_CONFIG" "$OUTBOUND_CONFIG" "$LIVE_JOB_VERIFIER" <<'PY' || die "broker, health, and outbound worker contract invalid"
+require_health_configuration(){ python3 - "$HEALTH_STATE" "$BROKER_CONFIG" "$OUTBOUND_CONFIG" "$LIVE_JOB_VERIFIER" "$GARM_RUNTIME_HOME" <<'PY' || die "broker, health, and outbound worker contract invalid"
 import json,sys
 h=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2])); o=json.load(open(sys.argv[3]))
 if set(h)!={"schema_version","garm_cli_home","manager_configured","provider_configured","image_configured","broker_configured","zero_scale_sets","image","targets"} or h["schema_version"]!=3: raise SystemExit(1)
 if not all(h[k] is True for k in ("manager_configured","provider_configured","image_configured","broker_configured","zero_scale_sets")): raise SystemExit(1)
 if b.get("live_job_verifier")!=sys.argv[4] or b.get("targets")!=h["targets"] or not h["targets"]: raise SystemExit(1)
-if b.get("garm_cli_home")!=h["garm_cli_home"] or b.get("provider_name")!="incus_ci_jit" or h["image"]!={"alias":b.get("image_alias"),"fingerprint":b.get("image_fingerprint")}: raise SystemExit(1)
+if b.get("garm_cli_home")!=sys.argv[5] or h["garm_cli_home"]!=sys.argv[5] or b.get("provider_name")!="incus_ci_jit" or h["image"]!={"alias":b.get("image_alias"),"fingerprint":b.get("image_fingerprint")}: raise SystemExit(1)
 repository_id=str(o.get("repository_id")); target=h["targets"].get(repository_id)
 if not isinstance(target,dict) or set(target)!={"authority_kind","entity_flag","entity_id","entity_name","runner_group"}: raise SystemExit(1)
 expected_name=o.get("repository") if o.get("authority_kind")=="personal-repository" else str(o.get("repository","")).split("/",1)[0]

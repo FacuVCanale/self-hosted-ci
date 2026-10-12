@@ -303,7 +303,7 @@ class GarmConfigurationTests(unittest.TestCase):
             "--dispatcher-app-config-file",
             "--live-job-verifier-app-config-file",
             "--garm-cli-home",
-            "/run/self-hosted-ci/garm-cli",
+            "/run/self-hosted-ci-broker/garm-cli",
             "--acknowledge-root-secret-installation",
             "--acknowledge-garm-database-mutation",
             "--acknowledge-external-github-configuration",

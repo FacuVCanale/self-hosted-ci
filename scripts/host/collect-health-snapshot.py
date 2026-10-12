@@ -39,7 +39,9 @@ GARM_BINARY = Path("/usr/local/bin/garm")
 GARM_PROVIDER = Path("/usr/local/libexec/garm/garm-provider-incus")
 GARM_CLI = Path("/usr/local/bin/garm-cli")
 GARM_SESSION_HELPER = Path("/usr/local/lib/self-hosted-ci/garm-cli-session.py")
-GARM_RUNTIME_HOME = "/run/self-hosted-ci/garm-cli"
+GARM_RUNTIME_HOME = "/run/self-hosted-ci-broker/garm-cli"
+BROKER_SERVICE = "self-hosted-ci-allocation-broker.service"
+NSENTER = "/usr/bin/nsenter"
 GARM_SESSION_SECRETS = tuple(
     Path(f"/etc/self-hosted-ci/garm/{name}")
     for name in ("admin-username", "admin-password", "jwt-secret")
@@ -142,6 +144,50 @@ def root_secret_file(path: Path) -> bool:
     )
 
 
+def broker_namespace_command(
+    *command: str, timeout: int
+) -> tuple[str, subprocess.CompletedProcess[str] | None]:
+    """Run inside the live broker mount namespace and reject restart races."""
+
+    def main_pid() -> str | None:
+        result = subprocess.run(
+            ["systemctl", "show", BROKER_SERVICE, "--property=MainPID", "--value"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        value = result.stdout.strip()
+        return value if result.returncode == 0 and value.isdigit() and value != "0" else None
+
+    try:
+        before = main_pid()
+        if before is None:
+            return "unavailable", None
+        result = subprocess.run(
+            [NSENTER, f"--mount=/proc/{before}/ns/mnt", "--", *command],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+        after = main_pid()
+    except (OSError, subprocess.TimeoutExpired):
+        return "unavailable", None
+    if after != before:
+        return "unavailable", None
+    if result.returncode == 73:
+        return "runtime_read_only", result
+    if result.returncode != 0:
+        return "unavailable", result
+    return "ready", result
+
+
+def broker_garm_runtime_state() -> str:
+    state, _ = broker_namespace_command(str(GARM_SESSION_HELPER), "ensure", timeout=15)
+    return state
+
+
 def garm_configuration_state() -> dict[str, bool | None]:
     unknown = {
         "manager_configured": None,
@@ -197,14 +243,16 @@ def garm_configuration_state() -> dict[str, bool | None]:
         return unknown
 
     def query(*args: str) -> object:
-        result = subprocess.run(
-            [str(GARM_SESSION_HELPER), "run", "--", "--format", "json", *args],
-            text=True,
-            capture_output=True,
-            check=False,
+        state, result = broker_namespace_command(
+            str(GARM_SESSION_HELPER),
+            "run",
+            "--",
+            "--format",
+            "json",
+            *args,
             timeout=15,
         )
-        if result.returncode != 0:
+        if state != "ready" or result is None:
             raise ValueError("garm-cli query failed")
         return json.loads(result.stdout)
 
@@ -352,6 +400,7 @@ def observe(distro: str, maximum_age: int) -> dict[str, object]:
         Path("/var/lib/self-hosted-ci/health/heartbeat.json"), maximum_age, now
     )
     services = {name: systemd_state(name) for name in SERVICES}
+    broker_runtime_state = broker_garm_runtime_state()
     configured = garm_configuration_state()
     persistent_registration = persistent_registration_present()
     idle_instances = idle_instance_count()
@@ -368,6 +417,7 @@ def observe(distro: str, maximum_age: int) -> dict[str, object]:
         "broker": {
             "configured": configured["broker_configured"],
             "state": broker_state,
+            "runtime_state": broker_runtime_state,
         },
         "transient_inventories_clean": configured["zero_scale_sets"],
         "persistent_registration": persistent_registration,
@@ -396,6 +446,10 @@ def observe(distro: str, maximum_age: int) -> dict[str, object]:
         reasons.append("runner_image_not_configured")
     if configured["broker_configured"] is not True:
         reasons.append("allocation_broker_not_configured")
+    if broker_runtime_state == "runtime_read_only":
+        reasons.append("broker_garm_runtime_read_only")
+    elif broker_runtime_state != "ready":
+        reasons.append("broker_garm_runtime_unavailable")
     if configured["zero_scale_sets"] is not True:
         reasons.append("transient_scale_sets_not_clean")
     if persistent_registration is not False:

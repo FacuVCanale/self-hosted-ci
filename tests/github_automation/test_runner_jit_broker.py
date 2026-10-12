@@ -12,6 +12,7 @@ import importlib.util
 import io
 import json
 from email.message import Message
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -350,7 +351,7 @@ class AllocationBrokerTests(unittest.TestCase):
         )
         driver = GarmCliAllocationDriver(
             {
-                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "garm_cli_home": "/run/self-hosted-ci-broker/garm-cli",
                 "provider_name": "incus_ci_jit",
                 "image_alias": "runner-pinned",
                 "image_fingerprint": "b" * 64,
@@ -398,7 +399,7 @@ class AllocationBrokerTests(unittest.TestCase):
         template.write_text("#!/bin/bash\necho '{{ .DownloadURL }}'\n", encoding="utf-8")
         driver = GarmCliAllocationDriver(
             {
-                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "garm_cli_home": "/run/self-hosted-ci-broker/garm-cli",
                 "provider_name": "incus_ci_jit",
                 "image_alias": "runner-pinned",
                 "image_fingerprint": "b" * 64,
@@ -459,7 +460,7 @@ class AllocationBrokerTests(unittest.TestCase):
         hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         driver = GarmCliAllocationDriver(
             {
-                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "garm_cli_home": "/run/self-hosted-ci-broker/garm-cli",
                 "provider_name": "incus_ci_jit",
                 "image_alias": "runner-pinned",
                 "image_fingerprint": "b" * 64,
@@ -490,7 +491,7 @@ class AllocationBrokerTests(unittest.TestCase):
         hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         driver = GarmCliAllocationDriver(
             {
-                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "garm_cli_home": "/run/self-hosted-ci-broker/garm-cli",
                 "provider_name": "incus_ci_jit",
                 "image_alias": "runner-pinned",
                 "image_fingerprint": "b" * 64,
@@ -513,7 +514,7 @@ class AllocationBrokerTests(unittest.TestCase):
         hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         driver = GarmCliAllocationDriver(
             {
-                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "garm_cli_home": "/run/self-hosted-ci-broker/garm-cli",
                 "provider_name": "incus_ci_jit",
                 "image_alias": "runner-pinned",
                 "image_fingerprint": "b" * 64,
@@ -597,7 +598,7 @@ class AllocationBrokerTests(unittest.TestCase):
         hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         driver = GarmCliAllocationDriver(
             {
-                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "garm_cli_home": "/run/self-hosted-ci-broker/garm-cli",
                 "provider_name": "incus_ci_jit",
                 "image_alias": "runner-pinned",
                 "image_fingerprint": "b" * 64,
@@ -657,7 +658,7 @@ class AllocationBrokerTests(unittest.TestCase):
         hook.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         driver = GarmCliAllocationDriver(
             {
-                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "garm_cli_home": "/run/self-hosted-ci-broker/garm-cli",
                 "provider_name": "incus_ci_jit",
                 "image_alias": "runner-pinned",
                 "image_fingerprint": "b" * 64,
@@ -679,17 +680,41 @@ class AllocationBrokerTests(unittest.TestCase):
         self.assertIn("garm-cli-session.py ensure", production)
         self.assertIn("socket.create_connection", canary)
         for source in (production, canary):
-            self.assertIn("Environment=INCUS_CONF=/run/self-hosted-ci/incus-client", source)
-            self.assertIn("/run/self-hosted-ci", source)
+            self.assertIn("Environment=INCUS_CONF=/run/self-hosted-ci-broker/incus-client", source)
+            self.assertIn("/run/self-hosted-ci-broker", source)
         self.assertIn(
             "&& /usr/local/lib/self-hosted-ci/garm-allocation-broker.py recover",
             production,
         )
         self.assertIn('[ "$i" -lt 60 ]', production)
         self.assertNotIn("garm-allocation-broker.py recover", canary)
-        for source in (production, worker):
-            self.assertIn("RuntimeDirectory=self-hosted-ci", source)
+        self.assertIn("RuntimeDirectory=self-hosted-ci-broker", production)
+        self.assertIn("RuntimeDirectory=self-hosted-ci-worker", worker)
+        self.assertNotEqual(
+            "self-hosted-ci-broker",
+            "self-hosted-ci-worker",
+        )
+        for source in (production, worker, canary):
             self.assertIn("RuntimeDirectoryMode=0700", source)
+
+    def test_worker_runtime_restart_cannot_remove_broker_runtime(self):
+        unit_root = Path(__file__).parents[2] / "packaging/systemd"
+        production = (unit_root / "self-hosted-ci-allocation-broker.service").read_text()
+        worker_unit = (unit_root / "self-hosted-ci-outbound-worker.service").read_text()
+        broker_name = production.split("RuntimeDirectory=", 1)[1].splitlines()[0]
+        worker_name = worker_unit.split("RuntimeDirectory=", 1)[1].splitlines()[0]
+        self.assertNotEqual(broker_name, worker_name)
+        with tempfile.TemporaryDirectory() as raw:
+            runtime_root = Path(raw)
+            broker = runtime_root / broker_name
+            worker = runtime_root / worker_name
+            broker.mkdir()
+            worker.mkdir()
+            shutil.rmtree(worker)
+            worker.mkdir()
+            probe = broker / "write-probe"
+            probe.write_text("ready", encoding="utf-8")
+            self.assertEqual("ready", probe.read_text(encoding="utf-8"))
 
     def test_hook_uses_only_fixed_bridge_local_broker_before_steps(self):
         source = (

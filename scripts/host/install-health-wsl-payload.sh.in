@@ -39,6 +39,7 @@ restore_previous() {
 }
 cleanup() { if ${committed} || ! ${snapshot_complete}; then rm -rf -- "${tx}"; else restore_previous; fi; }
 trap cleanup EXIT; trap 'exit 90' ERR
+command -v nsenter >/dev/null || { printf 'nsenter is required\n' >&2; exit 1; }
 [[ -d "${root}" && ! -L "${root}" ]] && root_existed=true
 [[ -d "${state}" && ! -L "${state}" ]] && state_existed=true
 [[ ! -e "${root}" || ( -d "${root}" && ! -L "${root}" ) ]] || { printf 'unsafe install root\n' >&2; exit 1; }

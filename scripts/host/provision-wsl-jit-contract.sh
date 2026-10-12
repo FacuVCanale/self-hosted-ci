@@ -122,6 +122,7 @@ else
   acquire_transaction_lock
 fi
 command -v systemctl >/dev/null || die "systemd is required"
+command -v nsenter >/dev/null || die "nsenter is required"
 command -v incus >/dev/null || die "Incus is not installed"
 command -v garm >/dev/null || die "GARM is not installed"
 id garm-manager >/dev/null 2>&1 || die "dedicated garm-manager account is absent"

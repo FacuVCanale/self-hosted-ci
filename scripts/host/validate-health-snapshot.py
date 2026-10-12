@@ -187,6 +187,7 @@ def validate(
             if not isinstance(runner["broker"], dict) or set(runner["broker"]) != {
                 "configured",
                 "state",
+                "runtime_state",
             }:
                 raise ValueError()
             if (
@@ -199,6 +200,12 @@ def validate(
                 "inactive",
                 "failed",
                 "unknown",
+            }:
+                raise ValueError()
+            if runner["broker"]["runtime_state"] not in {
+                "ready",
+                "runtime_read_only",
+                "unavailable",
             }:
                 raise ValueError()
             if (
@@ -353,6 +360,10 @@ def validate(
                 expected_blockers.add("runner_image_not_configured")
             if runner["broker"]["configured"] is not True:
                 expected_blockers.add("allocation_broker_not_configured")
+            if runner["broker"]["runtime_state"] == "runtime_read_only":
+                expected_blockers.add("broker_garm_runtime_read_only")
+            elif runner["broker"]["runtime_state"] != "ready":
+                expected_blockers.add("broker_garm_runtime_unavailable")
             if runner["transient_inventories_clean"] is not True:
                 expected_blockers.add("transient_scale_sets_not_clean")
             if runner["persistent_registration"] is not False:
@@ -399,7 +410,8 @@ def validate(
         or runner["manager"] != {"configured": True, "state": "active"}
         or runner["provider"] != {"configured": True}
         or runner["image"] != {"configured": True}
-        or runner["broker"] != {"configured": True, "state": "active"}
+        or runner["broker"]
+        != {"configured": True, "state": "active", "runtime_state": "ready"}
         or runner["transient_inventories_clean"] is not True
         or runner["persistent_registration"] is not False
         or runner["idle_instances"] != 0

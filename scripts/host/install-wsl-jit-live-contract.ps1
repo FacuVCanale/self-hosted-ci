@@ -327,7 +327,7 @@ activation_reconciled=false
 if [[ -e /etc/self-hosted-ci/ACTIVATION_APPROVED || -L /etc/self-hosted-ci/ACTIVATION_APPROVED ]]; then
   [[ "$acknowledge_external_github_mutation" == true && "$acknowledge_local_ci_deactivation" == true ]] || { echo 'activation reconciliation lacks exact acknowledgements' >&2; exit 2; }
   deactivation_result="$(bash "$package_root/scripts/host/deactivate-garm-jit.sh" --apply \
-    --incus-project ci-jit --garm-cli-home /run/self-hosted-ci/garm-cli \
+    --incus-project ci-jit --garm-cli-home /run/self-hosted-ci-broker/garm-cli \
     --acknowledge-external-github-mutation --acknowledge-local-ci-deactivation \
     --inherited-transaction-lock)"
   python3 - "$deactivation_result" <<'PY'
