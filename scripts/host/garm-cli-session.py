@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 from contextlib import contextmanager
+import errno
 import fcntl
 import hashlib
 import hmac
@@ -24,7 +25,7 @@ import urllib.request
 
 BASE_URL = "http://127.0.0.1:9997"
 LOGIN_URL = f"{BASE_URL}/api/v1/auth/login"
-RUNTIME_HOME = Path("/run/self-hosted-ci/garm-cli")
+RUNTIME_HOME = Path("/run/self-hosted-ci-broker/garm-cli")
 USERNAME_FILE = Path("/etc/self-hosted-ci/garm/admin-username")
 PASSWORD_FILE = Path("/etc/self-hosted-ci/garm/admin-password")
 JWT_SECRET_FILE = Path("/etc/self-hosted-ci/garm/jwt-secret")
@@ -35,6 +36,10 @@ MAX_TOKEN_SECONDS = 25 * 60 * 60
 
 class SessionError(RuntimeError):
     """A deliberately non-secret session failure."""
+
+
+class RuntimeReadOnlyError(SessionError):
+    """The broker runtime mount cannot be written."""
 
 
 def _root_secret(path: Path, *, maximum_size: int = 4096) -> bytes:
@@ -57,15 +62,20 @@ def _root_secret(path: Path, *, maximum_size: int = 4096) -> bytes:
 
 
 def _secure_directory(path: Path) -> None:
-    if path.is_symlink():
-        raise SessionError(f"runtime path is a symlink: {path}")
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    details = path.lstat()
-    if not stat.S_ISDIR(details.st_mode) or details.st_uid != 0:
-        raise SessionError(f"runtime directory metadata is unsafe: {path}")
-    os.chmod(path, 0o700)
-    if stat.S_IMODE(path.lstat().st_mode) != 0o700:
-        raise SessionError(f"runtime directory permissions are unsafe: {path}")
+    try:
+        if path.is_symlink():
+            raise SessionError(f"runtime path is a symlink: {path}")
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        details = path.lstat()
+        if not stat.S_ISDIR(details.st_mode) or details.st_uid != 0:
+            raise SessionError(f"runtime directory metadata is unsafe: {path}")
+        os.chmod(path, 0o700)
+        if stat.S_IMODE(path.lstat().st_mode) != 0o700:
+            raise SessionError(f"runtime directory permissions are unsafe: {path}")
+    except OSError as exc:
+        if exc.errno == errno.EROFS:
+            raise RuntimeReadOnlyError("broker runtime is read-only") from exc
+        raise SessionError(f"runtime directory is unavailable: {path}") from exc
 
 
 def _decode_segment(value: str) -> dict[str, object]:
@@ -294,8 +304,17 @@ def main() -> int:
                 },
             )
         return completed.returncode
+    except RuntimeReadOnlyError as exc:
+        print(f"garm-cli session blocked: {exc}", file=sys.stderr)
+        return 73
     except SessionError as exc:
         print(f"garm-cli session blocked: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        if exc.errno == errno.EROFS:
+            print("garm-cli session blocked: broker runtime is read-only", file=sys.stderr)
+            return 73
+        print("garm-cli session blocked: runtime I/O failed", file=sys.stderr)
         return 1
 
 

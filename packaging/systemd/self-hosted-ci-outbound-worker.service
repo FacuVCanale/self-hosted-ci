@@ -9,7 +9,7 @@ ConditionPathExists=/etc/self-hosted-ci/outbound-worker.runtime-ready
 Type=simple
 User=root
 ExecCondition=/usr/local/lib/self-hosted-ci/install-outbound-worker-runtime.py --verify
-ExecStartPre=/usr/bin/install -d -o root -g root -m 0700 /run/self-hosted-ci
+ExecStartPre=/usr/bin/install -d -o root -g root -m 0700 /run/self-hosted-ci-worker
 ExecStart=/usr/local/lib/self-hosted-ci/outbound-coordinator-worker.py serve
 Restart=on-failure
 RestartSec=5s
@@ -17,9 +17,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/self-hosted-ci/outbound-worker /var/lib/self-hosted-ci/garm /run/self-hosted-ci
+ReadWritePaths=/var/lib/self-hosted-ci/outbound-worker /var/lib/self-hosted-ci/garm /run/self-hosted-ci-worker
 UMask=0077
-RuntimeDirectory=self-hosted-ci
+RuntimeDirectory=self-hosted-ci-worker
 RuntimeDirectoryMode=0700
 
 [Install]

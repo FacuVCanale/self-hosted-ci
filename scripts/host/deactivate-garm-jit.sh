@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/garm-jit-transaction-lib.sh"
-usage(){ printf 'usage: %s [--plan] | --apply --incus-project ci-jit --garm-cli-home /run/self-hosted-ci/garm-cli --acknowledge-external-github-mutation --acknowledge-local-ci-deactivation [--inherited-transaction-lock]\n' "$0" >&2; exit 2; }
+usage(){ printf 'usage: %s [--plan] | --apply --incus-project ci-jit --garm-cli-home /run/self-hosted-ci-broker/garm-cli --acknowledge-external-github-mutation --acknowledge-local-ci-deactivation [--inherited-transaction-lock]\n' "$0" >&2; exit 2; }
 mode=plan; incus_project=""; garm_cli_home=""; ack_external=false; ack_deactivation=false; inherited_lock=false
 while [[ $# -gt 0 ]]; do case "$1" in --plan) mode=plan;shift;; --apply) mode=apply;shift;; --incus-project) incus_project="$2";shift 2;; --garm-cli-home) garm_cli_home="$2";shift 2;; --acknowledge-external-github-mutation) ack_external=true;shift;; --acknowledge-local-ci-deactivation) ack_deactivation=true;shift;; --inherited-transaction-lock) inherited_lock=true;shift;; *) usage;; esac; done
 if [[ "$mode" == plan ]]; then printf '%s\n' '{"mode":"plan","external_calls":"not_performed","host_changes":false,"sequence":["restore policy and GARM","stop broker admission","recover disable-drain-delete allocations","prove all target scale-set inventories and Incus empty","stop GARM and policy"]}'; exit 0; fi

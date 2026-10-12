@@ -87,7 +87,7 @@ class CanaryRuntimeAssemblerTests(unittest.TestCase):
             "health.json",
             {
                 "schema_version": 3,
-                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "garm_cli_home": "/run/self-hosted-ci-broker/garm-cli",
                 "manager_configured": True,
                 "provider_configured": True,
                 "image_configured": True,
@@ -105,7 +105,7 @@ class CanaryRuntimeAssemblerTests(unittest.TestCase):
             "broker.json",
             {
                 "allocation_signer_fingerprint": signer_fingerprint,
-                "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+                "garm_cli_home": "/run/self-hosted-ci-broker/garm-cli",
                 "provider_name": "incus_ci_jit",
                 "image_alias": auth["image_alias"],
                 "image_fingerprint": auth["image_fingerprint"],

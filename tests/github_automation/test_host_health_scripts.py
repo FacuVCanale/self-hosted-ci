@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -60,7 +61,11 @@ def snapshot(now: datetime, *, eligible: bool = True) -> dict[str, object]:
             "manager": {"configured": True, "state": "active"},
             "provider": {"configured": True},
             "image": {"configured": True},
-            "broker": {"configured": True, "state": "active"},
+            "broker": {
+                "configured": True,
+                "state": "active",
+                "runtime_state": "ready",
+            },
             "transient_inventories_clean": True,
             "persistent_registration": False,
             "idle_instances": 0,
@@ -309,6 +314,21 @@ class HostHealthScriptTests(unittest.TestCase):
                     MODULE.validate(payload, SID, "Ubuntu-24.04-CI", now),
                 )
 
+    def test_validator_rejects_read_only_broker_runtime_with_specific_blocker(
+        self,
+    ) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        payload = snapshot(now)
+        payload["runner"]["broker"]["runtime_state"] = "runtime_read_only"
+        payload["eligibility"] = {
+            "eligible_for_local_ci": False,
+            "blocking_reasons": ["broker_garm_runtime_read_only"],
+        }
+        self.assertEqual(
+            (3, "local_ci_ineligible"),
+            MODULE.validate(payload, SID, "Ubuntu-24.04-CI", now),
+        )
+
     def test_validator_accepts_only_legacy_runner_shape_for_supervisor_probe_failure(
         self,
     ) -> None:
@@ -378,13 +398,13 @@ class HostHealthScriptTests(unittest.TestCase):
             "image_configured": True,
             "broker_configured": True,
             "zero_scale_sets": True,
-            "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+            "garm_cli_home": "/run/self-hosted-ci-broker/garm-cli",
             "image": {"alias": "runner-pinned", "fingerprint": "a" * 64},
             "targets": {"123": target},
         }
         broker = {
             "allocation_signer_fingerprint": "b" * 64,
-            "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+            "garm_cli_home": "/run/self-hosted-ci-broker/garm-cli",
             "provider_name": "incus_ci_jit",
             "image_alias": "runner-pinned",
             "image_fingerprint": "a" * 64,
@@ -418,8 +438,10 @@ class HostHealthScriptTests(unittest.TestCase):
             mock.patch.object(collector, "root_secret_file", return_value=True),
             mock.patch.object(Path, "read_text", read_state),
             mock.patch.object(
-                collector.subprocess, "run", side_effect=completed
-            ) as run,
+                collector, "broker_namespace_command",
+                side_effect=[("ready", result) for result in completed[:3]],
+            ) as namespace_run,
+            mock.patch.object(collector.subprocess, "run", return_value=completed[3]) as run,
         ):
             self.assertEqual(
                 {
@@ -431,12 +453,12 @@ class HostHealthScriptTests(unittest.TestCase):
                 },
                 collector.garm_configuration_state(),
             )
-            self.assertEqual(4, run.call_count)
+            self.assertEqual(3, namespace_run.call_count)
             self.assertTrue(
                 all(
-                    call.args[0][:3]
-                    == [str(collector.GARM_SESSION_HELPER), "run", "--"]
-                    for call in run.call_args_list[:3]
+                    call.args[:3]
+                    == (str(collector.GARM_SESSION_HELPER), "run", "--")
+                    for call in namespace_run.call_args_list
                 )
             )
             self.assertEqual(
@@ -450,7 +472,7 @@ class HostHealthScriptTests(unittest.TestCase):
                     "--format",
                     "json",
                 ],
-                run.call_args_list[3].args[0],
+                run.call_args.args[0],
             )
         drifted_responses = [responses[0], responses[1], [{"id": 9}], responses[3]]
         with (
@@ -458,12 +480,19 @@ class HostHealthScriptTests(unittest.TestCase):
             mock.patch.object(collector, "root_secret_file", return_value=True),
             mock.patch.object(Path, "read_text", read_state),
             mock.patch.object(
+                collector,
+                "broker_namespace_command",
+                side_effect=[
+                    ("ready", subprocess.CompletedProcess([], 0, json.dumps(value), ""))
+                    for value in drifted_responses[:3]
+                ],
+            ),
+            mock.patch.object(
                 collector.subprocess,
                 "run",
-                side_effect=[
-                    subprocess.CompletedProcess([], 0, json.dumps(value), "")
-                    for value in drifted_responses
-                ],
+                return_value=subprocess.CompletedProcess(
+                    [], 0, json.dumps(drifted_responses[3]), ""
+                ),
             ),
         ):
             self.assertTrue(
@@ -487,6 +516,80 @@ class HostHealthScriptTests(unittest.TestCase):
         source = collector_path.read_text(encoding="utf-8")
         for forbidden in ("github_token", "installation_token", "passphrase"):
             self.assertNotIn(forbidden, source.lower())
+
+    def test_collector_probes_garm_inside_stable_broker_mount_namespace(self) -> None:
+        collector_path = HOST / "collect-health-snapshot.py"
+        spec = importlib.util.spec_from_file_location(
+            "health_collector_namespace", collector_path
+        )
+        assert spec and spec.loader
+        collector = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(collector)
+        responses = [
+            subprocess.CompletedProcess([], 0, "4321\n", ""),
+            subprocess.CompletedProcess([], 73, "", "read-only"),
+            subprocess.CompletedProcess([], 0, "4321\n", ""),
+        ]
+        with mock.patch.object(
+            collector.subprocess, "run", side_effect=responses
+        ) as run:
+            self.assertEqual("runtime_read_only", collector.broker_garm_runtime_state())
+        self.assertEqual(
+            [
+                collector.NSENTER,
+                "--mount=/proc/4321/ns/mnt",
+                "--",
+                str(collector.GARM_SESSION_HELPER),
+                "ensure",
+            ],
+            run.call_args_list[1].args[0],
+        )
+
+    def test_collector_marks_erofs_broker_runtime_ineligible(self) -> None:
+        collector_path = HOST / "collect-health-snapshot.py"
+        spec = importlib.util.spec_from_file_location(
+            "health_collector_erofs", collector_path
+        )
+        assert spec and spec.loader
+        collector = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(collector)
+        configured = {
+            "manager_configured": True,
+            "provider_configured": True,
+            "image_configured": True,
+            "broker_configured": True,
+            "zero_scale_sets": True,
+        }
+        fresh = {
+            "status": "fresh",
+            "observed_at": "2026-10-12T00:00:00Z",
+            "age_seconds": 0,
+            "max_age_seconds": 180,
+        }
+        with (
+            mock.patch.object(Path, "open", return_value=io.StringIO('ID=ubuntu\nVERSION_ID="24.04"\n')),
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(collector.platform, "release", return_value="wsl2"),
+            mock.patch.dict(collector.os.environ, {"WSL_DISTRO_NAME": "Ubuntu-24.04-CI"}),
+            mock.patch.object(collector, "heartbeat", return_value=fresh),
+            mock.patch.object(
+                collector,
+                "systemd_state",
+                return_value={"active": "active", "enabled": "enabled"},
+            ),
+            mock.patch.object(
+                collector, "broker_garm_runtime_state", return_value="runtime_read_only"
+            ),
+            mock.patch.object(collector, "garm_configuration_state", return_value=configured),
+            mock.patch.object(collector, "persistent_registration_present", return_value=False),
+            mock.patch.object(collector, "idle_instance_count", return_value=0),
+        ):
+            observed = collector.observe("Ubuntu-24.04-CI", 180)
+        self.assertFalse(observed["eligibility"]["eligible_for_local_ci"])
+        self.assertEqual(
+            ["broker_garm_runtime_read_only"],
+            observed["eligibility"]["blocking_reasons"],
+        )
 
     def test_collector_observes_zero_idle_instances_and_rejects_unobservable_inventory(
         self,

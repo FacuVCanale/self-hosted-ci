@@ -16,13 +16,13 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/self-hosted-ci/garm /run/self-hosted-ci
-Environment=INCUS_CONF=/run/self-hosted-ci/incus-client
+ReadWritePaths=/var/lib/self-hosted-ci/garm /run/self-hosted-ci-broker
+Environment=INCUS_CONF=/run/self-hosted-ci-broker/incus-client
 RestrictSUIDSGID=true
 LockPersonality=true
 RestrictRealtime=true
 UMask=0077
-RuntimeDirectory=self-hosted-ci
+RuntimeDirectory=self-hosted-ci-broker
 RuntimeDirectoryMode=0700
 
 [Install]

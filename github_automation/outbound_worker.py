@@ -94,7 +94,7 @@ class LocalBrokerCli:
         try:
             if value is not None:
                 fd, name = tempfile.mkstemp(
-                    prefix="allocation.", suffix=".json", dir="/run/self-hosted-ci"
+                    prefix="allocation.", suffix=".json", dir="/run/self-hosted-ci-worker"
                 )
                 os.fchmod(fd, 0o600)
                 with os.fdopen(fd, "w") as out:

@@ -984,7 +984,7 @@ systemctl daemon-reexec
             raise RunnerJitError("transient GARM scale set survived deletion")
 
     def _incus_instances(self) -> list[Mapping[str, Any]]:
-        incus_config = Path("/run/self-hosted-ci/incus-client")
+        incus_config = Path("/run/self-hosted-ci-broker/incus-client")
         incus_config.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(incus_config, 0o700)
         result = subprocess.run(

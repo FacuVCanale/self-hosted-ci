@@ -264,7 +264,7 @@ class GarmActivationTransactionTests(unittest.TestCase):
             "runner_group": "ci",
         }
         broker = {
-            "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+            "garm_cli_home": "/run/self-hosted-ci-broker/garm-cli",
             "provider_name": "incus_ci_jit",
             "image_alias": "image-v1",
             "image_fingerprint": fingerprint,
@@ -273,7 +273,7 @@ class GarmActivationTransactionTests(unittest.TestCase):
         }
         health = {
             "schema_version": 3,
-            "garm_cli_home": "/run/self-hosted-ci/garm-cli",
+            "garm_cli_home": "/run/self-hosted-ci-broker/garm-cli",
             "manager_configured": True,
             "provider_configured": True,
             "image_configured": True,
@@ -297,7 +297,14 @@ class GarmActivationTransactionTests(unittest.TestCase):
                 for path, value in zip(paths, (health, broker, outbound), strict=True):
                     path.write_text(json.dumps(value), encoding="utf-8")
                 return subprocess.run(
-                    [sys.executable, "-c", body, *map(str, paths), "/verifier"],
+                    [
+                        sys.executable,
+                        "-c",
+                        body,
+                        *map(str, paths),
+                        "/verifier",
+                        "/run/self-hosted-ci-broker/garm-cli",
+                    ],
                     text=True,
                     capture_output=True,
                     check=False,
@@ -308,6 +315,10 @@ class GarmActivationTransactionTests(unittest.TestCase):
             self.assertNotEqual(0, run().returncode)
             outbound["image_fingerprint"] = fingerprint
             outbound["runner_group"] = "other"
+            self.assertNotEqual(0, run().returncode)
+            outbound["runner_group"] = "ci"
+            broker["garm_cli_home"] = "/run/self-hosted-ci/garm-cli"
+            health["garm_cli_home"] = "/run/self-hosted-ci/garm-cli"
             self.assertNotEqual(0, run().returncode)
 
     def test_scripts_parse_as_bash(self) -> None:

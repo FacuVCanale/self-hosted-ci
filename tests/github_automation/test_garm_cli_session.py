@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import errno
 import os
 from pathlib import Path
 import tempfile
@@ -83,6 +84,16 @@ class Opener:
 
 
 class GarmCliSessionTests(unittest.TestCase):
+    def test_read_only_runtime_has_a_stable_distinct_exit_code(self) -> None:
+        helper = load_helper()
+        read_only = OSError(errno.EROFS, "read-only file system")
+        with (
+            mock.patch.object(helper.os, "geteuid", return_value=0),
+            mock.patch.object(helper.Path, "mkdir", side_effect=read_only),
+            mock.patch.object(helper.sys, "argv", [str(HELPER), "ensure"]),
+        ):
+            self.assertEqual(73, helper.main())
+
     def test_jwt_signature_authority_and_expiry_are_fail_closed(self) -> None:
         helper = load_helper()
         secret = b"s" * 32
