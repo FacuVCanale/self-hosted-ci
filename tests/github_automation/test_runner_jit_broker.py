@@ -690,6 +690,12 @@ class AllocationBrokerTests(unittest.TestCase):
         self.assertNotIn("garm-allocation-broker.py recover", canary)
         self.assertIn("RuntimeDirectory=self-hosted-ci-broker", production)
         self.assertIn("RuntimeDirectory=self-hosted-ci-worker", worker)
+        self.assertIn(
+            "ReadWritePaths=/var/lib/self-hosted-ci/outbound-worker "
+            "/var/lib/self-hosted-ci/garm /run/self-hosted-ci-worker "
+            "/run/self-hosted-ci-broker",
+            worker,
+        )
         self.assertNotEqual(
             "self-hosted-ci-broker",
             "self-hosted-ci-worker",
