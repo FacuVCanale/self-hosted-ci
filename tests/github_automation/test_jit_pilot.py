@@ -224,6 +224,34 @@ class JitPilotTests(unittest.TestCase):
                 set(lines),
             )
 
+    def test_live_validation_failure_waits_for_exact_worker_cancellation(self):
+        delays = []
+        self.assertEqual(
+            1,
+            validation_main(
+                {
+                    "JIT_PILOT_PACKAGE": "not-json",
+                    "GITHUB_ACTIONS": "true",
+                    "GITHUB_RUN_ID": "123456",
+                },
+                clock=lambda: NOW,
+                sleeper=delays.append,
+            ),
+        )
+        self.assertEqual([30], delays)
+
+    def test_non_actions_validation_failure_never_sleeps(self):
+        delays = []
+        self.assertEqual(
+            1,
+            validation_main(
+                {"JIT_PILOT_PACKAGE": "not-json"},
+                clock=lambda: NOW,
+                sleeper=delays.append,
+            ),
+        )
+        self.assertEqual([], delays)
+
     def test_terminal_monitor_finishes_then_proves_exact_cleanup(self):
         broker = Broker()
         sleeps = []
