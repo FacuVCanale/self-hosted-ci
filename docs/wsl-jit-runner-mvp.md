@@ -190,9 +190,11 @@ stale heartbeat, inactive timer, or probe error rolls back the Windows task and
 invalidates its credential:
 
 ```powershell
+$supervisorSha256 = (Get-FileHash .\scripts\host\run-health-supervisor.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
 .\scripts\host\install-health-supervisor.ps1 `
   -ExpectedServiceAccountSid 'S-1-5-21-...' `
-  -ReaderAccount 'DESKTOP-NAME\selfhosted-ci-health'
+  -ReaderAccount 'DESKTOP-NAME\selfhosted-ci-health' `
+  -ExpectedSupervisorSha256 $supervisorSha256
 ```
 
 The explicit Apply form requires all three acknowledgements:
@@ -201,6 +203,7 @@ The explicit Apply form requires all three acknowledgements:
 .\scripts\host\install-health-supervisor.ps1 `
   -ExpectedServiceAccountSid 'S-1-5-21-...' `
   -ReaderAccount 'DESKTOP-NAME\selfhosted-ci-health' `
+  -ExpectedSupervisorSha256 $supervisorSha256 `
   -Apply `
   -AcknowledgePersistentPasswordTask `
   -AcknowledgeServiceAccountPasswordRotation `
@@ -261,21 +264,24 @@ repository is activated merely by cloning this repository.
   five-minute maximum lifetime;
 - Ed25519 signatures under a dedicated domain with a pinned SPKI fingerprint;
 - a transactional SQLite replay ledger;
-- persisted issuance/expiry timestamps revalidated atomically at claim and job
-  start (`expires_at` is exclusive);
-- strict `issued -> claimed -> running -> terminal -> cleaned` transitions;
+- persisted issuance/expiry timestamps revalidated by the single durable job
+  admission CAS (`claim_deadline` is exclusive);
+- strict `issued -> running -> terminal -> cleaned` transitions;
 - exactly one job and idempotent cleanup;
 - an allocation-derived `wsl-jit-<128-bit digest>` scale-set name that is the
   job's sole official label; a shared `wsl-jit` scale set is forbidden;
 - signed binding of repository ID/name, exact SHA, trusted default-branch
   workflow ref, workflow run ID/attempt, workflow job ID/name, runner image
   fingerprint, authority kind/group and exclusive expiry;
-- two-phase reboot recovery from issued/claimed (`jobs_started=0`) and running
+- two-phase reboot recovery from issued (`jobs_started=0`) and running
   (`jobs_started=1`) allocations: the ledger first records
   `recovery_required + cleanup_pending` with a stable idempotency key, and only
   records `cleaned` after the external cleanup effect returns complete
   evidence. An identical post-crash acknowledgement converges; different or
   incomplete evidence is rejected.
+- schema-v3 migration fences any legacy v2 `claimed` allocation into
+  `recovery_required` with `jobs_started=0`, cleanup pending, and the same
+  deterministic cleanup-key contract; it is never promoted to execution.
 
 Broker and runner credentials never belong in the allocation or repository.
 
@@ -286,7 +292,9 @@ label. Only after the exact run ID, run attempt and numeric `workflow_job_id`
 are observed does the authority issue the final signed allocation. Finalization
 must project exactly onto the immutable reservation, installs that signed
 binding into the still-disabled runner bootstrap, and only then enables the
-scale set. The remaining sequence is `claim -> disable -> drain -> delete`.
+scale set. Once the hook observes the exact live runner and job, the remaining
+sequence is `disable -> admit-job -> drain -> delete`; `admit-job` is the only
+durable `issued -> running` CAS and increments `jobs_started` exactly once.
 The GARM adapter consumes an already-authenticated CLI profile; it
 does not create sessions, GitHub Apps, credentials or repository authority.
 Every allocation gets a new scale set with `max_runners=1`,
@@ -304,8 +312,8 @@ stops the job before its first workflow step. The broker verifies the signed
 binding, sole GARM registration, and a separately authenticated GitHub live-job
 verifier for the exact numeric `workflow_job_id`, run ID/attempt, repository,
 SHA, workflow ref, requested label, runner name, runner group and `in_progress`
-status; it then records claim and disables the
-scale set. The hook's textual `GITHUB_JOB` is never treated as a substitute for
+status; it then disables the scale set and performs the single durable
+`admit-job` CAS. The hook's textual `GITHUB_JOB` is never treated as a substitute for
 the numeric workflow job identity.
 
 The installed live verifier is fixed at

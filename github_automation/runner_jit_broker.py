@@ -61,7 +61,6 @@ JOB_STARTED_ERROR_CODES = {
     "live-job": frozenset({"job-not-verified"}),
     "ledger-claim": frozenset({"claim-expired", "claim-state-conflict"}),
     "runner-disable": frozenset({"disable-failed"}),
-    "ledger-start": frozenset({"start-transition-denied"}),
 }
 
 
@@ -240,7 +239,7 @@ def durable_denial_cause(error_code: str, exc: BaseException | None) -> str | No
 
 
 class AllocationBroker:
-    """Fail-closed create→bind→enable→claim→disable→drain→delete lifecycle."""
+    """Fail-closed create→bind→enable→admit→drain→delete lifecycle."""
 
     def __init__(
         self,
@@ -444,18 +443,10 @@ class AllocationBroker:
             raise JobStartedDenial(
                 "live-job", "job-not-verified"
             ) from exc
-        try:
-            self.ledger.transition(allocation_id, "claim", now=now + timedelta(seconds=time.monotonic() - started_at))
-        except AllocationClaimExpired as exc:
-            raise JobStartedDenial(
-                "ledger-claim", "claim-expired"
-            ) from exc
-        except InvalidLifecycleTransition as exc:
-            raise JobStartedDenial(
-                "ledger-claim", "claim-state-conflict"
-            ) from exc
-        # Disabling immediately after the unique runner claims the job prevents
-        # a second registration/job while allowing the claimed job to proceed.
+        # Disable after both live proofs but before the durable CAS.  A crash
+        # here leaves `issued`, which startup recovery fences and cleans; two
+        # concurrent hooks may both disable idempotently, but only one can win
+        # the atomic issued→running admission below.
         try:
             self.driver.disable_scale_set(
                 scale_set_id, scale_set_name,
@@ -468,10 +459,18 @@ class AllocationBroker:
                 "runner-disable", "disable-failed"
             ) from exc
         try:
-            self.ledger.transition(allocation_id, "start", now=now + timedelta(seconds=time.monotonic() - started_at))
-        except RunnerJitError as exc:
+            self.ledger.transition(
+                allocation_id,
+                "admit-job",
+                now=now + timedelta(seconds=time.monotonic() - started_at),
+            )
+        except AllocationClaimExpired as exc:
             raise JobStartedDenial(
-                "ledger-start", "start-transition-denied"
+                "ledger-claim", "claim-expired"
+            ) from exc
+        except InvalidLifecycleTransition as exc:
+            raise JobStartedDenial(
+                "ledger-claim", "claim-state-conflict"
             ) from exc
 
     def finish(

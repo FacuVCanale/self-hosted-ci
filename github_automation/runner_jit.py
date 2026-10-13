@@ -51,7 +51,7 @@ OUTCOME_CAUSES = frozenset({
     "superseded-base", "superseded-merge", "pr-closed", "stale-merge-ref",
 })
 DELAY_BUCKETS = frozenset({"before-deadline", "0-60s", "1-5m", ">5m", "unknown"})
-LEDGER_SCHEMA_VERSION = 2
+LEDGER_SCHEMA_VERSION = 3
 OUTCOME_RETENTION_DAYS = 30
 
 
@@ -524,6 +524,31 @@ class SqliteAllocationLedger:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS allocation_outcomes_occurred ON allocation_outcomes(occurred_at)"
             )
+            if version < 3:
+                # A v2 `claimed` record sits between external observation and
+                # scale-set disable, so it cannot safely be promoted to an
+                # executed job.  Fence it into the existing durable recovery
+                # path while preserving its immutable identity and job count.
+                for allocation_id, payload_digest in connection.execute(
+                    "SELECT allocation_id,payload_digest FROM runner_allocations WHERE state='claimed'"
+                ).fetchall():
+                    cleanup_key = hashlib.sha256(
+                        canonicalize_jcs(
+                            {
+                                "allocation_id": allocation_id,
+                                "payload_digest": payload_digest,
+                                "operation": "reboot-cleanup-v1",
+                            }
+                        )
+                    ).hexdigest()
+                    connection.execute(
+                        """UPDATE runner_allocations
+                        SET state='recovery_required',outcome='reboot',
+                            recovery_required=1,cleanup_pending=1,
+                            cleanup_idempotency_key=?
+                        WHERE allocation_id=? AND state='claimed'""",
+                        (cleanup_key, allocation_id),
+                    )
             connection.execute(f"PRAGMA user_version={LEDGER_SCHEMA_VERSION}")
             cutoff = (datetime.now(timezone.utc) - timedelta(days=self.outcome_retention_days)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
             connection.execute("DELETE FROM allocation_outcomes WHERE occurred_at < ?", (cutoff,))
@@ -897,19 +922,12 @@ class SqliteAllocationLedger:
         cleanup_idempotency_key: str | None = None,
         cleanup_evidence: Mapping[str, Any] | None = None,
     ) -> AllocationRecord:
-        allowed = {
-            "claim",
-            "start",
-            "finish",
-            "cleanup",
-            "recover",
-            "ack-recovery-cleanup",
-        }
+        allowed = {"admit-job", "finish", "cleanup", "recover", "ack-recovery-cleanup"}
         if action not in allowed:
             raise RunnerJitError("unknown lifecycle action")
-        if action in {"claim", "start"}:
+        if action == "admit-job":
             if now is None or now.tzinfo != timezone.utc:
-                raise RunnerJitError("claim/start require a timezone-aware UTC now")
+                raise RunnerJitError("admit-job requires a timezone-aware UTC now")
         with self._lock, closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -944,21 +962,19 @@ class SqliteAllocationLedger:
             claim_deadline = _parse_time(
                 claim_deadline_text or expires_text, "claim_deadline"
             )
-            if action == "claim" and state != "issued":
+            if action == "admit-job" and state != "issued":
                 connection.rollback()
                 raise InvalidLifecycleTransition(
                     f"invalid lifecycle transition: {state}->{action}"
                 )
-            if action == "claim" and (
+            if action == "admit-job" and (
                 now < issued_at - timedelta(seconds=30) or now >= claim_deadline
             ):
                 connection.rollback()
                 raise AllocationClaimExpired(
-                    "allocation claim deadline expired before lifecycle transition"
+                    "allocation claim deadline expired before job admission"
                 )
-            if action == "claim" and state == "issued":
-                state = "claimed"
-            elif action == "start" and state == "claimed" and jobs == 0:
+            if action == "admit-job" and state == "issued" and jobs == 0:
                 state, jobs = "running", 1
             elif (
                 action == "finish"
@@ -993,7 +1009,7 @@ class SqliteAllocationLedger:
                 )
             elif (
                 action == "recover"
-                and state in {"reserved", "issued", "claimed", "running"}
+                and state in {"reserved", "issued", "running"}
                 and jobs in {0, 1}
             ):
                 state, stored_outcome = "recovery_required", "reboot"

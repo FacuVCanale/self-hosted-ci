@@ -46,7 +46,6 @@ DIAGNOSTIC_CODES = {
     "live-job": frozenset({"job-not-verified"}),
     "ledger-claim": frozenset({"claim-expired", "claim-state-conflict"}),
     "runner-disable": frozenset({"disable-failed"}),
-    "ledger-start": frozenset({"start-transition-denied"}),
     "broker": frozenset({"operation-denied", "internal-error"}),
 }
 

@@ -491,7 +491,7 @@ class LiveCanaryDispatchAdapter:
                 )
                 self._observed["runner_claimed"] = True
                 return
-            if record.state not in {"issued", "claimed"}:
+            if record.state != "issued":
                 raise CanaryRuntimeError("canary allocation left claimable state")
             if self.monotonic() >= deadline:
                 raise CanaryRuntimeError("canary runner claim timed out")
