@@ -45,6 +45,38 @@ function Test-IsAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Get-ExactSupervisorProcesses([string]$ExpectedSid) {
+    $fileArgument = '-File "' + $InstalledSupervisor + '"'
+    $matches = [Collections.Generic.List[object]]::new()
+    foreach ($process in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+        if (
+            -not [string]::Equals([string]$process.ExecutablePath, $PowerShellExe, [StringComparison]::OrdinalIgnoreCase) -or
+            -not ([string]$process.CommandLine).Contains($fileArgument)
+        ) { continue }
+        $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
+        if ([uint32]$owner.ReturnValue -ne 0 -or [string]$owner.Sid -ne $ExpectedSid) {
+            throw "an exact supervisor process has an unexpected owner"
+        }
+        $matches.Add($process)
+    }
+    return @($matches)
+}
+
+function Stop-ExactSupervisorProcesses([string]$ExpectedSid) {
+    foreach ($process in @(Get-ExactSupervisorProcesses $ExpectedSid)) {
+        $terminated = Invoke-CimMethod -InputObject $process -MethodName Terminate -ErrorAction Stop
+        if ([uint32]$terminated.ReturnValue -ne 0) {
+            throw "exact supervisor process termination failed"
+        }
+    }
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        Start-Sleep -Milliseconds 500
+        $remaining = @(Get-ExactSupervisorProcesses $ExpectedSid)
+    } while ($remaining.Count -ne 0 -and (Get-Date) -lt $deadline)
+    if ($remaining.Count -ne 0) { throw "exact supervisor processes survived the restart fence" }
+}
+
 function Get-ServiceAccount([string]$Name) {
     $account = Get-LocalUser -Name $Name -ErrorAction Stop
     if (-not $account.Enabled -or [string]$account.PrincipalSource -ne "Local") { throw "service account must be enabled and local" }
@@ -372,6 +404,11 @@ try {
     if ($watchdogStart -lt $taskRegistrationStartedAt.AddMinutes(9) -or $watchdogStart -gt $taskRegistrationStartedAt.AddMinutes(11)) { throw "task watchdog future StartBoundary postcondition failed" }
     if ([string]$observed.Settings.MultipleInstances -ne "IgnoreNew" -or $observed.Settings.RestartCount -ne 5 -or $observed.Settings.RestartInterval -ne "PT1M") { throw "task restart policy postcondition failed" }
     if (-not (Get-WinEvent -ListLog "Microsoft-Windows-TaskScheduler/Operational" -ErrorAction Stop).IsEnabled) { throw "Task Scheduler operational log postcondition failed" }
+    # Registration must not inherit a detached process from an older task
+    # instance.  Fence exact path+identity matches before the first start so
+    # no stale writer can race the two initial snapshot observations.
+    Stop-ExactSupervisorProcesses $serviceSid.Value
+    if (@(Get-ExactSupervisorProcesses $serviceSid.Value).Count -ne 0) { throw "pre-start supervisor process fence is not empty" }
     Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
     $deadline = (Get-Date).AddSeconds(120)
     $firstSnapshot = $null
@@ -420,6 +457,8 @@ try {
         $stoppedTask = Get-ScheduledTask -TaskPath "\" -TaskName $TaskName -ErrorAction Stop
     } while ([string]$stoppedTask.State -eq "Running" -and (Get-Date) -lt $stopDeadline)
     if ([string]$stoppedTask.State -eq "Running") { throw "supervisor task did not stop for exact restart" }
+    Stop-ExactSupervisorProcesses $serviceSid.Value
+    if (@(Get-ExactSupervisorProcesses $serviceSid.Value).Count -ne 0) { throw "supervisor process fence is not empty" }
     if (Test-Path -LiteralPath $SnapshotPath) { Remove-Item -LiteralPath $SnapshotPath -Force }
     if (Test-Path -LiteralPath $SnapshotPath) { throw "pre-restart snapshot could not be fenced" }
     $restartStartedAt = [DateTimeOffset]::UtcNow
@@ -444,21 +483,46 @@ try {
     $restartedInfo = Get-ScheduledTaskInfo -TaskPath "\" -TaskName $TaskName -ErrorAction Stop
     if ([string]$restartedTask.State -ne "Running") { throw "supervisor task is not Running after exact restart" }
     if ([uint32]$restartedInfo.LastTaskResult -notin @(267009, 267045)) { throw "restarted supervisor task result is not running or queued" }
+    $restartedProcesses = @(Get-ExactSupervisorProcesses $serviceSid.Value)
+    if ($restartedProcesses.Count -ne 1) { throw "exactly one restarted supervisor process is required" }
     $restartedSupervisorSha256 = (Get-FileHash -LiteralPath $InstalledSupervisor -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($restartedSupervisorSha256 -cne $ExpectedSupervisorSha256) { throw "running supervisor path no longer matches the approved bytes" }
     Assert-ExactAcl $SnapshotPath @("S-1-5-18", "S-1-5-32-544", $serviceSid.Value, $readerSid.Value) $readerSid.Value $true $serviceSid.Value $false $true
-    [ordered]@{ status = "installed"; task_name = $TaskName; task_restarted = $true; supervisor_script_sha256 = $restartedSupervisorSha256; service_account_sid = $serviceSid.Value; snapshot_path = $SnapshotPath; password_material_persisted_by_installer = $false; runner_registration_changed = $false } | ConvertTo-Json -Compress
+    [ordered]@{ status = "installed"; task_name = $TaskName; task_restarted = $true; supervisor_process_count = 1; supervisor_script_sha256 = $restartedSupervisorSha256; service_account_sid = $serviceSid.Value; snapshot_path = $SnapshotPath; password_material_persisted_by_installer = $false; runner_registration_changed = $false } | ConvertTo-Json -Compress
 }
 catch {
     $originalFailure = $_.Exception.Message
     $rollbackFailures = [Collections.Generic.List[string]]::new()
     if ($registered) {
+        $taskStopFailure = $null
         try {
-            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
-            if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "task remains registered" }
+            $rollbackTask = Get-ScheduledTask -TaskPath "\" -TaskName $TaskName -ErrorAction Stop
+            Stop-ScheduledTask -InputObject $rollbackTask -ErrorAction Stop
+            $rollbackStopDeadline = (Get-Date).AddSeconds(30)
+            do {
+                Start-Sleep -Milliseconds 500
+                $rollbackTask = Get-ScheduledTask -TaskPath "\" -TaskName $TaskName -ErrorAction Stop
+            } while ([string]$rollbackTask.State -eq "Running" -and (Get-Date) -lt $rollbackStopDeadline)
+            if ([string]$rollbackTask.State -eq "Running") { throw "task remains Running during rollback" }
         }
-        catch { $rollbackFailures.Add("task rollback failed: $($_.Exception.Message)") }
+        catch { $taskStopFailure = $_.Exception.Message }
+        $taskUnregisterFailure = $null
+        try {
+            if (Get-ScheduledTask -TaskPath "\" -TaskName $TaskName -ErrorAction SilentlyContinue) {
+                Unregister-ScheduledTask -TaskPath "\" -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+            }
+            if (Get-ScheduledTask -TaskPath "\" -TaskName $TaskName -ErrorAction SilentlyContinue) { throw "task remains registered" }
+        }
+        catch { $taskUnregisterFailure = $_.Exception.Message }
+        try {
+            # Fence again only after registration is gone, so Scheduler cannot
+            # restart a process between termination and task removal.
+            Stop-ExactSupervisorProcesses $serviceSid.Value
+            if (@(Get-ExactSupervisorProcesses $serviceSid.Value).Count -ne 0) { throw "supervisor process remains after task rollback" }
+        }
+        catch { $rollbackFailures.Add("process rollback failed: $($_.Exception.Message)") }
+        if ($null -ne $taskStopFailure) { $rollbackFailures.Add("task stop rollback failed: $taskStopFailure") }
+        if ($null -ne $taskUnregisterFailure) { $rollbackFailures.Add("task unregister rollback failed: $taskUnregisterFailure") }
     }
     if ($passwordApplied) {
         $recoveryPassword = $null
