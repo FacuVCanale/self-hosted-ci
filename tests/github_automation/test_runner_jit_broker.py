@@ -1331,8 +1331,7 @@ class AllocationBrokerTests(unittest.TestCase):
         sleep.assert_called_once_with(JOB_STARTED_POLL_INTERVAL_SECONDS)
         self.assertEqual(1, len(self.live.calls))
         transitions = [call.args[1] for call in transition.call_args_list]
-        self.assertEqual(1, transitions.count("claim"))
-        self.assertEqual(1, transitions.count("start"))
+        self.assertEqual(["admit-job"], transitions)
         self.assertEqual(1, driver.events.count("disable"))
         record = self.ledger.get(self.payload["allocation_id"])
         self.assertEqual("running", record.state)
@@ -1518,7 +1517,7 @@ class AllocationBrokerTests(unittest.TestCase):
         self.assertEqual("ledger-claim", failure.exception.phase)
         self.assertEqual("claim-expired", failure.exception.error_code)
         self.assertEqual(0, self.ledger.get(self.payload["allocation_id"]).jobs_started)
-        self.assertNotIn("disable", self.driver.events)
+        self.assertIn("disable", self.driver.events)
 
     def test_recovered_allocation_reports_claim_state_conflict(self):
         self.broker.reserve(self.reservation, now=NOW)
@@ -1530,7 +1529,37 @@ class AllocationBrokerTests(unittest.TestCase):
             )
         self.assertEqual("ledger-claim", failure.exception.phase)
         self.assertEqual("claim-state-conflict", failure.exception.error_code)
-        self.assertNotIn("disable", self.driver.events)
+        self.assertIn("disable", self.driver.events)
+
+    def test_concurrent_job_admission_has_one_durable_winner(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        barrier = threading.Barrier(4)
+        original_disable = self.driver.disable_scale_set
+
+        def synchronized_disable(*args, **kwargs):
+            barrier.wait(timeout=5)
+            return original_disable(*args, **kwargs)
+
+        def attempt():
+            try:
+                self.broker.job_started(
+                    self.payload["allocation_id"], self.context(), now=NOW
+                )
+            except JobStartedDenial as exc:
+                return exc.error_code
+            return "admitted"
+
+        with mock.patch.object(
+            self.driver, "disable_scale_set", side_effect=synchronized_disable
+        ), ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(lambda _: attempt(), range(4)))
+
+        self.assertEqual(1, results.count("admitted"))
+        self.assertEqual(3, results.count("claim-state-conflict"))
+        record = self.ledger.get(self.payload["allocation_id"])
+        self.assertEqual("running", record.state)
+        self.assertEqual(1, record.jobs_started)
 
     def test_late_disable_cannot_start_the_ledger_after_the_hook_budget(self):
         self.broker.reserve(self.reservation, now=NOW)

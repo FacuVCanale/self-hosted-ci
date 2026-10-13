@@ -75,9 +75,11 @@ el supervisor persistente como **último paso que rota la contraseña de la
 cuenta de servicio**:
 
 ```powershell
+$supervisorSha256 = (Get-FileHash .\run-health-supervisor.ps1 -Algorithm SHA256).Hash.ToLowerInvariant()
 & .\install-health-supervisor.ps1 `
   -ExpectedServiceAccountSid '<SID-from-local-inventory>' `
   -ReaderAccount '<host>\selfhosted-ci-health' `
+  -ExpectedSupervisorSha256 $supervisorSha256 `
   -Apply `
   -AcknowledgePersistentPasswordTask `
   -AcknowledgeServiceAccountPasswordRotation `

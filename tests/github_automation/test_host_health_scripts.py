@@ -113,6 +113,36 @@ class HostHealthScriptTests(unittest.TestCase):
         self.assertIn('SCHED_S_TASK_RUNNING or SCHED_S_TASK_QUEUED', source)
         self.assertIn('$candidateAt -gt [DateTimeOffset]::Parse([string]$firstSnapshot.generated_at)', source)
 
+    def test_installer_restarts_exact_task_and_proves_installed_bytes(self):
+        source = INSTALLER.read_text(encoding="utf-8")
+        source_hash = source.index("$sourceSupervisorSha256 = (Get-FileHash")
+        copy = source.index("Copy-Item -LiteralPath $SourceSupervisor")
+        installed_hash = source.index("$installedSupervisorSha256 = (Get-FileHash")
+        first_start = source.index("Start-ScheduledTask -TaskName $TaskName")
+        snapshots = source.index("supervisor did not publish two distinct post-install snapshots")
+        exact_task = source.index('$restartTask = Get-ScheduledTask -TaskPath "\\" -TaskName $TaskName')
+        stop = source.index("Stop-ScheduledTask -InputObject $restartTask", exact_task)
+        fence = source.index("pre-restart snapshot could not be fenced", stop)
+        second_start = source.index("Start-ScheduledTask -InputObject $stoppedTask", fence)
+        fresh = source.index("restarted supervisor did not publish a fresh snapshot", second_start)
+        rehash = source.index("$restartedSupervisorSha256 = (Get-FileHash", fresh)
+        result = source.index("task_restarted = $true", rehash)
+        self.assertLess(source_hash, copy)
+        self.assertLess(copy, installed_hash)
+        self.assertLess(installed_hash, first_start)
+        self.assertLess(first_start, snapshots)
+        self.assertLess(snapshots, exact_task)
+        self.assertLess(exact_task, stop)
+        self.assertLess(stop, fence)
+        self.assertLess(fence, second_start)
+        self.assertLess(second_start, fresh)
+        self.assertLess(fresh, rehash)
+        self.assertLess(rehash, result)
+        self.assertIn("[Parameter(Mandatory = $true)][string]$ExpectedSupervisorSha256", source)
+        self.assertIn("supervisor_script_sha256 = $restartedSupervisorSha256", source)
+        self.assertIn('$candidate.install_nonce -eq $installNonce', source[second_start:fresh])
+        self.assertIn('$candidateAt -gt $restartStartedAt', source[second_start:fresh])
+
 
     def test_powershell_scripts_parse_when_available(self) -> None:
         powershell = next(
@@ -797,6 +827,7 @@ if ($script:events[$script:events.Count - 1] -ne 'probe') { throw 'normal probin
         source = INSTALLER.read_text(encoding="utf-8")
         for token in (
             "[switch]$Apply",
+            "ExpectedSupervisorSha256",
             "AcknowledgePersistentPasswordTask",
             "Get-DedicatedReader",
             "Get-LocalUser",

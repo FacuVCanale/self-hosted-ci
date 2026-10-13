@@ -3,6 +3,7 @@ param(
     [string]$ServiceAccount = "selfhosted-ci-svc",
     [Parameter(Mandatory = $true)][string]$ExpectedServiceAccountSid,
     [Parameter(Mandatory = $true)][string]$ReaderAccount,
+    [Parameter(Mandatory = $true)][string]$ExpectedSupervisorSha256,
     [string]$DistroName = "Ubuntu-24.04-CI",
     [switch]$Apply,
     [switch]$AcknowledgePersistentPasswordTask,
@@ -291,6 +292,9 @@ if (Test-GroupContainsSid $administratorGroup $readerSid.Value $readerVisitedGro
     throw "health reader must be a dedicated non-admin identity so its SFTP access is read-only"
 }
 if (-not (Test-Path -LiteralPath $SourceSupervisor -PathType Leaf)) { throw "supervisor source is missing" }
+if ($ExpectedSupervisorSha256 -notmatch '^[0-9a-f]{64}$') { throw "expected supervisor SHA-256 is invalid" }
+$sourceSupervisorSha256 = (Get-FileHash -LiteralPath $SourceSupervisor -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($sourceSupervisorSha256 -cne $ExpectedSupervisorSha256) { throw "supervisor source SHA-256 does not match the approved commit" }
 if (Test-Path -LiteralPath $UninstallMarkerPath) { throw "health supervisor installation is blocked by an owning uninstall transaction" }
 
 $plan = [ordered]@{
@@ -326,6 +330,8 @@ try {
     Set-Acl -LiteralPath $ControlRoot -AclObject (New-DirectoryAcl $serviceSid $readerSid $false)
     Set-Acl -LiteralPath $HealthRoot -AclObject (New-DirectoryAcl $serviceSid $readerSid $true)
     Copy-Item -LiteralPath $SourceSupervisor -Destination $InstalledSupervisor -Force
+    $installedSupervisorSha256 = (Get-FileHash -LiteralPath $InstalledSupervisor -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($installedSupervisorSha256 -cne $ExpectedSupervisorSha256) { throw "installed supervisor SHA-256 does not match the approved commit" }
     Assert-ExactAcl $ControlRoot @("S-1-5-18", "S-1-5-32-544", $serviceSid.Value) $readerSid.Value $false "S-1-5-32-544"
     Assert-ExactAcl $HealthRoot @("S-1-5-18", "S-1-5-32-544", $serviceSid.Value, $readerSid.Value) $readerSid.Value $true "S-1-5-32-544"
     if (Test-Path -LiteralPath $SnapshotPath) { Remove-Item -LiteralPath $SnapshotPath -Force }
@@ -403,7 +409,45 @@ try {
     if ($snapshot.heartbeat.status -ne "fresh") { throw "WSL heartbeat postcondition failed" }
     if ($snapshot.services.'self-hosted-ci-health-heartbeat.timer'.active -ne "active") { throw "WSL heartbeat timer postcondition failed" }
     Assert-ExactAcl $SnapshotPath @("S-1-5-18", "S-1-5-32-544", $serviceSid.Value, $readerSid.Value) $readerSid.Value $true $serviceSid.Value $false $true
-    [ordered]@{ status = "installed"; task_name = $TaskName; service_account_sid = $serviceSid.Value; snapshot_path = $SnapshotPath; password_material_persisted_by_installer = $false; runner_registration_changed = $false } | ConvertTo-Json -Compress
+
+    # Reopen the installed script in a new PowerShell process, rather than
+    # trusting that registration/copy replaced an already-running instance.
+    $restartTask = Get-ScheduledTask -TaskPath "\" -TaskName $TaskName -ErrorAction Stop
+    Stop-ScheduledTask -InputObject $restartTask -ErrorAction Stop
+    $stopDeadline = (Get-Date).AddSeconds(30)
+    do {
+        Start-Sleep -Milliseconds 500
+        $stoppedTask = Get-ScheduledTask -TaskPath "\" -TaskName $TaskName -ErrorAction Stop
+    } while ([string]$stoppedTask.State -eq "Running" -and (Get-Date) -lt $stopDeadline)
+    if ([string]$stoppedTask.State -eq "Running") { throw "supervisor task did not stop for exact restart" }
+    if (Test-Path -LiteralPath $SnapshotPath) { Remove-Item -LiteralPath $SnapshotPath -Force }
+    if (Test-Path -LiteralPath $SnapshotPath) { throw "pre-restart snapshot could not be fenced" }
+    $restartStartedAt = [DateTimeOffset]::UtcNow
+    Start-ScheduledTask -InputObject $stoppedTask -ErrorAction Stop
+    $restartDeadline = (Get-Date).AddSeconds(120)
+    $restartSnapshot = $null
+    do {
+        Start-Sleep -Seconds 2
+        if (Test-Path -LiteralPath $SnapshotPath -PathType Leaf) {
+            try {
+                $candidate = Get-Content -LiteralPath $SnapshotPath -Raw | ConvertFrom-Json
+                $candidateAt = [DateTimeOffset]::Parse([string]$candidate.generated_at)
+                if ($candidate.install_nonce -eq $installNonce -and $candidateAt -gt $restartStartedAt) { $restartSnapshot = $candidate }
+            }
+            catch { $restartSnapshot = $null }
+        }
+    } while ($null -eq $restartSnapshot -and (Get-Date) -lt $restartDeadline)
+    if ($null -eq $restartSnapshot) { throw "restarted supervisor did not publish a fresh snapshot" }
+    if ([int]$restartSnapshot.schema_version -ne 2 -or $restartSnapshot.producer.windows_sid -ne $serviceSid.Value) { throw "restarted snapshot producer postcondition failed" }
+    if ($null -ne $restartSnapshot.probe_error -or $restartSnapshot.heartbeat.status -ne "fresh") { throw "restarted supervisor health postcondition failed" }
+    $restartedTask = Get-ScheduledTask -TaskPath "\" -TaskName $TaskName -ErrorAction Stop
+    $restartedInfo = Get-ScheduledTaskInfo -TaskPath "\" -TaskName $TaskName -ErrorAction Stop
+    if ([string]$restartedTask.State -ne "Running") { throw "supervisor task is not Running after exact restart" }
+    if ([uint32]$restartedInfo.LastTaskResult -notin @(267009, 267045)) { throw "restarted supervisor task result is not running or queued" }
+    $restartedSupervisorSha256 = (Get-FileHash -LiteralPath $InstalledSupervisor -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($restartedSupervisorSha256 -cne $ExpectedSupervisorSha256) { throw "running supervisor path no longer matches the approved bytes" }
+    Assert-ExactAcl $SnapshotPath @("S-1-5-18", "S-1-5-32-544", $serviceSid.Value, $readerSid.Value) $readerSid.Value $true $serviceSid.Value $false $true
+    [ordered]@{ status = "installed"; task_name = $TaskName; task_restarted = $true; supervisor_script_sha256 = $restartedSupervisorSha256; service_account_sid = $serviceSid.Value; snapshot_path = $SnapshotPath; password_material_persisted_by_installer = $false; runner_registration_changed = $false } | ConvertTo-Json -Compress
 }
 catch {
     $originalFailure = $_.Exception.Message

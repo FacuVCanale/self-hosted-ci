@@ -226,9 +226,10 @@ class RunnerAllocationTests(unittest.TestCase):
                 now=NOW + timedelta(minutes=9),
             )
             record = ledger.transition(
-                value["allocation_id"], "claim", now=NOW + timedelta(minutes=20)
+                value["allocation_id"], "admit-job", now=NOW + timedelta(minutes=20)
             )
-            self.assertEqual("claimed", record.state)
+            self.assertEqual("running", record.state)
+            self.assertEqual(1, record.jobs_started)
             self.assertEqual(
                 NOW + timedelta(minutes=21), record.claim_deadline
             )
@@ -257,7 +258,7 @@ class RunnerAllocationTests(unittest.TestCase):
                 with self.assertRaises(AllocationClaimExpired):
                     ledger.transition(
                         value["allocation_id"],
-                        "claim",
+                        "admit-job",
                         now=NOW + timedelta(minutes=21, seconds=offset),
                     )
 
@@ -276,7 +277,7 @@ class RunnerAllocationTests(unittest.TestCase):
             with self.assertRaises(InvalidLifecycleTransition):
                 ledger.transition(
                     value["allocation_id"],
-                    "claim",
+                    "admit-job",
                     now=NOW + timedelta(minutes=10),
                 )
 
@@ -330,7 +331,7 @@ class RunnerAllocationTests(unittest.TestCase):
             self.assertTrue(ledger.append_outcome(event))
             self.assertEqual("migration:v1", ledger.outcomes(since=NOW - timedelta(days=1), now=NOW)[0]["event_key"])
             migrated = sqlite3.connect(path)
-            self.assertEqual(2, migrated.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(3, migrated.execute("PRAGMA user_version").fetchone()[0])
             self.assertIsNotNone(migrated.execute("SELECT name FROM sqlite_master WHERE name='allocation_outcomes'").fetchone())
             migrated.close()
 
@@ -342,6 +343,65 @@ class RunnerAllocationTests(unittest.TestCase):
             db.close()
             with self.assertRaisesRegex(RunnerJitError, "newer than this binary"):
                 SqliteAllocationLedger(path)
+
+    def test_v2_claimed_migration_fences_inflight_allocation_for_recovery(self) -> None:
+        value = payload_v2()
+        private = ed25519.Ed25519PrivateKey.generate()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.sqlite3"
+            ledger = SqliteAllocationLedger(path)
+            ledger.reserve(reservation_v2(), now=NOW)
+            ledger.finalize(
+                sign_allocation(value, private, now=NOW + timedelta(minutes=9)),
+                private.public_key(),
+                pinned_fingerprint=spki_fingerprint(private.public_key()),
+                now=NOW + timedelta(minutes=9),
+            )
+            legacy_event = {
+                "event_key": "migration:v2-outcome",
+                "cause_code": "superseded-head",
+                "allocation_id": value["allocation_id"],
+                "run_id": "7001",
+                "job_id": "7002",
+                "repository": value["repository"],
+                "pr_number": value["pr_number"],
+                "head_sha": value["head_sha"],
+                "prior_ledger_state": "issued",
+                "issued_at": value["approval_issued_at"],
+                "claim_deadline": (NOW + timedelta(minutes=14)).isoformat().replace("+00:00", "Z"),
+                "now": NOW + timedelta(minutes=9),
+                "delay_bucket": "before-deadline",
+                "executed": False,
+                "success": False,
+            }
+            self.assertTrue(ledger.append_outcome(legacy_event))
+            db = sqlite3.connect(path)
+            db.execute("UPDATE runner_allocations SET state='claimed' WHERE allocation_id=?", (value["allocation_id"],))
+            db.execute("PRAGMA user_version=2")
+            db.commit()
+            db.close()
+
+            migrated = SqliteAllocationLedger(path, outcome_retention_days=365)
+            record = migrated.get(value["allocation_id"])
+            self.assertEqual("recovery_required", record.state)
+            self.assertEqual("reboot", record.outcome)
+            self.assertEqual(0, record.jobs_started)
+            self.assertTrue(record.recovery_required)
+            self.assertTrue(record.cleanup_pending)
+            self.assertRegex(record.cleanup_idempotency_key or "", r"^[0-9a-f]{64}$")
+            self.assertEqual(value, migrated.payload(value["allocation_id"]))
+            self.assertEqual(
+                ["migration:v2-outcome"],
+                [
+                    event["event_key"]
+                    for event in migrated.outcomes(
+                        since=NOW - timedelta(days=1), now=NOW + timedelta(minutes=10)
+                    )
+                ],
+            )
+            db = sqlite3.connect(path)
+            self.assertEqual(3, db.execute("PRAGMA user_version").fetchone()[0])
+            db.close()
 
 
 class RunnerLedgerTests(unittest.TestCase):
@@ -422,10 +482,9 @@ class RunnerLedgerTests(unittest.TestCase):
             allocation_id = f"0198ef24-f800-7000-8000-{index:012d}"
             value = payload(allocation_id=allocation_id, nonce=chr(64 + index) * 43)
             self.admit(value)
-            self.ledger.transition(allocation_id, "claim", now=NOW)
-            self.ledger.transition(allocation_id, "start", now=NOW)
+            self.ledger.transition(allocation_id, "admit-job", now=NOW)
             with self.assertRaises(RunnerJitError):
-                self.ledger.transition(allocation_id, "start", now=NOW)
+                self.ledger.transition(allocation_id, "admit-job", now=NOW)
             self.ledger.transition(
                 allocation_id,
                 "finish",
@@ -442,9 +501,10 @@ class RunnerLedgerTests(unittest.TestCase):
         value = payload()
         self.admit(value)
         with self.assertRaises(RunnerJitError):
-            self.ledger.transition(value["allocation_id"], "start", now=NOW)
-        self.ledger.transition(value["allocation_id"], "claim", now=NOW)
-        self.ledger.transition(value["allocation_id"], "start", now=NOW)
+            self.ledger.transition(value["allocation_id"], "finish", outcome="success")
+        self.ledger.transition(value["allocation_id"], "admit-job", now=NOW)
+        with self.assertRaises(RunnerJitError):
+            self.ledger.transition(value["allocation_id"], "admit-job", now=NOW)
         with self.assertRaises(RunnerJitError):
             self.ledger.transition(value["allocation_id"], "finish", outcome="unknown")
         with self.assertRaises(RunnerJitError):
@@ -452,52 +512,32 @@ class RunnerLedgerTests(unittest.TestCase):
                 value["allocation_id"], "finish", outcome="force-cancel"
             )
 
-    def test_claim_revalidates_deadline_but_start_uses_durable_claim(self) -> None:
+    def test_admit_job_revalidates_deadline_at_the_single_durable_cas(self) -> None:
         for offset, accepted in ((-1, True), (0, False), (1, False)):
             allocation_id = f"0198ef24-f800-7000-8001-{offset + 2:012d}"
             value = payload(allocation_id=allocation_id, nonce=chr(70 + offset) * 43)
             self.admit(value)
             at_boundary = NOW + timedelta(minutes=5, seconds=offset)
             if accepted:
-                claimed = self.ledger.transition(
-                    allocation_id, "claim", now=at_boundary
+                admitted = self.ledger.transition(
+                    allocation_id, "admit-job", now=at_boundary
                 )
-                self.assertEqual("claimed", claimed.state)
+                self.assertEqual("running", admitted.state)
+                self.assertEqual(1, admitted.jobs_started)
             else:
                 with self.assertRaises(RunnerJitError):
-                    self.ledger.transition(allocation_id, "claim", now=at_boundary)
+                    self.ledger.transition(allocation_id, "admit-job", now=at_boundary)
                 self.assertEqual("issued", self.ledger.get(allocation_id).state)
-
-        value = payload(
-            allocation_id="0198ef24-f800-7000-8002-000000000001", nonce="Z" * 43
-        )
-        self.admit(value)
-        self.ledger.transition(
-            value["allocation_id"],
-            "claim",
-            now=NOW + timedelta(minutes=4, seconds=59),
-        )
-        self.ledger.transition(
-            value["allocation_id"],
-            "start",
-            now=NOW + timedelta(minutes=5, seconds=1),
-        )
-        record = self.ledger.get(value["allocation_id"])
-        self.assertEqual(NOW, record.issued_at)
-        self.assertEqual(NOW + timedelta(minutes=5), record.expires_at)
-        self.assertEqual("running", record.state)
 
     def test_reboot_recovery_is_atomic_and_idempotent_from_all_live_states(
         self,
     ) -> None:
-        for index, initial in enumerate(("issued", "claimed", "running"), start=1):
+        for index, initial in enumerate(("issued", "running"), start=1):
             allocation_id = f"0198ef24-f800-7000-8003-{index:012d}"
             value = payload(allocation_id=allocation_id, nonce=chr(74 + index) * 43)
             self.admit(value)
-            if initial in {"claimed", "running"}:
-                self.ledger.transition(allocation_id, "claim", now=NOW)
             if initial == "running":
-                self.ledger.transition(allocation_id, "start", now=NOW)
+                self.ledger.transition(allocation_id, "admit-job", now=NOW)
             recovered = self.ledger.transition(allocation_id, "recover")
             self.assertEqual("recovery_required", recovered.state)
             self.assertEqual("reboot", recovered.outcome)
@@ -586,11 +626,11 @@ class RunnerLedgerTests(unittest.TestCase):
         )
 
 
-class AllocationLifecyclePhase1ModelTests(unittest.TestCase):
-    """Frozen v2 model used to pre-register the lifecycle simplification gate."""
+class AllocationLifecycleModelTests(unittest.TestCase):
+    """Stateful reference model for crashes, deadlines, and terminal monotonicity."""
 
     ACTIONS = (
-        "reserve", "finalize", "claim", "start", "finish", "cleanup",
+        "reserve", "finalize", "admit", "finish", "cleanup",
         "recover", "ack",
     )
 
@@ -616,10 +656,14 @@ class AllocationLifecyclePhase1ModelTests(unittest.TestCase):
             fingerprint = spki_fingerprint(private.public_key())
             value = payload_v2()
             reserved = reservation_v2()
-            envelope = sign_allocation(value, private, now=NOW + timedelta(minutes=9))
+            envelope = sign_allocation(
+                value, private, now=NOW + timedelta(minutes=9)
+            )
             model = {
-                "state": "absent", "jobs": 0, "finalized": False,
-                "recovered": False, "live_proofs": False,
+                "state": "absent",
+                "jobs": 0,
+                "finalized": False,
+                "recovered": False,
             }
 
             for action in actions:
@@ -632,17 +676,10 @@ class AllocationLifecyclePhase1ModelTests(unittest.TestCase):
                 elif action == "finalize":
                     expected_success = model["state"] == "reserved" or model["finalized"]
                     if model["state"] == "reserved":
-                        model["state"], model["finalized"] = "issued", True
-                elif action == "claim":
-                    expected_success = model["state"] == "issued" and claim_offset < 0
-                    if expected_success:
-                        model["state"], model["live_proofs"] = "claimed", True
-                elif action == "start":
-                    expected_success = (
-                        model["state"] == "claimed"
-                        and model["live_proofs"]
-                        and model["jobs"] == 0
-                    )
+                        model["state"] = "issued"
+                        model["finalized"] = True
+                elif action == "admit":
+                    expected_success = model["state"] == "issued" and claim_offset < 0 and model["jobs"] == 0
                     if expected_success:
                         model["state"], model["jobs"] = "running", 1
                 elif action == "finish":
@@ -655,10 +692,11 @@ class AllocationLifecyclePhase1ModelTests(unittest.TestCase):
                         model["state"] = "cleaned"
                 elif action == "recover":
                     expected_success = model["state"] in {
-                        "reserved", "issued", "claimed", "running", "recovery_required",
+                        "reserved", "issued", "running", "recovery_required",
                     }
-                    if model["state"] in {"reserved", "issued", "claimed", "running"}:
-                        model["state"], model["recovered"] = "recovery_required", True
+                    if model["state"] in {"reserved", "issued", "running"}:
+                        model["state"] = "recovery_required"
+                        model["recovered"] = True
                 elif action == "ack":
                     expected_success = model["state"] == "recovery_required" or (
                         model["state"] == "cleaned" and model["recovered"]
@@ -671,13 +709,14 @@ class AllocationLifecyclePhase1ModelTests(unittest.TestCase):
                         ledger.reserve(reserved, now=NOW)
                     elif action == "finalize":
                         ledger.finalize(
-                            envelope, private.public_key(),
+                            envelope,
+                            private.public_key(),
                             pinned_fingerprint=fingerprint,
                             now=NOW + timedelta(minutes=9),
                         )
-                    elif action in {"claim", "start"}:
+                    elif action == "admit":
                         ledger.transition(
-                            value["allocation_id"], action,
+                            value["allocation_id"], "admit-job",
                             now=NOW + timedelta(minutes=21, seconds=claim_offset),
                         )
                     elif action == "finish":
@@ -688,10 +727,12 @@ class AllocationLifecyclePhase1ModelTests(unittest.TestCase):
                         ledger.transition(value["allocation_id"], "recover")
                     else:
                         record = ledger.get(value["allocation_id"])
+                        evidence = self._recovery_evidence(record)
                         ledger.transition(
-                            value["allocation_id"], "ack-recovery-cleanup",
+                            value["allocation_id"],
+                            "ack-recovery-cleanup",
                             cleanup_idempotency_key=record.cleanup_idempotency_key,
-                            cleanup_evidence=self._recovery_evidence(record),
+                            cleanup_evidence=evidence,
                         )
                 except RunnerJitError:
                     actual_success = False
@@ -699,13 +740,14 @@ class AllocationLifecyclePhase1ModelTests(unittest.TestCase):
                     actual_success = True
 
                 self.assertEqual(
-                    expected_success, actual_success,
+                    expected_success,
+                    actual_success,
                     (actions, action, before, model, claim_offset),
                 )
                 if not expected_success:
                     model = before
 
-                # Reopen after every edge: all safety-relevant state must be durable.
+                # Model a process/WSL reboot after every operation boundary.
                 ledger = SqliteAllocationLedger(path)
                 if model["state"] != "absent":
                     record = ledger.get(value["allocation_id"])
@@ -714,10 +756,14 @@ class AllocationLifecyclePhase1ModelTests(unittest.TestCase):
                     self.assertLessEqual(record.jobs_started, 1)
                     if record.state == "recovery_required":
                         self.assertTrue(record.cleanup_pending)
-                        self.assertRegex(record.cleanup_idempotency_key or "", r"^[0-9a-f]{64}$")
+                        self.assertRegex(
+                            record.cleanup_idempotency_key or "", r"^[0-9a-f]{64}$"
+                        )
                     if record.state == "cleaned":
                         self.assertTrue(record.cleanup_complete)
 
+            # Every nonterminal generated prefix converges through the durable
+            # recovery key; terminal cleanup is itself idempotent.
             if model["state"] == "absent":
                 return
             record = ledger.get(value["allocation_id"])
@@ -733,7 +779,8 @@ class AllocationLifecyclePhase1ModelTests(unittest.TestCase):
                 self.assertEqual(pending, reopened.transition(value["allocation_id"], "recover"))
                 evidence = self._recovery_evidence(pending)
                 cleaned = reopened.transition(
-                    value["allocation_id"], "ack-recovery-cleanup",
+                    value["allocation_id"],
+                    "ack-recovery-cleanup",
                     cleanup_idempotency_key=pending.cleanup_idempotency_key,
                     cleanup_evidence=evidence,
                 )
@@ -741,32 +788,35 @@ class AllocationLifecyclePhase1ModelTests(unittest.TestCase):
                 self.assertEqual(
                     cleaned,
                     SqliteAllocationLedger(path).transition(
-                        value["allocation_id"], "ack-recovery-cleanup",
+                        value["allocation_id"],
+                        "ack-recovery-cleanup",
                         cleanup_idempotency_key=pending.cleanup_idempotency_key,
                         cleanup_evidence=evidence,
                     ),
                 )
 
-    def test_generated_sequences_match_v2_reference_across_every_reopen(self) -> None:
+    def test_generated_sequences_match_reference_model_across_every_reboot(self) -> None:
         rng = random.Random(0xC1F1)
         sequences = [
-            ["reserve", "finalize", "claim", "start", "finish", "cleanup"],
+            ["reserve", "finalize", "admit", "finish", "cleanup"],
             ["reserve", "recover", "ack"],
             ["reserve", "finalize", "recover", "ack"],
-            ["reserve", "finalize", "claim", "recover", "start", "ack"],
-            ["reserve", "finalize", "claim", "start", "recover", "ack"],
+            ["reserve", "finalize", "recover", "admit", "ack"],
+            ["reserve", "finalize", "admit", "recover", "ack"],
         ]
-        sequences.extend([rng.choice(self.ACTIONS) for _ in range(18)] for _ in range(48))
+        sequences.extend(
+            [rng.choice(self.ACTIONS) for _ in range(18)] for _ in range(48)
+        )
         for claim_offset in (-1, 0, 1):
             for index, actions in enumerate(sequences):
                 with self.subTest(claim_offset=claim_offset, sequence=index):
                     self._run_sequence(actions, claim_offset=claim_offset)
 
-    def test_v2_terminals_never_revive_and_job_count_never_duplicates(self) -> None:
+    def test_terminal_states_never_revive_and_started_job_never_duplicates(self) -> None:
         for terminal_action in ("cleanup", "ack"):
-            sequence = ["reserve", "finalize", "claim", "start"]
+            sequence = ["reserve", "finalize", "admit"]
             sequence += ["finish", "cleanup"] if terminal_action == "cleanup" else ["recover", "ack"]
-            sequence += ["start", "claim", "recover", "finish"]
+            sequence += ["admit", "recover", "finish"]
             self._run_sequence(sequence, claim_offset=-1)
 
 
