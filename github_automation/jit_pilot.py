@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
@@ -400,6 +401,7 @@ def validation_main(
     environment: Mapping[str, str] | None = None,
     *,
     clock: Any = lambda: datetime.now(timezone.utc),
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> int:
     env = os.environ if environment is None else environment
     try:
@@ -430,5 +432,12 @@ def validation_main(
                 stream.write(f"{key}={value}\n")
         return 0
     except (OSError, JitPilotError):
+        # A live head/base change can race the worker's five-second monitor.
+        # Stay fail-closed ahead of checkout, but give that monitor a bounded
+        # window to cancel the exact obsolete run before GitHub records failure.
+        if env.get("GITHUB_ACTIONS") == "true" and re.fullmatch(
+            r"[1-9][0-9]*", env.get("GITHUB_RUN_ID", "")
+        ):
+            sleeper(30)
         print("JIT pilot validation blocked", file=sys.stderr)
         return 1
