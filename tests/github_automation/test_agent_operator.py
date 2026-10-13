@@ -639,7 +639,47 @@ class HealthSnapshotOperatorTests(unittest.TestCase):
             "expires_at": stamp(generated + timedelta(seconds=180)),
             "eligibility": {"eligible_for_local_ci": True, "blocking_reasons": []},
             "probe_error": None,
+            "outcomes": {"available": True, "retention_days": 30, "events": [],
+                         "summary_7d": {"counts_by_cause": {}, "runs_executed": 0,
+                                        "successes": 0, "green_rate": None}},
         }
+
+    def test_outcomes_cli_counts_fixture_and_preserves_ids(self):
+        payload = self.snapshot()
+        common = {
+            "event_key": "fixture", "allocation_id": None,
+            "pr_number": 1, "head_sha": "a" * 40,
+            "prior_ledger_state": "running", "issued_at": None,
+            "claim_deadline": None, "delay_bucket": "unknown",
+        }
+        payload["outcomes"]["events"] = [
+            {**common, "event_key": "fixture:a", "cause_code": "superseded-head", "occurred_at": self.now.isoformat().replace("+00:00", "Z"),
+             "repository": "FacuVCanale/demo", "run_id": "10", "job_id": "20", "executed": False, "success": False},
+            {**common, "event_key": "fixture:b", "cause_code": "success", "occurred_at": self.now.isoformat().replace("+00:00", "Z"),
+             "repository": "FacuVCanale/demo", "run_id": "11", "job_id": "21", "executed": True, "success": True},
+        ]
+        with self.serve_snapshot(payload):
+            code, result = self.run_cli("outcomes", "FacuVCanale/demo", "--since", "30d", "--json")
+        self.assertEqual(0, code)
+        self.assertEqual({"success": 1, "superseded-head": 1}, result["counts_by_cause"])
+        self.assertEqual((1, 1, 1.0), (result["runs_executed"], result["successes"], result["green_rate"]))
+        self.assertEqual(["10", "11"], [item["run_id"] for item in result["events"]])
+
+    def test_outcomes_fail_closed_for_expired_unavailable_or_partial_window(self):
+        cases = []
+        expired = self.snapshot(age=3 * 86400)
+        cases.append((expired, "snapshot_expired"))
+        unavailable = self.snapshot()
+        unavailable["outcomes"]["available"] = False
+        cases.append((unavailable, "outcomes_unavailable"))
+        partial = self.snapshot()
+        partial["outcomes"]["retention_days"] = 7
+        cases.append((partial, "outcome_window_not_retained"))
+        for payload, expected in cases:
+            with self.subTest(expected=expected), self.serve_snapshot(payload):
+                code, result = self.run_cli("outcomes", "FacuVCanale/demo", "--since", "30d", "--json")
+            self.assertEqual(2, code)
+            self.assertEqual(expected, result["code"])
 
     @contextmanager
     def serve_snapshot(self, payload):
@@ -668,6 +708,15 @@ class HealthSnapshotOperatorTests(unittest.TestCase):
         self.assertTrue(result["effective_local"])
         self.assertEqual(result["health"]["snapshot_age_seconds"], 60)
         self.assertEqual(result["health"]["expires_at"], self.snapshot()["expires_at"])
+
+    def test_status_marks_outcome_summary_unavailable_instead_of_zero(self):
+        payload = self.snapshot()
+        payload["outcomes"]["available"] = False
+        with self.serve_snapshot(payload):
+            code, result = self.run_cli("status", "FacuVCanale/demo")
+        self.assertEqual(0, code)
+        self.assertFalse(result["health"]["outcomes_available"])
+        self.assertIsNone(result["health"]["outcomes_7d"])
 
     def test_expired_snapshot_doctor_unhealthy_and_not_effective_local(self):
         payload = self.snapshot(age=3 * 86400)

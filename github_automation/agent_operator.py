@@ -17,12 +17,13 @@ import subprocess
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 
-from github_automation.health_snapshot import snapshot_freshness
+from github_automation.health_snapshot import snapshot_freshness, timestamp
+from github_automation.runner_jit import DELAY_BUCKETS, OUTCOME_CAUSES
 
 
 REPOSITORY = re.compile(
@@ -398,6 +399,21 @@ class AgentOperator:
             blockers = []
             code, reason = 5, "invalid_snapshot_contract"
         blockers = list(blockers)
+        outcomes = snapshot.get("outcomes", {})
+        outcomes_available = isinstance(outcomes, dict) and outcomes.get("available") is True
+        summary = outcomes.get("summary_7d") if outcomes_available else None
+        if not (
+            isinstance(summary, dict)
+            and set(summary) == {"counts_by_cause", "runs_executed", "successes", "green_rate"}
+            and isinstance(summary["counts_by_cause"], dict)
+            and all(
+                isinstance(key, str) and type(value) is int and value >= 0
+                for key, value in summary["counts_by_cause"].items()
+            )
+            and type(summary["runs_executed"]) is int
+            and type(summary["successes"]) is int
+        ):
+            summary = None
         if code:
             blocker = "snapshot_expired" if reason == "snapshot_expired" else "snapshot_invalid"
             if blocker not in blockers:
@@ -409,7 +425,74 @@ class AgentOperator:
             "expires_at": snapshot.get("expires_at"),
             "snapshot_age_seconds": age,
             "probe_error": snapshot.get("probe_error"),
+            "outcomes_available": outcomes_available and summary is not None,
+            "outcomes_7d": summary,
         }
+
+    def outcomes(self, repository: str, since_days: int) -> dict[str, Any]:
+        repository = exact_repository(repository)
+        if isinstance(since_days, bool) or not 1 <= since_days <= 365:
+            raise AgentOperatorError("invalid_outcome_window", "outcome window must be 1d to 365d")
+        raw = self._ssh('cmd.exe /d /c type C:\\ProgramData\\self-hosted-ci\\health\\current.json')
+        try:
+            snapshot = json.loads(raw)
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise AgentOperatorError("outcomes_unavailable", "health snapshot outcomes are unavailable") from exc
+        if not isinstance(snapshot, dict):
+            raise AgentOperatorError("outcomes_unavailable", "health snapshot outcomes are unavailable")
+        code, reason, _ = snapshot_freshness(
+            snapshot, datetime.now(timezone.utc), expiry_skew_seconds=30,
+        )
+        if code:
+            raise AgentOperatorError(reason, "health snapshot is not fresh")
+        outcomes = snapshot.get("outcomes")
+        if not isinstance(outcomes, dict) or outcomes.get("available") is not True:
+            raise AgentOperatorError("outcomes_unavailable", "health snapshot outcomes are unavailable")
+        retention = outcomes.get("retention_days")
+        if isinstance(retention, bool) or not isinstance(retention, int) or not 1 <= retention <= 365:
+            raise AgentOperatorError("outcomes_unavailable", "health snapshot outcome retention is invalid")
+        if since_days > retention:
+            raise AgentOperatorError(
+                "outcome_window_not_retained",
+                f"requested {since_days}d but the durable snapshot retains {retention}d",
+            )
+        events = outcomes.get("events")
+        if not isinstance(events, list):
+            raise AgentOperatorError("outcomes_unavailable", "health snapshot outcomes are unavailable")
+        event_fields = {
+            "event_key", "cause_code", "allocation_id", "run_id", "job_id",
+            "repository", "pr_number", "head_sha", "prior_ledger_state",
+            "issued_at", "claim_deadline", "occurred_at", "delay_bucket",
+            "executed", "success",
+        }
+        cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+        selected = []
+        for event in events:
+            try:
+                if not isinstance(event, dict) or set(event) != event_fields:
+                    raise ValueError("outcome fields are not exact")
+                if event["cause_code"] not in OUTCOME_CAUSES or event["delay_bucket"] not in DELAY_BUCKETS:
+                    raise ValueError("outcome classification is invalid")
+                if not isinstance(event["event_key"], str) or not re.fullmatch(r"[A-Za-z0-9:._-]{1,200}", event["event_key"]):
+                    raise ValueError("outcome identity is invalid")
+                if type(event["executed"]) is not bool or type(event["success"]) is not bool:
+                    raise ValueError("outcome types are invalid")
+                if not isinstance(event["repository"], str) or not REPOSITORY.fullmatch(event["repository"]):
+                    raise ValueError("outcome repository is invalid")
+                occurred = timestamp(event["occurred_at"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise AgentOperatorError("outcomes_unavailable", "health snapshot outcome is invalid") from exc
+            if occurred >= cutoff and event.get("repository", "").lower() == repository.lower():
+                selected.append(event)
+        counts: dict[str, int] = {}
+        for event in selected:
+            cause = event["cause_code"]
+            counts[cause] = counts.get(cause, 0) + 1
+        runs = sum(1 for event in selected if event.get("executed") is True)
+        successes = sum(1 for event in selected if event.get("success") is True)
+        return {"status": "ok", "repository": repository, "since_days": since_days,
+                "counts_by_cause": counts, "runs_executed": runs, "successes": successes,
+                "green_rate": successes / runs if runs else None, "events": selected}
 
     def _github_repository(self, repository: str) -> dict[str, Any]:
         raw = run_checked(

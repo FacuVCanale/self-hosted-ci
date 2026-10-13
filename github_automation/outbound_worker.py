@@ -159,6 +159,9 @@ class LocalBrokerCli:
             ]
         )
 
+    def record_outcome(self, value):
+        return self._json(["record-outcome", "--event"], value)
+
 
 class WorkerState:
     def __init__(self, path: Path):
@@ -642,6 +645,41 @@ class PilotWorker(_AssignmentWorker):
             raise WorkerError("supersession reason is invalid")
         return reason
 
+    @staticmethod
+    def _cause_for_reason(reason: str) -> str:
+        mapping = {
+            "a newer commit superseded this pull request head": "superseded-head",
+            "the default branch moved before this run was admitted": "superseded-base",
+            "the pull request merge ref changed before this run was admitted": "superseded-merge",
+            "the pull request was closed before this run was admitted": "pr-closed",
+        }
+        return mapping.get(reason, "worker-error")
+
+    def _record_outcome(
+        self, key: str, request: Mapping[str, Any], cause: str, *,
+        run_id: int | None = None, job_id: int | None = None,
+        executed: bool | None = False, success: bool = False,
+        prior_ledger_state: str | None = None,
+    ) -> None:
+        package = request["pilot_package"]
+        progress = self.state.progress(key)
+        allocation_id = package["allocation_id"] if progress.get("reserved") is not None else None
+        occurred = self.source.clock().replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        recorder = getattr(self.broker, "record_outcome", None)
+        if recorder is None:  # Compatibility for narrow test doubles; production broker requires it.
+            return
+        receipt = recorder({
+            "event_key": f"request:{key}:{cause}", "cause_code": cause,
+            "occurred_at": occurred, "allocation_id": allocation_id,
+            "run_id": run_id or progress.get("run_id"),
+            "job_id": job_id or (progress.get("observed") or {}).get("job_id"),
+            "repository": package["repository"], "pr_number": package["pr_number"],
+            "head_sha": package["head_sha"], "executed": executed, "success": success,
+            "prior_ledger_state": prior_ledger_state,
+        })
+        if not isinstance(receipt, Mapping) or set(receipt) != {"recorded"} or type(receipt["recorded"]) is not bool:
+            raise WorkerError("outcome receipt is invalid")
+
     def _complete_superseded(
         self,
         key: str,
@@ -708,6 +746,9 @@ class PilotWorker(_AssignmentWorker):
                     )
                 except (GateCheckError, OSError):
                     publication_pending = True
+        self._record_outcome(
+            key, request, self._cause_for_reason(reason), run_id=exact_run
+        )
         if progress.get("reserved") is not None:
             self._recover_exact(self._recovery_allocation_id(request))
         if cancellation_error is not None:
@@ -841,6 +882,7 @@ class PilotWorker(_AssignmentWorker):
             self.state.fail(key)
             raise
         self.state.abort(key, reason)
+        self._record_outcome(key, request, "worker-error")
         return {"status": "failed", "reason": reason}
 
     def _run_assignment(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1038,6 +1080,22 @@ class PilotWorker(_AssignmentWorker):
                     self.github, "cancel_exact_run"
                 )(exact_run_id),
             )
+            def record_terminal(conclusion: str) -> None:
+                cause = (
+                    self._cause_for_reason(monitor.supersession_reason)
+                    if monitor.supersession_reason is not None
+                    else {
+                        "success": "success", "failure": "job-failure",
+                        "cancelled": "job-cancelled", "cancel": "job-cancelled",
+                        "timeout": "job-timeout",
+                    }.get(conclusion, "worker-error")
+                )
+                self._record_outcome(
+                    key, request, cause, run_id=run_id, job_id=observed.job_id,
+                    executed=None,
+                    success=conclusion == "success" and monitor.supersession_reason is None,
+                )
+            monitor.before_finish = record_terminal
             outcome = monitor.monitor(
                 allocation_id=package.allocation_id,
                 runner_label=package.runner_label,
@@ -1090,6 +1148,11 @@ class PilotWorker(_AssignmentWorker):
                     "the self-hosted runner stopped owning this run "
                     f"({type(exc).__name__})"
                 ),
+            )
+            self._record_outcome(
+                key, request, "worker-error", run_id=run_id,
+                job_id=(latest.get("observed") or {}).get("job_id"),
+                executed=False, success=False,
             )
             if run_id is not None:
                 self.source.retry(key, type(exc).__name__)

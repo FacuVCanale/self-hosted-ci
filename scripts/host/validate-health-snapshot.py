@@ -61,7 +61,7 @@ def validate(
 ) -> tuple[int, str]:
     if (
         not isinstance(payload, dict)
-        or set(payload) != TOP_LEVEL
+        or set(payload) not in (TOP_LEVEL, TOP_LEVEL | {"outcomes"})
         or payload.get("schema_version") != 2
     ):
         return 5, "invalid_snapshot_schema"
@@ -81,6 +81,9 @@ def validate(
             payload["heartbeat"],
         )
         boundary, eligibility = payload["boundary"], payload["eligibility"]
+        outcomes = payload.get("outcomes")
+        if outcomes is not None and (not isinstance(outcomes, dict) or set(outcomes) != {"available", "retention_days", "events", "summary_7d"}):
+            raise ValueError()
         if not isinstance(producer, dict) or set(producer) != {
             "windows_sid",
             "account",

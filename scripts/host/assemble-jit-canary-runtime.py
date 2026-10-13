@@ -219,6 +219,10 @@ def _prepare(args: argparse.Namespace) -> Mapping[str, Any]:
 
     health = _json(args.garm_health_file, private=True)
     broker = _json(args.broker_config_file, private=True)
+    retention = broker.get("outcome_retention_days", 30)
+    if isinstance(retention, bool) or not isinstance(retention, int) or not 1 <= retention <= 365:
+        raise AssemblyError("broker outcome retention is invalid")
+    broker = {**broker, "outcome_retention_days": retention}
     template = dict(_json(args.authorization_template, private=True))
     if "attestation" in template:
         raise AssemblyError("authorization template must be unsigned")
@@ -262,6 +266,7 @@ def _prepare(args: argparse.Namespace) -> Mapping[str, Any]:
         "image_alias",
         "image_fingerprint",
         "live_job_verifier",
+        "outcome_retention_days",
         "targets",
     }
     if (

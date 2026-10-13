@@ -308,13 +308,39 @@ class RunnerAllocationTests(unittest.TestCase):
                     "2026-08-27T12:05:00Z",
                 ),
             )
+            db.execute("PRAGMA user_version=1")
             db.commit()
             db.close()
 
-            record = SqliteAllocationLedger(path).get(
+            ledger = SqliteAllocationLedger(path)
+            record = ledger.get(
                 "0198ef24-f800-7000-8000-000000000999"
             )
             self.assertEqual(record.expires_at, record.claim_deadline)
+            event = {
+                "event_key": "migration:v1", "cause_code": "claim-expired",
+                "allocation_id": record.allocation_id, "run_id": None, "job_id": None,
+                "repository": None, "pr_number": None, "head_sha": None,
+                "prior_ledger_state": record.state,
+                "issued_at": "2026-08-27T12:00:00Z",
+                "claim_deadline": "2026-08-27T12:05:00Z", "now": NOW,
+                "delay_bucket": ">5m", "executed": False, "success": False,
+            }
+            self.assertTrue(ledger.append_outcome(event))
+            self.assertEqual("migration:v1", ledger.outcomes(since=NOW - timedelta(days=1), now=NOW)[0]["event_key"])
+            migrated = sqlite3.connect(path)
+            self.assertEqual(2, migrated.execute("PRAGMA user_version").fetchone()[0])
+            self.assertIsNotNone(migrated.execute("SELECT name FROM sqlite_master WHERE name='allocation_outcomes'").fetchone())
+            migrated.close()
+
+    def test_future_ledger_schema_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ledger.sqlite3"
+            db = sqlite3.connect(path)
+            db.execute("PRAGMA user_version=99")
+            db.close()
+            with self.assertRaisesRegex(RunnerJitError, "newer than this binary"):
+                SqliteAllocationLedger(path)
 
 
 class RunnerLedgerTests(unittest.TestCase):
@@ -334,6 +360,44 @@ class RunnerLedgerTests(unittest.TestCase):
             pinned_fingerprint=self.fingerprint,
             now=NOW,
         )
+
+    def test_outcome_migration_preserves_inflight_allocation_and_rejects_raw_payload(self):
+        value = reservation_v2()
+        self.ledger.reserve(value, now=NOW)
+        before = self.ledger.get(value["allocation_id"])
+        event = {
+            "event_key": "test:expiry", "cause_code": "claim-expired",
+            "allocation_id": value["allocation_id"], "run_id": "8001", "job_id": "8002",
+            "repository": value["repository"], "pr_number": value["pr_number"],
+            "head_sha": value["head_sha"], "prior_ledger_state": before.state,
+            "issued_at": value["approval_issued_at"], "claim_deadline": None,
+            "now": NOW, "delay_bucket": "unknown", "executed": False, "success": False,
+        }
+        self.assertTrue(self.ledger.append_outcome(event))
+        self.assertFalse(self.ledger.append_outcome(event))
+        self.assertFalse(self.ledger.append_outcome(dict(
+            event, now=NOW + timedelta(seconds=1), prior_ledger_state="cleaned",
+        )))
+        with self.assertRaisesRegex(RunnerJitError, "different content"):
+            self.ledger.append_outcome(dict(event, cause_code="claim-state-conflict"))
+        self.assertEqual(before, self.ledger.get(value["allocation_id"]))
+        with self.assertRaises(RunnerJitError):
+            self.ledger.append_outcome(dict(event, raw_payload="ghp_secret-looking-value"))
+        raw = Path(self.ledger.path).read_bytes()
+        self.assertNotIn(b"ghp_secret-looking-value", raw)
+
+    def test_outcome_fixture_counts_retain_exact_safe_ids(self):
+        common = {"allocation_id": None, "job_id": None, "repository": "alethia-earth/Overworld",
+                  "pr_number": 602, "head_sha": "a" * 40, "prior_ledger_state": None,
+                  "issued_at": None, "claim_deadline": None, "now": NOW,
+                  "delay_bucket": "unknown"}
+        self.ledger.append_outcome({**common, "event_key": "run:A", "cause_code": "superseded-head",
+                                    "run_id": "10", "executed": False, "success": False})
+        self.ledger.append_outcome({**common, "event_key": "run:B", "cause_code": "success",
+                                    "run_id": "11", "executed": True, "success": True})
+        events = self.ledger.outcomes(since=NOW - timedelta(days=1), now=NOW)
+        self.assertEqual(["superseded-head", "success"], [item["cause_code"] for item in events])
+        self.assertEqual(["10", "11"], [item["run_id"] for item in events])
 
     def test_issue_is_transactional_idempotent_and_nonce_replay_fails(self) -> None:
         value = payload()

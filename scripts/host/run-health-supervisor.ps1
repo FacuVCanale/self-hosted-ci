@@ -168,6 +168,7 @@ function New-FailClosedSnapshot(
         heartbeat = [ordered]@{ status = "not_observable"; observed_at = $null; age_seconds = $null; max_age_seconds = $SnapshotLifetimeSeconds }
         boundary = [ordered]@{ activation_approved = $null; network_policy_enabled = $null }
         eligibility = [ordered]@{ eligible_for_local_ci = $false; blocking_reasons = @($BlockingReason) }
+        outcomes = [ordered]@{ available = $false; retention_days = 30; events = @(); summary_7d = [ordered]@{ counts_by_cause = [ordered]@{}; runs_executed = 0; successes = 0; green_rate = $null } }
         probe_error = $ErrorMessage
     }
 }
@@ -214,6 +215,7 @@ function Get-Snapshot {
             heartbeat = $heartbeat
             boundary = $observed.boundary
             eligibility = [ordered]@{ eligible_for_local_ci = ($blocking.Count -eq 0); blocking_reasons = @($blocking | Sort-Object -Unique) }
+            outcomes = $observed.outcomes
             probe_error = $null
         }
     }

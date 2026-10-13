@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
 import platform
 import subprocess
 import stat
+import sqlite3
+
+from github_automation.runner_jit import OUTCOME_RETENTION_DAYS, SqliteAllocationLedger
 
 
 SERVICES = (
@@ -61,6 +64,27 @@ BROKER_CONFIG = Path("/etc/self-hosted-ci/garm/allocation-broker.json")
 LIVE_JOB_VERIFIER = Path(
     "/usr/local/libexec/self-hosted-ci/github-live-job-verifier.py"
 )
+ALLOCATION_LEDGER = Path("/var/lib/self-hosted-ci/garm/allocation-ledger.sqlite3")
+
+
+def outcome_snapshot(now: datetime, retention_days: int) -> dict[str, object]:
+    empty = {"counts_by_cause": {}, "runs_executed": 0, "successes": 0, "green_rate": None}
+    try:
+        events = SqliteAllocationLedger.read_outcomes(
+            ALLOCATION_LEDGER, since=now - timedelta(days=retention_days), now=now
+        )
+    except (OSError, ValueError, sqlite3.Error):
+        return {"available": False, "retention_days": retention_days, "events": [], "summary_7d": empty}
+    cutoff = now - timedelta(days=7)
+    recent = [event for event in events if datetime.fromisoformat(event["occurred_at"].replace("Z", "+00:00")) >= cutoff]
+    counts: dict[str, int] = {}
+    for event in recent:
+        counts[event["cause_code"]] = counts.get(event["cause_code"], 0) + 1
+    runs = sum(1 for event in recent if event["executed"])
+    successes = sum(1 for event in recent if event["success"])
+    return {"available": True, "retention_days": retention_days, "events": events,
+            "summary_7d": {"counts_by_cause": counts, "runs_executed": runs,
+                           "successes": successes, "green_rate": successes / runs if runs else None}}
 
 
 def systemd_state(name: str) -> dict[str, str]:
@@ -386,7 +410,21 @@ def persistent_registration_present() -> bool | None:
     return False
 
 
-def observe(distro: str, maximum_age: int) -> dict[str, object]:
+def configured_outcome_retention() -> int:
+    if not regular_root_file(BROKER_CONFIG, maximum_size=65536):
+        raise ValueError("broker config is unavailable")
+    value = json.loads(BROKER_CONFIG.read_text(encoding="utf-8")).get(
+        "outcome_retention_days", OUTCOME_RETENTION_DAYS
+    )
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 365:
+        raise ValueError("broker outcome retention is invalid")
+    return value
+
+
+def observe(
+    distro: str, maximum_age: int,
+    outcome_retention_days: int = OUTCOME_RETENTION_DAYS,
+) -> dict[str, object]:
     now = datetime.now(timezone.utc)
     os_release = {}
     with Path("/etc/os-release").open(encoding="utf-8") as handle:
@@ -487,6 +525,7 @@ def observe(distro: str, maximum_age: int) -> dict[str, object]:
             "eligible_for_local_ci": not reasons,
             "blocking_reasons": reasons,
         },
+        "outcomes": outcome_snapshot(now, outcome_retention_days),
     }
 
 
@@ -499,7 +538,7 @@ def main() -> int:
         raise SystemExit("invalid heartbeat maximum age")
     print(
         json.dumps(
-            observe(args.distro, args.heartbeat_max_age),
+            observe(args.distro, args.heartbeat_max_age, configured_outcome_retention()),
             sort_keys=True,
             separators=(",", ":"),
         )

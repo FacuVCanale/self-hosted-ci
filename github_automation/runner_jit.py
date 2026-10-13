@@ -44,6 +44,15 @@ _RUNNER_GROUP = re.compile(r"^[^*\r\n]{1,100}$")
 _NONCE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _JOB_NAME = re.compile(r"^[A-Za-z0-9_. -]{1,100}$")
 _TRANSIENT_LABEL = re.compile(r"^wsl-jit-[0-9a-f]{32}$")
+OUTCOME_CAUSES = frozenset({
+    "success", "job-failure", "job-cancelled", "job-timeout", "worker-error",
+    "claim-expired", "claim-state-conflict", "claim-not-observed",
+    "garm-timeout", "garm-runtime-erofs", "superseded-head",
+    "superseded-base", "superseded-merge", "pr-closed", "stale-merge-ref",
+})
+DELAY_BUCKETS = frozenset({"before-deadline", "0-60s", "1-5m", ">5m", "unknown"})
+LEDGER_SCHEMA_VERSION = 2
+OUTCOME_RETENTION_DAYS = 30
 
 
 class RunnerJitError(ValueError):
@@ -437,11 +446,19 @@ class AllocationRecord:
 class SqliteAllocationLedger:
     """Atomic replay and lifecycle ledger; safe for concurrent broker threads."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, outcome_retention_days: int = OUTCOME_RETENTION_DAYS) -> None:
+        if isinstance(outcome_retention_days, bool) or not 1 <= outcome_retention_days <= 365:
+            raise RunnerJitError("outcome retention must be between 1 and 365 days")
         self.path = str(path)
+        self.outcome_retention_days = outcome_retention_days
         self._lock = threading.Lock()
         with closing(self._connect()) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("BEGIN IMMEDIATE")
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version > LEDGER_SCHEMA_VERSION:
+                connection.rollback()
+                raise RunnerJitError("allocation ledger schema is newer than this binary")
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS runner_allocations (
                 allocation_id TEXT PRIMARY KEY, binding_digest TEXT NOT NULL UNIQUE,
@@ -484,11 +501,154 @@ class SqliteAllocationLedger:
                     connection.execute(
                         f"ALTER TABLE runner_allocations ADD COLUMN {name} {declaration}"
                     )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS allocation_outcomes (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_key TEXT NOT NULL UNIQUE,
+                cause_code TEXT NOT NULL,
+                allocation_id TEXT,
+                run_id TEXT,
+                job_id TEXT,
+                repository TEXT,
+                pr_number INTEGER,
+                head_sha TEXT,
+                prior_ledger_state TEXT,
+                issued_at TEXT,
+                claim_deadline TEXT,
+                occurred_at TEXT NOT NULL,
+                delay_bucket TEXT NOT NULL,
+                executed INTEGER NOT NULL,
+                success INTEGER NOT NULL
+                )"""
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS allocation_outcomes_occurred ON allocation_outcomes(occurred_at)"
+            )
+            connection.execute(f"PRAGMA user_version={LEDGER_SCHEMA_VERSION}")
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=self.outcome_retention_days)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            connection.execute("DELETE FROM allocation_outcomes WHERE occurred_at < ?", (cutoff,))
+            connection.commit()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5, isolation_level=None)
         connection.execute("PRAGMA busy_timeout=5000")
         return connection
+
+    @staticmethod
+    def delay_bucket(claim_deadline: str | None, now: datetime) -> str:
+        if claim_deadline is None:
+            return "unknown"
+        deadline = _parse_time(claim_deadline, "claim_deadline")
+        seconds = (now - deadline).total_seconds()
+        if seconds < 0:
+            return "before-deadline"
+        if seconds < 60:
+            return "0-60s"
+        if seconds < 300:
+            return "1-5m"
+        return ">5m"
+
+    def append_outcome(self, event: Mapping[str, Any]) -> bool:
+        """Append one strictly whitelisted diagnostic event; raw payloads cannot enter."""
+        required = {
+            "event_key", "cause_code", "allocation_id", "run_id", "job_id",
+            "repository", "pr_number", "head_sha", "prior_ledger_state",
+            "issued_at", "claim_deadline", "now", "delay_bucket", "executed", "success",
+        }
+        if not isinstance(event, Mapping) or set(event) != required:
+            raise RunnerJitError("outcome event fields are not exact")
+        if not isinstance(event["event_key"], str) or not re.fullmatch(r"[A-Za-z0-9:._-]{1,200}", event["event_key"]):
+            raise RunnerJitError("outcome event key is invalid")
+        if event["cause_code"] not in OUTCOME_CAUSES or event["delay_bucket"] not in DELAY_BUCKETS:
+            raise RunnerJitError("outcome cause or delay bucket is invalid")
+        if type(event["executed"]) is not bool or type(event["success"]) is not bool:
+            raise RunnerJitError("outcome booleans are invalid")
+        if event["success"] and (not event["executed"] or event["cause_code"] != "success"):
+            raise RunnerJitError("successful outcome identity is invalid")
+        allocation_id = event["allocation_id"]
+        if allocation_id is not None:
+            _validate_uuid(allocation_id, "allocation_id")
+        for field in ("run_id", "job_id"):
+            if event[field] is not None and (not isinstance(event[field], str) or not re.fullmatch(r"[1-9][0-9]*", event[field])):
+                raise RunnerJitError(f"outcome {field} is invalid")
+        repository = event["repository"]
+        if repository is not None and (not isinstance(repository, str) or not _REPOSITORY.fullmatch(repository)):
+            raise RunnerJitError("outcome repository is invalid")
+        if event["pr_number"] is not None and (isinstance(event["pr_number"], bool) or not isinstance(event["pr_number"], int) or event["pr_number"] < 1):
+            raise RunnerJitError("outcome PR is invalid")
+        if event["head_sha"] is not None and (not isinstance(event["head_sha"], str) or not _SHA1.fullmatch(event["head_sha"])):
+            raise RunnerJitError("outcome head SHA is invalid")
+        state = event["prior_ledger_state"]
+        if state is not None and state not in {"reserved", "issued", "claimed", "running", "terminal", "recovery_required", "cleaned", "absent"}:
+            raise RunnerJitError("outcome prior ledger state is invalid")
+        now = event["now"]
+        if not isinstance(now, datetime) or now.tzinfo != timezone.utc:
+            raise RunnerJitError("outcome now must be UTC")
+        stamp = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        for field in ("issued_at", "claim_deadline"):
+            if event[field] is not None:
+                _parse_time(event[field], field)
+        cutoff = (now - timedelta(days=self.outcome_retention_days)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        values = [event[name] for name in (
+            "event_key", "cause_code", "allocation_id", "run_id", "job_id", "repository",
+            "pr_number", "head_sha", "prior_ledger_state", "issued_at", "claim_deadline",
+        )] + [stamp, event["delay_bucket"], int(event["executed"]), int(event["success"])]
+        with self._lock, closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM allocation_outcomes WHERE occurred_at < ?", (cutoff,))
+            existing = connection.execute(
+                """SELECT cause_code,allocation_id,run_id,job_id,repository,pr_number,head_sha,
+                prior_ledger_state,issued_at,claim_deadline,occurred_at,delay_bucket,executed,success
+                FROM allocation_outcomes WHERE event_key=?""", (event["event_key"],)
+            ).fetchone()
+            if existing is not None:
+                connection.rollback()
+                stable_existing = existing[:7] + existing[-2:]
+                stable_expected = tuple(values[1:8] + values[-2:])
+                if stable_existing == stable_expected:
+                    return False
+                raise RunnerJitError("outcome event key was reused with different content")
+            changed = connection.execute(
+                """INSERT INTO allocation_outcomes(
+                event_key,cause_code,allocation_id,run_id,job_id,repository,pr_number,head_sha,
+                prior_ledger_state,issued_at,claim_deadline,occurred_at,delay_bucket,executed,success
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", values,
+            ).rowcount
+            connection.commit()
+        return changed == 1
+
+    def has_outcome_cause(self, allocation_id: str, causes: set[str] | frozenset[str]) -> bool:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM allocation_outcomes WHERE allocation_id=? AND cause_code IN (%s) LIMIT 1"
+                % ",".join("?" for _ in causes), (allocation_id, *sorted(causes)),
+            ).fetchone()
+        return row is not None
+
+    def outcomes(self, *, since: datetime, now: datetime) -> list[dict[str, Any]]:
+        if since.tzinfo != timezone.utc or now.tzinfo != timezone.utc or since > now:
+            raise RunnerJitError("outcome window is invalid")
+        since_text = since.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        columns = ("event_key", "cause_code", "allocation_id", "run_id", "job_id", "repository", "pr_number", "head_sha", "prior_ledger_state", "issued_at", "claim_deadline", "occurred_at", "delay_bucket", "executed", "success")
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                f"SELECT {','.join(columns)} FROM allocation_outcomes WHERE occurred_at>=? ORDER BY sequence", (since_text,)
+            ).fetchall()
+        return [dict(zip(columns, row[:-2] + (bool(row[-2]), bool(row[-1])))) for row in rows]
+
+    @classmethod
+    def read_outcomes(cls, path: str | Path, *, since: datetime, now: datetime) -> list[dict[str, Any]]:
+        """Read the migrated event table without creating, pruning or mutating it."""
+        if since.tzinfo != timezone.utc or now.tzinfo != timezone.utc or since > now:
+            raise RunnerJitError("outcome window is invalid")
+        since_text = since.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        columns = ("event_key", "cause_code", "allocation_id", "run_id", "job_id", "repository", "pr_number", "head_sha", "prior_ledger_state", "issued_at", "claim_deadline", "occurred_at", "delay_bucket", "executed", "success")
+        uri = "file:" + str(path) + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=5)) as connection:
+            rows = connection.execute(
+                f"SELECT {','.join(columns)} FROM allocation_outcomes WHERE occurred_at>=? ORDER BY sequence", (since_text,)
+            ).fetchall()
+        return [dict(zip(columns, row[:-2] + (bool(row[-2]), bool(row[-1])))) for row in rows]
 
     @staticmethod
     def _digests(payload: Mapping[str, Any]) -> tuple[str, str]:

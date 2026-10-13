@@ -17,6 +17,10 @@ Use the installed `self-hosted-ci` CLI as the canonical fail-closed agent interf
 - “Volvé este repo a GitHub”, “usá GitHub Actions de vuelta”, or “sacalo del self-hosted” means `self-hosted-ci use-github [OWNER/REPO] --apply`.
 - `doctor` exits with code `3` when `doctor=unhealthy`; `status` preserves its existing exit behavior.
 - Questions about routing or health mean `self-hosted-ci status [OWNER/REPO]` or `self-hosted-ci doctor [OWNER/REPO]`.
+- Questions about recent failures, success rate, or durable CI causes mean
+  `self-hosted-ci outcomes [OWNER/REPO] --since Nd --json`. The window is
+  bounded to the retained snapshot history (1–365 days); event fields are the
+  sanitized IDs and stable cause codes emitted by the allocation ledger.
 
 Resolve a missing repository from the current checkout. Resolve a missing PR only from an unambiguous current PR; otherwise ask for the PR number. Never translate a one-off run into persistent enrollment.
 

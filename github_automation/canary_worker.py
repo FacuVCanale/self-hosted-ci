@@ -1429,6 +1429,10 @@ class CanaryRuntime:
             raise CanaryRuntimeError("bootstrap live remeasurement is not exact")
         health = _read_json(Path(self.config["garm_health_file"]))
         broker = _read_json(Path(self.config["broker_config_file"]))
+        retention = broker.get("outcome_retention_days", 30)
+        if isinstance(retention, bool) or not isinstance(retention, int) or not 1 <= retention <= 365:
+            raise CanaryRuntimeError("canary broker outcome retention is invalid")
+        broker = {**broker, "outcome_retention_days": retention}
         repository_id = str(self.authorization["repository_id"])
         expected_entity = dict(self.authorization["garm_entity"])
         expected_entity["entity_flag"] = (
@@ -1467,6 +1471,7 @@ class CanaryRuntime:
                 "image_alias",
                 "image_fingerprint",
                 "live_job_verifier",
+                "outcome_retention_days",
                 "targets",
             }
         ):

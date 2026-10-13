@@ -17,11 +17,11 @@ readonly METADATA_URL=http://10.254.0.1:8080/api/v1/metadata
 
 die() { printf 'garm-jit configuration blocked: %s\n' "$*" >&2; exit 1; }
 usage() {
-  printf 'usage: %s [--plan] | --apply --config-template FILE --jwt-secret-file FILE --database-passphrase-file FILE --garm-admin-username-file FILE --garm-admin-password-file FILE --runner-manager-app-config-file FILE --dispatcher-app-config-file FILE --live-job-verifier-app-config-file FILE --garm-cli-home /run/self-hosted-ci-broker/garm-cli --authority-kind personal-repository|organization-runner-group --repository OWNER/REPO --repository-id ID --default-branch BRANCH [--entity-id UUID] --entity-name OWNER/REPO|ORGANIZATION [--runner-group GROUP] --image-alias ALIAS --image-fingerprint SHA256 --expected-previous-image-fingerprint SHA256 --allocation-authority-public-key FILE --live-job-verifier /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py --acknowledge-root-secret-installation --acknowledge-garm-database-mutation --acknowledge-external-github-configuration\n' "$0" >&2
+  printf 'usage: %s [--plan] | --apply --config-template FILE --jwt-secret-file FILE --database-passphrase-file FILE --garm-admin-username-file FILE --garm-admin-password-file FILE --runner-manager-app-config-file FILE --dispatcher-app-config-file FILE --live-job-verifier-app-config-file FILE --garm-cli-home /run/self-hosted-ci-broker/garm-cli --authority-kind personal-repository|organization-runner-group --repository OWNER/REPO --repository-id ID --default-branch BRANCH [--entity-id UUID] --entity-name OWNER/REPO|ORGANIZATION [--runner-group GROUP] --image-alias ALIAS --image-fingerprint SHA256 --expected-previous-image-fingerprint SHA256 --allocation-authority-public-key FILE --live-job-verifier /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py [--outcome-retention-days 1..365] --acknowledge-root-secret-installation --acknowledge-garm-database-mutation --acknowledge-external-github-configuration\n' "$0" >&2
   exit 2
 }
 
-mode=plan; template=""; jwt_file=""; passphrase_file=""; admin_username_file=""; admin_password_file=""; runner_manager_app_config_file=""; dispatcher_app_config_file=""; live_job_verifier_app_config_file=""; cli_home=""; authority_kind=""
+mode=plan; template=""; jwt_file=""; passphrase_file=""; admin_username_file=""; admin_password_file=""; runner_manager_app_config_file=""; dispatcher_app_config_file=""; live_job_verifier_app_config_file=""; cli_home=""; authority_kind=""; outcome_retention_days=30
 repository=""; repository_id=""; default_branch=""; entity_id=""; entity_name=""; runner_group=""; image_alias=""; image_fingerprint=""; expected_previous_image_fingerprint=""; allocation_public_key=""; live_job_verifier=""
 ack_secrets=false; ack_database=false; ack_github=false
 while [[ $# -gt 0 ]]; do
@@ -49,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --expected-previous-image-fingerprint) [[ $# -ge 2 ]] || usage; expected_previous_image_fingerprint="$2"; shift 2 ;;
     --allocation-authority-public-key) [[ $# -ge 2 ]] || usage; allocation_public_key="$2"; shift 2 ;;
     --live-job-verifier) [[ $# -ge 2 ]] || usage; live_job_verifier="$2"; shift 2 ;;
+    --outcome-retention-days) [[ $# -ge 2 ]] || usage; outcome_retention_days="$2"; shift 2 ;;
     --acknowledge-root-secret-installation) ack_secrets=true; shift ;;
     --acknowledge-garm-database-mutation) ack_database=true; shift ;;
     --acknowledge-external-github-configuration) ack_github=true; shift ;;
@@ -88,6 +89,7 @@ GITHUB_CREDENTIAL_DESCRIPTION="Self-hosted CI runner manager for repository ${re
 [[ "${image_alias}" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{2,127}$ && "${image_alias}" != *:* ]] || die 'image must be a local immutable alias without a remote prefix'
 [[ "${image_fingerprint}" =~ ^[0-9a-f]{64}$ ]] || die 'image fingerprint must be lowercase SHA-256'
 [[ "${expected_previous_image_fingerprint}" =~ ^[0-9a-f]{64}$ ]] || die 'expected previous image fingerprint must be lowercase SHA-256'
+[[ "${outcome_retention_days}" =~ ^[1-9][0-9]{0,2}$ ]] && (( outcome_retention_days <= 365 )) || die 'outcome retention must be between 1 and 365 days'
 [[ -f "${allocation_public_key}" && ! -L "${allocation_public_key}" ]] || die 'allocation authority public key must be a regular file'
 [[ "${live_job_verifier}" == /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py ]] || die 'live workflow-job verifier path is not exact'
 [[ -f "${live_job_verifier}" && ! -L "${live_job_verifier}" && -x "${live_job_verifier}" ]] || die 'live workflow-job verifier must be an executable regular file'
@@ -529,17 +531,17 @@ if not isinstance(scale_sets,list) or scale_sets: raise SystemExit("configuratio
 if not isinstance(instances,list) or instances: raise SystemExit("configuration requires zero Incus instances")
 PY
 install -o root -g root -m 0640 "${allocation_public_key}" "${BROKER_PUBLIC_KEY}"
-python3 - "${HEALTH_STATE}" "${BROKER_CONFIG}" "${OUTBOUND_CONFIG}" "${BROKER_PUBLIC_KEY}" "${cli_home}" "${repository}" "${repository_id}" "${default_branch}" "${authority_kind}" "${entity_id}" "${entity_name}" "${runner_group}" "${image_alias}" "${image_fingerprint}" "${expected_previous_image_fingerprint}" "${live_job_verifier}" <<'PY'
+python3 - "${HEALTH_STATE}" "${BROKER_CONFIG}" "${OUTBOUND_CONFIG}" "${BROKER_PUBLIC_KEY}" "${cli_home}" "${repository}" "${repository_id}" "${default_branch}" "${authority_kind}" "${entity_id}" "${entity_name}" "${runner_group}" "${image_alias}" "${image_fingerprint}" "${expected_previous_image_fingerprint}" "${live_job_verifier}" "${outcome_retention_days}" <<'PY'
 import hashlib, json, os, pathlib, sys, tempfile
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 health_path, broker_path, outbound_path, key_path = map(pathlib.Path, sys.argv[1:5])
-cli_home, repository, repository_id, default_branch, authority, entity_id, entity_name, runner_group, image, fingerprint, previous_fingerprint, verifier = sys.argv[5:]
+cli_home, repository, repository_id, default_branch, authority, entity_id, entity_name, runner_group, image, fingerprint, previous_fingerprint, verifier, outcome_retention_days = sys.argv[5:]
 key=serialization.load_pem_public_key(key_path.read_bytes())
 if not isinstance(key,ed25519.Ed25519PublicKey): raise SystemExit("allocation authority key must be Ed25519")
 target={"authority_kind":authority,"entity_flag":"--repo" if authority=="personal-repository" else "--org","entity_id":entity_id,"entity_name":entity_name,"runner_group":runner_group or None}
 der=key.public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo)
-broker={"allocation_signer_fingerprint":hashlib.sha256(der).hexdigest(),"garm_cli_home":cli_home,"provider_name":"incus_ci_jit","image_alias":image,"image_fingerprint":fingerprint,"live_job_verifier":verifier,"targets":{repository_id:target}}
+broker={"allocation_signer_fingerprint":hashlib.sha256(der).hexdigest(),"garm_cli_home":cli_home,"provider_name":"incus_ci_jit","image_alias":image,"image_fingerprint":fingerprint,"live_job_verifier":verifier,"outcome_retention_days":int(outcome_retention_days),"targets":{repository_id:target}}
 state={"schema_version":3,"garm_cli_home":cli_home,"manager_configured":True,"provider_configured":True,"image_configured":True,"broker_configured":True,"zero_scale_sets":True,"image":{"alias":image,"fingerprint":fingerprint},"targets":{repository_id:target}}
 outbound=json.loads(outbound_path.read_text(encoding="utf-8"))
 if outbound.get("repository")!=repository or str(outbound.get("repository_id"))!=repository_id or outbound.get("default_branch")!=default_branch: raise SystemExit("outbound repository binding changed during configuration")

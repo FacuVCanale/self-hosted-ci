@@ -9,6 +9,7 @@ import os
 import stat
 import sys
 import threading
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -17,7 +18,11 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from github_automation.coordinator import ReservePartialFailure
 from github_automation.crypto import spki_fingerprint
-from github_automation.runner_jit import RunnerJitError, SqliteAllocationLedger
+from github_automation.runner_jit import (
+    OUTCOME_RETENTION_DAYS,
+    RunnerJitError,
+    SqliteAllocationLedger,
+)
 from github_automation.runner_jit_broker import (
     AllocationBroker,
     ExternalLiveWorkflowJobVerifier,
@@ -25,6 +30,7 @@ from github_automation.runner_jit_broker import (
     JobStartedDenial,
     JobStartedObservationPolicy,
     JobStartedContext,
+    durable_denial_cause,
     exception_causes,
     utc_now,
 )
@@ -52,6 +58,9 @@ def load_broker(observation_policy: JobStartedObservationPolicy = JobStartedObse
     fingerprint = spki_fingerprint(public_key)
     configured_fingerprint = config.pop("allocation_signer_fingerprint", None)
     live_job_verifier = config.pop("live_job_verifier", None)
+    outcome_retention_days = config.pop(
+        "outcome_retention_days", OUTCOME_RETENTION_DAYS
+    )
     if not isinstance(live_job_verifier, str) or not live_job_verifier.startswith(
         "/usr/local/libexec/self-hosted-ci/"
     ):
@@ -62,7 +71,9 @@ def load_broker(observation_policy: JobStartedObservationPolicy = JobStartedObse
         )
     LEDGER.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
     return AllocationBroker(
-        SqliteAllocationLedger(LEDGER),
+        SqliteAllocationLedger(
+            LEDGER, outcome_retention_days=outcome_retention_days
+        ),
         GarmCliAllocationDriver(config, HOOK_SOURCE),
         public_key,
         fingerprint,
@@ -133,6 +144,15 @@ def job_started_handler(broker: AllocationBroker, *, journal=None):
                 file=journal,
                 flush=True,
             )
+            allocation_id = getattr(self, "outcome_allocation_id", None)
+            cause_code = durable_denial_cause(error_code, exc)
+            if allocation_id is not None and cause_code is not None:
+                broker.record_outcome(
+                    event_key=f"job-started:{allocation_id}:{cause_code}",
+                    cause_code=cause_code,
+                    allocation_id=allocation_id,
+                    now=utc_now(),
+                )
             self.send_response(403)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
@@ -164,6 +184,7 @@ def job_started_handler(broker: AllocationBroker, *, journal=None):
                 }:
                     denial = ("request", "invalid-envelope", ())
                     return
+                self.outcome_allocation_id = value["allocation_id"]
                 try:
                     context = JobStartedContext.from_mapping(value["context"])
                 except RunnerJitError as exc:
@@ -219,6 +240,10 @@ def main(argv=None) -> int:
     prove.add_argument("--runner-label", required=True)
     recover = sub.add_parser("recover")
     recover.add_argument("--allocation-id")
+    record = sub.add_parser("record-outcome")
+    record.add_argument("--event", required=True, type=Path)
+    outcomes = sub.add_parser("outcomes")
+    outcomes.add_argument("--since-days", required=True, type=int)
     sub.add_parser("serve")
     args = parser.parse_args(argv)
     if os.geteuid() != 0:
@@ -273,6 +298,16 @@ def main(argv=None) -> int:
                 else {"recovered": broker.recover_all(), "runtime_empty": True}
             )
             print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+        elif args.command == "record-outcome":
+            value = load_json(args.event)
+            value["now"] = datetime.fromisoformat(value.pop("occurred_at").replace("Z", "+00:00"))
+            print(json.dumps({"recorded": broker.record_outcome(**value)}, sort_keys=True, separators=(",", ":")))
+        elif args.command == "outcomes":
+            if not 1 <= args.since_days <= 365:
+                raise RunnerJitError("outcome window must be between 1 and 365 days")
+            now = utc_now()
+            events = broker.ledger.outcomes(since=now - timedelta(days=args.since_days), now=now)
+            print(json.dumps({"events": events, "since_days": args.since_days}, sort_keys=True, separators=(",", ":")))
         else:
             broker.recover_all()
             serve(broker)

@@ -14,6 +14,7 @@ import os
 import stat
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 from contextlib import redirect_stderr
 from io import StringIO
@@ -273,6 +274,47 @@ class HostConfigValidationTests(unittest.TestCase):
         self.assertEqual(
             ["backend lint + test", "frontend lint + test"], checks.created
         )
+        self.assertTrue(source.blocked)
+
+    def test_stale_merge_ref_records_outcome_without_check_publisher(self):
+        class Client:
+            def authenticate(self):
+                return object()
+
+            def open_pull_requests(self, _token):
+                return ((42, "a" * 40),)
+
+        class Source:
+            blocked = False
+
+            def status(self, _repository):
+                return []
+
+            def approve(self, _repository, _pr):
+                raise self_error("GitHub merge ref is stale relative to live base")
+
+            def has_preflight_block(self, *_args):
+                return self.blocked
+
+            def record_preflight_block(self, *_args):
+                self.blocked = True
+
+            def clock(self):
+                return datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+
+        class Broker:
+            events = []
+
+            def record_outcome(self, event):
+                self.events.append(event)
+
+        self_error = self.cli.LocalApprovalError
+        source, broker = Source(), Broker()
+        result = self.cli.AutoDispatcher(
+            Client(), source, "alethia-earth/Overworld", checks=None, broker=broker
+        ).reconcile_once()
+        self.assertEqual("blocked", result["actions"][0]["result"])
+        self.assertEqual("stale-merge-ref", broker.events[0]["cause_code"])
         self.assertTrue(source.blocked)
 
 
