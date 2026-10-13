@@ -8,6 +8,7 @@ GARM session and must implement the narrow operations below.
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import math
 import os
@@ -126,6 +127,10 @@ class JobStartedDenial(RunnerJitError):
         super().__init__(error_code)
 
 
+class GarmRuntimeReadOnlyError(RunnerJitError):
+    """Stable typed result from the fixed GARM session helper."""
+
+
 @dataclass(frozen=True)
 class JobStartedContext:
     repository_id: str
@@ -216,6 +221,24 @@ class LiveWorkflowJobVerifier(Protocol):
     ) -> None: ...
 
 
+def durable_denial_cause(error_code: str, exc: BaseException | None) -> str | None:
+    if error_code in {"claim-expired", "claim-state-conflict"}:
+        return error_code
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, subprocess.TimeoutExpired):
+            return "garm-timeout"
+        if isinstance(exc, GarmRuntimeReadOnlyError) or (
+            isinstance(exc, OSError) and exc.errno == errno.EROFS
+        ):
+            return "garm-runtime-erofs"
+        exc = exc.__cause__ if exc.__cause__ is not None else exc.__context__
+    if error_code == "claim-not-observed":
+        return error_code
+    return None
+
+
 class AllocationBroker:
     """Fail-closed create→bind→enable→claim→disable→drain→delete lifecycle."""
 
@@ -236,6 +259,48 @@ class AllocationBroker:
         self.live_job_verifier = live_job_verifier
         self.observation_policy = observation_policy
 
+    def record_outcome(
+        self, *, event_key: str, cause_code: str, now: datetime,
+        allocation_id: str | None = None, run_id: int | str | None = None,
+        job_id: int | str | None = None, repository: str | None = None,
+        pr_number: int | None = None, head_sha: str | None = None,
+        executed: bool | None = False, success: bool = False,
+        prior_ledger_state: str | None = None,
+    ) -> bool:
+        prior_state = issued_at = claim_deadline = None
+        if allocation_id is not None:
+            record = self.ledger.get(allocation_id)
+            prior_state = prior_ledger_state or record.state
+            issued_at = record.issued_at.isoformat().replace("+00:00", "Z")
+            claim_deadline = record.claim_deadline.isoformat().replace("+00:00", "Z")
+            try:
+                identity = self.ledger.payload(allocation_id)
+            except RunnerJitError:
+                identity = self.ledger.reservation(allocation_id)
+            repository = repository or identity.get("repository")
+            pr_number = pr_number or identity.get("pr_number")
+            head_sha = head_sha or identity.get("head_sha")
+            run_id = run_id or identity.get("run_id")
+            job_id = job_id or identity.get("job_id")
+            if executed is None:
+                executed = record.jobs_started == 1
+        if executed is None:
+            executed = False
+        if allocation_id is not None and cause_code.startswith("job-") and self.ledger.has_outcome_cause(
+            allocation_id, frozenset({"claim-expired", "claim-state-conflict", "claim-not-observed", "garm-timeout", "garm-runtime-erofs"})
+        ):
+            return False
+        return self.ledger.append_outcome({
+            "event_key": event_key, "cause_code": cause_code,
+            "allocation_id": allocation_id,
+            "run_id": str(run_id) if run_id is not None else None,
+            "job_id": str(job_id) if job_id is not None else None,
+            "repository": repository, "pr_number": pr_number, "head_sha": head_sha,
+            "prior_ledger_state": prior_state, "issued_at": issued_at,
+            "claim_deadline": claim_deadline, "now": now,
+            "delay_bucket": self.ledger.delay_bucket(claim_deadline, now),
+            "executed": executed, "success": success,
+        })
     def _wait_for_observation(self, observe, deadline: float) -> None:
         """Retry read-only authority observations within one shared deadline."""
         last_error = None
@@ -661,6 +726,8 @@ class GarmCliAllocationDriver:
                         raise RunnerJitError(
                             f"GARM CLI returned invalid JSON; stdout={snippet}"
                         ) from exc
+                if result.returncode == 73:
+                    raise GarmRuntimeReadOnlyError("GARM CLI runtime is read-only")
                 snippet = sanitize_diagnostic(result.stderr)[-200:]
                 last_error = RunnerJitError(
                     f"GARM CLI command failed; returncode={result.returncode}; stderr={snippet}"

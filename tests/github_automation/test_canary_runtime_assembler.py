@@ -110,6 +110,7 @@ class CanaryRuntimeAssemblerTests(unittest.TestCase):
                 "image_alias": auth["image_alias"],
                 "image_fingerprint": auth["image_fingerprint"],
                 "live_job_verifier": "/usr/local/libexec/self-hosted-ci/github-live-job-verifier.py",
+                "outcome_retention_days": 7,
                 "targets": {repository_id: entity},
             },
             private=True,
@@ -224,6 +225,24 @@ class CanaryRuntimeAssemblerTests(unittest.TestCase):
         self.assertFalse(manifest["authorization_signed"])
         for path in output.iterdir():
             self.assertEqual(0o600, stat_mode(path))
+
+    def test_broker_retention_accepts_configured_and_legacy_but_rejects_invalid(self):
+        broker = json.loads(self.paths["broker.json"].read_text())
+        self.assertEqual(7, broker["outcome_retention_days"])
+        self.assertEqual(0, self.run_main(self.prepare_args(self.root / "configured-retention")))
+
+        broker.pop("outcome_retention_days")
+        self._json("broker.json", broker, private=True)
+        self.assertEqual(0, self.run_main(self.prepare_args(self.root / "legacy-retention")))
+
+        for index, value in enumerate((True, 0, 366)):
+            with self.subTest(value=value):
+                broker["outcome_retention_days"] = value
+                self._json("broker.json", broker, private=True)
+                self.assertNotEqual(
+                    0,
+                    self.run_main(self.prepare_args(self.root / f"invalid-retention-{index}")),
+                )
 
     def test_prepare_accepts_exact_organization_runner_group_and_rejects_drift(self):
         auth = json.loads(self.paths["authorization-template.json"].read_text())

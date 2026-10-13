@@ -388,7 +388,7 @@ def runtime(config_path):
     checks = _gate_publisher(c, client)
     auto = c.get("auto_dispatch")
     dispatcher = (
-        AutoDispatcher(client, source, c["repository"], checks=checks)
+        AutoDispatcher(client, source, c["repository"], checks=checks, broker=broker)
         if isinstance(auto, dict) and auto.get("enabled")
         else None
     )
@@ -413,11 +413,12 @@ class AutoDispatcher:
     one configured repository and never cancels a different pull request's work.
     """
 
-    def __init__(self, client, source, repository, *, checks=None):
+    def __init__(self, client, source, repository, *, checks=None, broker=None):
         self.client = client
         self.source = source
         self.repository = repository
         self.checks = checks
+        self.broker = broker
 
     def reconcile_once(self):
         token = self.client.authenticate()
@@ -439,7 +440,6 @@ class AutoDispatcher:
                 if (
                     action.kind == "approve"
                     and "merge ref is stale" in str(exc)
-                    and self.checks is not None
                 ):
                     try:
                         reason = (
@@ -455,45 +455,63 @@ class AutoDispatcher:
                             )
                         )
                         if is_new:
+                            if self.broker is not None:
+                                self.broker.record_outcome({
+                                    "event_key": f"preflight:{self.repository}:{action.pr_number}:{action.head_sha}",
+                                    "cause_code": "stale-merge-ref",
+                                    "occurred_at": self.source.clock().replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                                    "allocation_id": None, "run_id": None, "job_id": None,
+                                    "repository": self.repository, "pr_number": action.pr_number,
+                                    "head_sha": action.head_sha, "executed": False, "success": False,
+                                })
                             scope = (
                                 f"preflight:{self.repository}:{action.pr_number}:"
                                 f"{action.head_sha}"
                             )
-                            progress_reader = getattr(
-                                self.source, "discard_check_progress", None
-                            )
-                            publication = (
-                                progress_reader(scope)
-                                if progress_reader is not None
-                                else {"checks": {}, "completed": []}
-                            )
-                            self.checks.publish_discarded(
-                                head_sha=action.head_sha,
-                                reason=reason,
-                                scope=scope,
-                                details_url=(
-                                    f"https://github.com/{self.repository}/pull/"
-                                    f"{action.pr_number}"
-                                ),
-                                checks=publication["checks"],
-                                completed=publication["completed"],
-                                record_pending=lambda name: self.source.begin_discard_check(
-                                    scope, name
-                                ),
-                                record_created=lambda name, identifier: self.source.record_discard_check(
-                                    scope, name, identifier
-                                ),
-                                record_completed=lambda name: self.source.complete_discard_check(
-                                    scope, name
-                                ),
-                            )
-                            if remember is not None:
-                                remember(
-                                    self.repository,
-                                    action.pr_number,
-                                    action.head_sha,
-                                    reason,
+                            if self.checks is None:
+                                if remember is not None:
+                                    remember(
+                                        self.repository,
+                                        action.pr_number,
+                                        action.head_sha,
+                                        reason,
+                                    )
+                            else:
+                                progress_reader = getattr(
+                                    self.source, "discard_check_progress", None
                                 )
+                                publication = (
+                                    progress_reader(scope)
+                                    if progress_reader is not None
+                                    else {"checks": {}, "completed": []}
+                                )
+                                self.checks.publish_discarded(
+                                    head_sha=action.head_sha,
+                                    reason=reason,
+                                    scope=scope,
+                                    details_url=(
+                                        f"https://github.com/{self.repository}/pull/"
+                                        f"{action.pr_number}"
+                                    ),
+                                    checks=publication["checks"],
+                                    completed=publication["completed"],
+                                    record_pending=lambda name: self.source.begin_discard_check(
+                                        scope, name
+                                    ),
+                                    record_created=lambda name, identifier: self.source.record_discard_check(
+                                        scope, name, identifier
+                                    ),
+                                    record_completed=lambda name: self.source.complete_discard_check(
+                                        scope, name
+                                    ),
+                                )
+                                if remember is not None:
+                                    remember(
+                                        self.repository,
+                                        action.pr_number,
+                                        action.head_sha,
+                                        reason,
+                                    )
                     except (GateCheckError, OSError):
                         print(
                             "stale merge Check Run publication remains pending",

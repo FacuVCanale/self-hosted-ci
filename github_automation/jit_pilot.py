@@ -291,6 +291,7 @@ class PilotTerminalMonitor:
     supersession: Callable[[], str | None] | None = None
     cancel_run: Callable[[int], bool | None] | None = None
     supersession_reason: str | None = field(default=None, init=False)
+    before_finish: Callable[[str], None] | None = None
 
     def monitor(
         self, *, allocation_id: str, runner_label: str, run_id: int, job_id: int
@@ -380,6 +381,8 @@ class PilotTerminalMonitor:
                 conclusion = "timeout"
                 break
             self.sleeper(self.poll_seconds)
+        if self.before_finish is not None:
+            self.before_finish(conclusion)
         self.broker.finish(allocation_id, conclusion)
         cleanup = self.broker.prove_clean(allocation_id, runner_label)
         if cleanup != {

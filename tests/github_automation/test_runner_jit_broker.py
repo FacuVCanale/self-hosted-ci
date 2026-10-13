@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr
@@ -29,8 +29,10 @@ from github_automation.runner_jit import (
 )
 from github_automation.runner_jit_broker import (
     AllocationBroker,
+    durable_denial_cause,
     exception_causes,
     ExternalLiveWorkflowJobVerifier,
+    GarmRuntimeReadOnlyError,
     GARM_CLEANUP_CONVERGENCE_SECONDS,
     GARM_CLI_COMMAND_TIMEOUT_SECONDS,
     GARM_RECOVERY_END_TO_END_SECONDS,
@@ -49,6 +51,26 @@ from tests.github_automation.test_runner_jit import payload, reservation
 
 NOW = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
 ROOT = Path(__file__).resolve().parents[2]
+
+
+class DurableDenialCauseTests(unittest.TestCase):
+    def test_typed_garm_failures_are_stable(self):
+        timed_out = RunnerJitError("wrapped")
+        timed_out.__cause__ = subprocess.TimeoutExpired(["garm"], 5)
+        read_only = RunnerJitError("wrapped")
+        read_only.__cause__ = OSError(30, "read-only file system")
+        self.assertEqual("garm-timeout", durable_denial_cause("claim-not-observed", timed_out))
+        self.assertEqual("garm-runtime-erofs", durable_denial_cause("claim-not-observed", read_only))
+        self.assertEqual(
+            "garm-runtime-erofs",
+            durable_denial_cause("claim-not-observed", GarmRuntimeReadOnlyError("read-only")),
+        )
+
+    def test_exact_claim_denial_precedes_generic_typed_cause(self):
+        self.assertEqual(
+            "claim-expired",
+            durable_denial_cause("claim-expired", subprocess.TimeoutExpired(["garm"], 5)),
+        )
 
 
 def load_script(name, path):
@@ -536,6 +558,21 @@ class AllocationBrokerTests(unittest.TestCase):
         self.assertNotIn("bearer_token", message)
         self.assertNotIn("\n", message)
 
+    def test_garm_session_read_only_exit_remains_typed_for_durable_cause(self):
+        driver = GarmCliAllocationDriver(
+            {"garm_cli_home": "/run/garm", "provider_name": "incus",
+             "image_alias": "runner", "image_fingerprint": "b" * 64, "targets": {}},
+            Path(self.tempdir.name) / "hook.py",
+        )
+        failed = mock.Mock(returncode=73, stdout="", stderr="runtime is read-only")
+        with mock.patch("subprocess.run", return_value=failed):
+            with self.assertRaises(GarmRuntimeReadOnlyError) as raised:
+                driver._run("scaleset", "update", "87", "--enabled=false")
+        self.assertEqual(
+            "garm-runtime-erofs",
+            durable_denial_cause("claim-not-observed", raised.exception),
+        )
+
     def test_garm_cli_output_diagnostics_are_bounded_and_redacted_before_slicing(self):
         driver = GarmCliAllocationDriver(
             {"garm_cli_home": "/run/garm", "provider_name": "incus",
@@ -1004,6 +1041,43 @@ class AllocationBrokerTests(unittest.TestCase):
         ], journal_entry["cause"])
         self.assertEqual(45, self.clock.now)
         self.assertEqual("issued", self.ledger.get(self.payload["allocation_id"]).state)
+        events = self.ledger.outcomes(since=NOW - timedelta(days=1), now=NOW + timedelta(minutes=1))
+        self.assertEqual("claim-not-observed", events[-1]["cause_code"])
+        self.assertEqual("issued", events[-1]["prior_ledger_state"])
+
+    def test_precise_hook_denial_suppresses_later_generic_job_failure(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        allocation_id = self.payload["allocation_id"]
+        self.assertTrue(self.broker.record_outcome(
+            event_key=f"job-started:{allocation_id}:claim-expired",
+            cause_code="claim-expired", allocation_id=allocation_id, now=NOW,
+        ))
+        self.assertFalse(self.broker.record_outcome(
+            event_key="request:later:job-failure", cause_code="job-failure",
+            allocation_id=allocation_id, now=NOW + timedelta(minutes=1),
+            executed=True,
+        ))
+        events = self.ledger.outcomes(
+            since=NOW - timedelta(days=1), now=NOW + timedelta(minutes=2),
+        )
+        self.assertEqual(["claim-expired"], [event["cause_code"] for event in events])
+
+    def test_terminal_before_hook_records_issued_and_not_executed_before_cleanup(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        allocation_id = self.payload["allocation_id"]
+        self.assertTrue(self.broker.record_outcome(
+            event_key="request:terminal-before-hook:job-failure",
+            cause_code="job-failure", allocation_id=allocation_id,
+            now=NOW + timedelta(seconds=1), executed=None,
+        ))
+        self.broker.finish(allocation_id, outcome="failure")
+        event = self.ledger.outcomes(
+            since=NOW - timedelta(days=1), now=NOW + timedelta(minutes=1),
+        )[0]
+        self.assertEqual("issued", event["prior_ledger_state"])
+        self.assertFalse(event["executed"])
 
     def test_http_success_emits_no_denial_journal_line(self):
         self.broker.reserve(self.reservation, now=NOW)

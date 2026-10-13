@@ -53,6 +53,8 @@ class Source:
 class Broker:
     def __init__(self):
         self.calls = []
+        self.outcomes = []
+        self.timeline = []
 
     def reserve(self, value):
         self.calls.append(("reserve", value["allocation_id"]))
@@ -72,10 +74,12 @@ class Broker:
 
     def recover(self, allocation_id):
         self.calls.append(("recover", allocation_id))
+        self.timeline.append("recover")
         return {"allocation_id": allocation_id, "state": "absent"}
 
     def finish(self, allocation_id, outcome):
         self.calls.append(("finish", allocation_id, outcome))
+        self.timeline.append("finish")
 
     def prove_clean(self, allocation_id, runner_label):
         self.calls.append(("prove-clean", allocation_id))
@@ -86,6 +90,11 @@ class Broker:
             "scale_set_absent": True,
             "runtime_empty": True,
         }
+
+    def record_outcome(self, value):
+        self.outcomes.append(value)
+        self.timeline.append("record-outcome")
+        return {"recorded": True}
 
 
 class GitHub:
@@ -595,6 +604,11 @@ class OutboundWorkerTests(unittest.TestCase):
             [call for call in worker.broker.calls if call[0] == "recover"],
         )
         self.assertEqual(1, len(publisher.discarded))
+        self.assertEqual("superseded-head", worker.broker.outcomes[-1]["cause_code"])
+        self.assertLess(
+            worker.broker.timeline.index("record-outcome"),
+            worker.broker.timeline.index("recover"),
+        )
         self.assertIn("newer commit", publisher.discarded[0][1])
 
     def test_base_moved_before_admission_cancels_without_dispatch_or_allocation(self):
@@ -714,6 +728,13 @@ class OutboundWorkerTests(unittest.TestCase):
             [call[0] for call in worker.broker.calls if call[0] in {"finish", "prove-clean"}],
         )
         self.assertEqual(1, len(publisher.discarded))
+        self.assertEqual("superseded-head", worker.broker.outcomes[-1]["cause_code"])
+        self.assertIsNone(worker.broker.outcomes[-1]["prior_ledger_state"])
+        self.assertIsNone(worker.broker.outcomes[-1]["executed"])
+        self.assertLess(
+            worker.broker.timeline.index("record-outcome"),
+            worker.broker.timeline.index("finish"),
+        )
 
     def test_a_lost_run_closes_its_checks_instead_of_hanging_in_progress(self):
         publisher = RecordingPublisher()

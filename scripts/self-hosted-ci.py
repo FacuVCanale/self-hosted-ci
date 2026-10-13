@@ -47,6 +47,10 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--apply", action="store_true")
     doctor = commands.add_parser("doctor")
     doctor.add_argument("repository", nargs="?")
+    outcomes = commands.add_parser("outcomes")
+    outcomes.add_argument("repository", nargs="?")
+    outcomes.add_argument("--since", default="7d")
+    outcomes.add_argument("--json", action="store_true")
     return cli
 
 
@@ -66,6 +70,10 @@ def main(argv: list[str] | None = None) -> int:
             result = operator.use_github(repository, apply=args.apply)
         elif args.command == "run-local":
             result = operator.run_local(repository, args.pr, apply=args.apply)
+        elif args.command == "outcomes":
+            if not args.since.endswith("d") or not args.since[:-1].isdigit():
+                raise AgentOperatorError("invalid_outcome_window", "--since must use Nd syntax")
+            result = operator.outcomes(repository, int(args.since[:-1]))
         else:
             result = operator.status(repository)
             result["doctor"] = "healthy" if result["health"]["eligible"] else "unhealthy"
