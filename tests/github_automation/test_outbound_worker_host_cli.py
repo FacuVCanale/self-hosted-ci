@@ -192,6 +192,89 @@ class HostConfigValidationTests(unittest.TestCase):
         with self.assertRaises(Exception):
             self.config({**base_config(), "surprise": 1})
 
+    def test_stale_merge_ref_publishes_skipped_checks_without_approval(self):
+        class Client:
+            def authenticate(self):
+                return object()
+
+            def open_pull_requests(self, _token):
+                return ((42, "a" * 40),)
+
+        class Source:
+            approvals = 0
+            blocked = False
+            publications = {}
+
+            def status(self, _repository):
+                return []
+
+            def approve(self, _repository, _pr):
+                self.approvals += 1
+                raise self_error("GitHub merge ref is stale relative to live base")
+
+            def record_preflight_block(self, *_args):
+                if self.blocked:
+                    return False
+                self.blocked = True
+                return True
+
+            def has_preflight_block(self, *_args):
+                return self.blocked
+
+            def discard_check_progress(self, scope):
+                return self.publications.setdefault(
+                    scope, {"checks": {}, "completed": []}
+                )
+
+            def begin_discard_check(self, _scope, _name):
+                return None
+
+            def record_discard_check(self, scope, name, identifier):
+                self.publications[scope]["checks"][name] = identifier
+
+            def complete_discard_check(self, scope, name):
+                self.publications[scope]["completed"].append(name)
+
+        class Checks:
+            published = []
+            created = []
+            crash_once = True
+
+            def publish_discarded(self, **value):
+                self.published.append(value)
+                for name in ("backend lint + test", "frontend lint + test"):
+                    if name in value["completed"]:
+                        continue
+                    identifier = value["checks"].get(name)
+                    if identifier is None:
+                        identifier = 100 + len(self.created)
+                        self.created.append(name)
+                        value["record_pending"](name)
+                        value["record_created"](name, identifier)
+                    value["record_completed"](name)
+                if self.crash_once:
+                    self.crash_once = False
+                    raise OSError("crash before preflight block commit")
+
+        self_error = self.cli.LocalApprovalError
+        source, checks = Source(), Checks()
+        result = self.cli.AutoDispatcher(
+            Client(), source, "alethia-earth/Overworld", checks=checks
+        ).reconcile_once()
+        self.assertEqual(1, source.approvals)
+        self.assertEqual(1, len(checks.published))
+        self.assertEqual("a" * 40, checks.published[0]["head_sha"])
+        self.assertIn("update the pull request branch", checks.published[0]["reason"])
+        self.assertEqual("blocked", result["actions"][0]["result"])
+        self.cli.AutoDispatcher(
+            Client(), source, "alethia-earth/Overworld", checks=checks
+        ).reconcile_once()
+        self.assertEqual(2, len(checks.published))
+        self.assertEqual(
+            ["backend lint + test", "frontend lint + test"], checks.created
+        )
+        self.assertTrue(source.blocked)
+
 
 class InstallerOptionalBlockTests(unittest.TestCase):
     """The installer must accept exactly the blocks the CLI accepts."""

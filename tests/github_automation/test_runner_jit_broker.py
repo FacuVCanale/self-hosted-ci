@@ -229,9 +229,10 @@ class AllocationBrokerTests(unittest.TestCase):
             for field in JobStartedContext.__dataclass_fields__
         }
 
-    def post_job_started(self, broker, body):
+    def post_job_started(self, broker, body, *, journal=None):
         server = http.server.ThreadingHTTPServer(
-            ("127.0.0.1", 0), BROKER_ENTRY.job_started_handler(broker)
+            ("127.0.0.1", 0),
+            BROKER_ENTRY.job_started_handler(broker, journal=journal),
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -956,6 +957,7 @@ class AllocationBrokerTests(unittest.TestCase):
             status, _, _ = self.post_job_started(
                 self.broker,
                 json.dumps(request, separators=(",", ":")).encode(),
+                journal=stderr,
             )
 
         self.assertEqual(403, status)
@@ -984,19 +986,22 @@ class AllocationBrokerTests(unittest.TestCase):
         self.broker.reserve(self.reservation, now=NOW)
         self.broker.finalize(self.envelope, now=NOW)
         request = {"allocation_id": self.payload["allocation_id"], "context": self.context_mapping()}
-        stderr = io.StringIO()
         with (
+            tempfile.TemporaryFile(mode="w+", encoding="utf-8") as journal,
             mock.patch.object(self.driver, "assert_runner_claim", side_effect=RunnerJitError("GARM claim remains absent")),
-            redirect_stderr(stderr),
         ):
-            status, _, body = self.post_job_started(self.broker, json.dumps(request).encode())
+            status, _, body = self.post_job_started(
+                self.broker, json.dumps(request).encode(), journal=journal
+            )
+            journal.seek(0)
+            journal_entry = json.loads(journal.read())
         self.assertEqual(403, status)
         self.assertNotIn("cause", json.loads(body))
         self.assertEqual([
             "JobStartedDenial: claim-not-observed",
             "RunnerJitError: job-started observation deadline expired; last error: RunnerJitError: GARM claim remains absent",
             "RunnerJitError: GARM claim remains absent",
-        ], json.loads(stderr.getvalue())["cause"])
+        ], journal_entry["cause"])
         self.assertEqual(45, self.clock.now)
         self.assertEqual("issued", self.ledger.get(self.payload["allocation_id"]).state)
 
@@ -1013,6 +1018,7 @@ class AllocationBrokerTests(unittest.TestCase):
             status, _, _ = self.post_job_started(
                 self.broker,
                 json.dumps(request, separators=(",", ":")).encode(),
+                journal=stderr,
             )
 
         self.assertEqual(204, status)
@@ -1402,6 +1408,22 @@ class AllocationBrokerTests(unittest.TestCase):
                 "runner_label": self.payload["scale_set_name"],
                 "state": "cleaned",
             },
+            receipt,
+        )
+        self.assertEqual(
+            "cleaned", self.ledger.get(self.payload["allocation_id"]).state
+        )
+        self.assertNotIn(self.payload["scale_set_name"], self.driver.scales)
+
+    def test_superseded_cancelled_run_recovers_issued_allocation_to_cleaned(self):
+        self.broker.reserve(self.reservation, now=NOW)
+        self.broker.finalize(self.envelope, now=NOW)
+        self.assertEqual(
+            "issued", self.ledger.get(self.payload["allocation_id"]).state
+        )
+        receipt = self.broker.recover(self.payload["allocation_id"])
+        self.assertEqual(
+            {"allocation_id": self.payload["allocation_id"], "state": "absent"},
             receipt,
         )
         self.assertEqual(

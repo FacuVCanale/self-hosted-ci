@@ -574,26 +574,30 @@ class PilotWorker(_AssignmentWorker):
 
     def _close_checks(
         self, key: str, *, job_id: int | None = None, conclusion: str | None = None,
-        reason: str | None = None,
-    ) -> None:
+        reason: str | None = None, discarded_reason: str | None = None,
+    ) -> bool:
         """Close whatever Check Runs this assignment opened, exactly once.
 
         Every terminal path calls this, including the failure paths, so a
         published Check Run can never be left `in_progress` forever.
         """
         if self.checks is None:
-            return
+            return True
         try:
             progress = self.state.progress(key)
         except WorkerError:
-            return
+            return False
         checks = progress.get("checks")
         if not isinstance(checks, dict) or not checks or progress.get("checks_closed"):
-            return
+            return True
         run_id, observed = progress.get("run_id"), progress.get("observed") or {}
         details = self._details_url(run_id, observed.get("job_id") or job_id or 0)
         try:
-            if conclusion is not None and job_id is not None:
+            if discarded_reason is not None:
+                self.checks.discard(
+                    checks=checks, reason=discarded_reason, details_url=details
+                )
+            elif conclusion is not None and job_id is not None:
                 self.checks.conclude(
                     checks=checks, job_id=job_id, job_conclusion=conclusion,
                     details_url=details,
@@ -620,11 +624,116 @@ class PilotWorker(_AssignmentWorker):
                 )
             except WorkerError:
                 pass
-            return
+            return False
         try:
             self.state.record(key, progress.get("phase") or "checks-closed", checks_closed=True)
         except WorkerError:
-            return
+            return False
+        return True
+
+    def _supersession_reason(
+        self, key: str, request: Mapping[str, Any]
+    ) -> str | None:
+        revalidate = getattr(self.source, "supersession_reason", None)
+        if revalidate is None:
+            return None
+        reason = revalidate(key, request)
+        if reason is not None and (not isinstance(reason, str) or not reason):
+            raise WorkerError("supersession reason is invalid")
+        return reason
+
+    def _complete_superseded(
+        self,
+        key: str,
+        request: Mapping[str, Any],
+        reason: str,
+        *,
+        run_id: int | None = None,
+    ) -> Mapping[str, Any]:
+        """Cancel, report and clean one exact obsolete assignment."""
+        progress = self.state.progress(key)
+        exact_run = run_id if run_id is not None else progress.get("run_id")
+        cancellation_error = None
+        cancellation_converged = True
+        if exact_run is not None:
+            try:
+                cancellation_converged = (
+                    self.github.cancel_exact_run(exact_run) is not False
+                )
+            except Exception as exc:
+                cancellation_error = exc
+        checks = progress.get("checks")
+        publication_pending = False
+        if isinstance(checks, dict) and checks:
+            publication_pending = not self._close_checks(
+                key, discarded_reason=reason
+            )
+        elif self.checks is not None and self.repository is not None:
+            package = request.get("pilot_package")
+            if isinstance(package, Mapping):
+                discard_checks = dict(progress.get("discard_checks") or {})
+                discard_completed = list(progress.get("discard_completed") or [])
+
+                def record_pending(name):
+                    pending = list(self.state.progress(key).get("discard_pending") or [])
+                    if name not in pending:
+                        pending.append(name)
+                    self.state.record(key, "discard-reporting", discard_pending=pending)
+
+                def record_created(name, identifier):
+                    recorded = dict(self.state.progress(key).get("discard_checks") or {})
+                    recorded[name] = identifier
+                    self.state.record(key, "discard-reporting", discard_checks=recorded)
+
+                def record_completed(name):
+                    completed = list(self.state.progress(key).get("discard_completed") or [])
+                    if name not in completed:
+                        completed.append(name)
+                    self.state.record(key, "discard-reporting", discard_completed=completed)
+
+                try:
+                    self.checks.publish_discarded(
+                        head_sha=package["head_sha"],
+                        reason=reason,
+                        scope=f"request:{key}",
+                        details_url=(
+                            f"https://github.com/{self.repository}/pull/"
+                            f"{package['pr_number']}"
+                        ),
+                        checks=discard_checks,
+                        completed=discard_completed,
+                        record_pending=record_pending,
+                        record_created=record_created,
+                        record_completed=record_completed,
+                    )
+                except (GateCheckError, OSError):
+                    publication_pending = True
+        if progress.get("reserved") is not None:
+            self._recover_exact(self._recovery_allocation_id(request))
+        if cancellation_error is not None:
+            raise cancellation_error
+        if publication_pending:
+            self.state.fail(key)
+            return {
+                "status": "retry",
+                "mode": "ci-jit-pilot",
+                "run_id": exact_run,
+                "reason": "supersession Check Run publication remains pending",
+            }
+        result = {
+            "status": "cancelled" if cancellation_converged else "completed",
+            "mode": "ci-jit-pilot",
+            "run_id": exact_run,
+            "reason": reason,
+        }
+        self.state.finish(key, result)
+        try:
+            self.source.complete(key, result)
+        except LocalApprovalError:
+            # The auto-dispatcher may already have revoked this obsolete head.
+            pass
+        self.state.delivered(key)
+        return result
 
     def _record(self, key: str, phase: str, **values: Any) -> None:
         self.state.record(key, phase, **values)
@@ -763,6 +872,9 @@ class PilotWorker(_AssignmentWorker):
                 progress,
                 progress.get("failure_reason") or "pre-dispatch-failure",
             )
+        reason = self._supersession_reason(key, request)
+        if reason is not None:
+            return self._complete_superseded(key, request, reason)
         try:
             if progress:
                 request = self.source.resume(key, request, lease_seconds=7200)
@@ -877,6 +989,11 @@ class PilotWorker(_AssignmentWorker):
             self._open_checks(
                 key, self.state.progress(key), package, run_id, observed.job_id
             )
+            reason = self._supersession_reason(key, request)
+            if reason is not None:
+                return self._complete_superseded(
+                    key, request, reason, run_id=run_id
+                )
             payload = dict(reservation)
             payload.pop("allocation_reservation_version")
             payload.update(
@@ -911,24 +1028,55 @@ class PilotWorker(_AssignmentWorker):
                     observed=observed_data,
                     finalized=finalized,
                 )
-            outcome = PilotTerminalMonitor(
-                self.github, self.broker, time.sleep, time.monotonic
-            ).monitor(
+            monitor = PilotTerminalMonitor(
+                self.github,
+                self.broker,
+                time.sleep,
+                time.monotonic,
+                supersession=lambda: self._supersession_reason(key, request),
+                cancel_run=lambda exact_run_id: getattr(
+                    self.github, "cancel_exact_run"
+                )(exact_run_id),
+            )
+            outcome = monitor.monitor(
                 allocation_id=package.allocation_id,
                 runner_label=package.runner_label,
                 run_id=run_id,
                 job_id=observed.job_id,
             )
-            self._close_checks(key, job_id=observed.job_id, conclusion=outcome)
+            if monitor.supersession_reason is not None:
+                checks_closed = self._close_checks(
+                    key, discarded_reason=monitor.supersession_reason
+                )
+                if not checks_closed:
+                    self.state.fail(key)
+                    return {
+                        "status": "retry",
+                        "mode": "ci-jit-pilot",
+                        "run_id": run_id,
+                        "reason": "supersession Check Run publication remains pending",
+                    }
+            else:
+                self._close_checks(key, job_id=observed.job_id, conclusion=outcome)
             result = {
-                "status": "completed",
+                "status": (
+                    "cancelled"
+                    if monitor.supersession_reason is not None
+                    else "completed"
+                ),
                 "mode": "ci-jit-pilot",
                 "run_id": run_id,
                 "job_id": observed.job_id,
                 "outcome": outcome,
             }
+            if monitor.supersession_reason is not None:
+                result["reason"] = monitor.supersession_reason
             self.state.finish(key, result)
-            self.source.complete(key, result)
+            try:
+                self.source.complete(key, result)
+            except LocalApprovalError:
+                if monitor.supersession_reason is None:
+                    raise
             self.state.delivered(key)
             return result
         except (WorkerError, RunnerJitError, GateCheckError, OSError):

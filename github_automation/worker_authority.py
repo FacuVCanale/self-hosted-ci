@@ -260,6 +260,15 @@ class WorkerGitHubClient:
     def pull_request(
         self, number: int, token: WorkerInstallationToken
     ) -> Mapping[str, Any]:
+        value = self.pull_request_snapshot(number, token)
+        if value.get("state") != "open":
+            raise WorkerAuthorityError("pull request identity mismatch")
+        return value
+
+    def pull_request_snapshot(
+        self, number: int, token: WorkerInstallationToken
+    ) -> Mapping[str, Any]:
+        """Read one exact PR while preserving its open/closed lifecycle state."""
         if isinstance(number, bool) or not isinstance(number, int) or number < 1:
             raise WorkerAuthorityError("pull request number must be positive")
         value = self._token_json(
@@ -268,7 +277,7 @@ class WorkerGitHubClient:
         head, base = value.get("head"), value.get("base")
         if (
             value.get("number") != number
-            or value.get("state") != "open"
+            or value.get("state") not in {"open", "closed"}
             or not isinstance(head, Mapping)
             or not _SHA.fullmatch(str(head.get("sha", "")))
             or not isinstance(base, Mapping)
@@ -474,6 +483,27 @@ class WorkerGitHubClient:
         ):
             raise WorkerAuthorityError("workflow run crossed repository authority")
         return value
+
+    def cancel_run(self, run_id: int, token: WorkerInstallationToken) -> bool:
+        """Cancel only a run whose exact repository and workflow were read back."""
+        run = self.run(run_id, token)
+        if run.get("status") == "completed":
+            if run.get("conclusion") == "cancelled":
+                return True
+            return False
+        response = self._request(
+            "POST",
+            f"/repos/{self.authority.repository}/actions/runs/{run_id}/cancel",
+            self._headers(token.value),
+        )
+        token.assert_current(self.authority, self._clock())
+        if response.status == 409:
+            terminal = self.run(run_id, token)
+            if terminal.get("status") == "completed":
+                return terminal.get("conclusion") == "cancelled"
+        if response.status != 202 or response.body not in {b"", b"{}"}:
+            raise WorkerAuthorityError("exact workflow run cancellation failed")
+        return True
 
     def jobs(self, run_id: int, token: WorkerInstallationToken) -> Mapping[str, Any]:
         self._positive_id(run_id, "run")

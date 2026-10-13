@@ -358,6 +358,23 @@ def runtime(config_path):
         def jobs(self, run_id):
             return client.jobs(run_id, client.authenticate())
 
+        def cancel_exact_run(self, run_id):
+            accepted = client.cancel_run(run_id, client.authenticate())
+            if not accepted:
+                return False
+            deadline = time.monotonic() + max(30, c["request_timeout_seconds"])
+            while True:
+                run = client.run(run_id, client.authenticate())
+                if run.get("status") == "completed":
+                    if run.get("conclusion") != "cancelled":
+                        return False
+                    return True
+                if time.monotonic() >= deadline:
+                    raise LocalApprovalError(
+                        "exact workflow run cancellation did not converge"
+                    )
+                time.sleep(1)
+
     # GARM may need several minutes to drain an ephemeral GitHub runner after
     # its job reaches terminal. HTTP request timeouts are intentionally short,
     # but cleanup is a separate bounded transaction and must not be killed at
@@ -371,7 +388,7 @@ def runtime(config_path):
     checks = _gate_publisher(c, client)
     auto = c.get("auto_dispatch")
     dispatcher = (
-        AutoDispatcher(client, source, c["repository"])
+        AutoDispatcher(client, source, c["repository"], checks=checks)
         if isinstance(auto, dict) and auto.get("enabled")
         else None
     )
@@ -396,10 +413,11 @@ class AutoDispatcher:
     one configured repository and never cancels a different pull request's work.
     """
 
-    def __init__(self, client, source, repository):
+    def __init__(self, client, source, repository, *, checks=None):
         self.client = client
         self.source = source
         self.repository = repository
+        self.checks = checks
 
     def reconcile_once(self):
         token = self.client.authenticate()
@@ -418,6 +436,69 @@ class AutoDispatcher:
                 else:
                     self.source.approve(self.repository, action.pr_number)
             except (LocalApprovalError, WorkerAuthorityError) as exc:
+                if (
+                    action.kind == "approve"
+                    and "merge ref is stale" in str(exc)
+                    and self.checks is not None
+                ):
+                    try:
+                        reason = (
+                            "the merge ref is stale; update the pull request "
+                            "branch before retrying"
+                        )
+                        remember = getattr(self.source, "record_preflight_block", None)
+                        known = getattr(self.source, "has_preflight_block", None)
+                        is_new = not (
+                            known is not None
+                            and known(
+                                self.repository, action.pr_number, action.head_sha
+                            )
+                        )
+                        if is_new:
+                            scope = (
+                                f"preflight:{self.repository}:{action.pr_number}:"
+                                f"{action.head_sha}"
+                            )
+                            progress_reader = getattr(
+                                self.source, "discard_check_progress", None
+                            )
+                            publication = (
+                                progress_reader(scope)
+                                if progress_reader is not None
+                                else {"checks": {}, "completed": []}
+                            )
+                            self.checks.publish_discarded(
+                                head_sha=action.head_sha,
+                                reason=reason,
+                                scope=scope,
+                                details_url=(
+                                    f"https://github.com/{self.repository}/pull/"
+                                    f"{action.pr_number}"
+                                ),
+                                checks=publication["checks"],
+                                completed=publication["completed"],
+                                record_pending=lambda name: self.source.begin_discard_check(
+                                    scope, name
+                                ),
+                                record_created=lambda name, identifier: self.source.record_discard_check(
+                                    scope, name, identifier
+                                ),
+                                record_completed=lambda name: self.source.complete_discard_check(
+                                    scope, name
+                                ),
+                            )
+                            if remember is not None:
+                                remember(
+                                    self.repository,
+                                    action.pr_number,
+                                    action.head_sha,
+                                    reason,
+                                )
+                    except (GateCheckError, OSError):
+                        print(
+                            "stale merge Check Run publication remains pending",
+                            file=sys.stderr,
+                        )
                 # One unapprovable pull request must never stop the others.
                 applied.append({
                     "pr": action.pr_number, "kind": action.kind,
