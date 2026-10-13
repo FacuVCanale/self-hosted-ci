@@ -9,10 +9,10 @@ import sys
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from urllib.parse import quote
 from uuid import UUID
 
@@ -287,6 +287,9 @@ class PilotTerminalMonitor:
     monotonic: Any
     timeout_seconds: float = 3600
     poll_seconds: float = 5
+    supersession: Callable[[], str | None] | None = None
+    cancel_run: Callable[[int], bool | None] | None = None
+    supersession_reason: str | None = field(default=None, init=False)
 
     def monitor(
         self, *, allocation_id: str, runner_label: str, run_id: int, job_id: int
@@ -360,6 +363,18 @@ class PilotTerminalMonitor:
                 raise JitPilotError(
                     "terminal monitor observed run completion before its exact job"
                 )
+            if self.supersession_reason is None and self.supersession is not None:
+                reason = self.supersession()
+                if reason is not None:
+                    if self.cancel_run is None:
+                        raise JitPilotError("superseded run cancellation is unavailable")
+                    # The callback returns only after the exact GitHub run has
+                    # converged to completed/cancelled.
+                    cancelled = self.cancel_run(run_id)
+                    if cancelled is False:
+                        continue
+                    self.supersession_reason = reason
+                    continue
             if self.monotonic() >= deadline:
                 conclusion = "timeout"
                 break

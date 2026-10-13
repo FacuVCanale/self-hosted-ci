@@ -101,7 +101,12 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             self._worker_slots.release()
 
 
-def job_started_handler(broker: AllocationBroker):
+def job_started_handler(broker: AllocationBroker, *, journal=None):
+    # Capture the journal sink when the server is constructed. Request handling
+    # runs on background threads, where consulting process-global sys.stderr can
+    # race with another thread temporarily redirecting it.
+    journal = sys.stderr if journal is None else journal
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "self-hosted-ci-allocation-broker/1"
 
@@ -125,7 +130,7 @@ def job_started_handler(broker: AllocationBroker):
                     sort_keys=True,
                     separators=(",", ":"),
                 ),
-                file=sys.stderr,
+                file=journal,
                 flush=True,
             )
             self.send_response(403)

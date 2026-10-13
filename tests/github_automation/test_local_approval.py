@@ -123,6 +123,25 @@ class LocalApprovalTests(unittest.TestCase):
         self.assertEqual(first["request_id"], request["request_id"])
         self.assertEqual("claimed", self.store.status(REPO, 42)[0]["state"])
 
+    def test_discard_check_progress_persists_created_and_completed_phases(self):
+        scope = f"preflight:{REPO}:42:{'a' * 40}"
+        name = "backend lint + test"
+        self.store.begin_discard_check(scope, name)
+        self.assertEqual(
+            {"checks": {}, "completed": []},
+            self.store.discard_check_progress(scope),
+        )
+        self.store.record_discard_check(scope, name, 123)
+        self.assertEqual(
+            {"checks": {name: 123}, "completed": []},
+            self.store.discard_check_progress(scope),
+        )
+        self.store.complete_discard_check(scope, name)
+        self.assertEqual(
+            {"checks": {name: 123}, "completed": [name]},
+            self.store.discard_check_progress(scope),
+        )
+
     def test_revoke_prevents_consumption_and_same_head_can_be_reapproved(self):
         first = self.store.approve(REPO, 42)
         self.assertEqual(1, self.store.revoke(REPO, 42)["revoked"])
@@ -379,6 +398,61 @@ class LocalApprovalTests(unittest.TestCase):
 
         with self.assertRaisesRegex(LocalApprovalError, "merge ref is stale"):
             WorkerAuthorityResolver(Client()).resolve(REPO, 42)
+
+    def test_worker_revalidation_detects_both_head_and_base_supersession(self):
+        class Client:
+            authority = SimpleNamespace(repository=REPO)
+            head = "a" * 40
+            base = "b" * 40
+
+            def authenticate(self):
+                return "token"
+
+            def repository(self, token):
+                return {"id": 123}
+
+            def default_branch_head(self, token):
+                return self.base
+
+            def pull_request_snapshot(self, number, token):
+                return {
+                    "number": number,
+                    "state": "open",
+                    "head": {"sha": self.head},
+                    "merge_commit_sha": "e" * 40,
+                }
+
+        package = {
+            "repository": REPO,
+            "pr_number": 42,
+            "head_sha": "a" * 40,
+            "base_sha": "b" * 40,
+            "tested_merge_sha": "e" * 40,
+        }
+        client = Client()
+        resolver = WorkerAuthorityResolver(client)
+        self.assertIsNone(resolver.supersession_reason({"pilot_package": package}))
+        client.head = "c" * 40
+        self.assertIn(
+            "newer commit", resolver.supersession_reason({"pilot_package": package})
+        )
+        client.head = "a" * 40
+        client.base = "d" * 40
+        self.assertIn(
+            "default branch moved",
+            resolver.supersession_reason({"pilot_package": package}),
+        )
+        client.base = "b" * 40
+        client.pull_request_snapshot = lambda number, token: {
+            "number": number,
+            "state": "open",
+            "head": {"sha": "a" * 40},
+            "merge_commit_sha": "f" * 40,
+        }
+        self.assertIn(
+            "merge ref changed",
+            resolver.supersession_reason({"pilot_package": package}),
+        )
 
     def test_pilot_builder_preserves_explicit_organization_runner_authority(self):
         builder = PilotWorkRequestBuilder(

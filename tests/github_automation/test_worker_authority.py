@@ -382,6 +382,35 @@ class WorkerAuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkerAuthorityError, "fixed pilot"):
             crossed.dispatch_pilot("{}", token)
 
+    def test_cancel_targets_only_the_exact_read_back_run_id(self) -> None:
+        run = {
+            "id": 505,
+            "repository": {"id": 303},
+            "path": ".github/workflows/ci-jit-pilot-child.yml",
+            "head_branch": "main",
+            "status": "in_progress",
+            "conclusion": None,
+        }
+        transport = FakeTransport(
+            *auth_responses(), response(200, run), HTTPResponse(202, b"")
+        )
+        client = WorkerGitHubClient(
+            authority(
+                workflow_id="ci-jit-pilot-child.yml",
+                workflow_path=".github/workflows/ci-jit-pilot-child.yml",
+            ),
+            Signer(),
+            transport,
+            clock=lambda: NOW,
+        )
+        token = client.authenticate()
+        client.cancel_run(505, token)
+        self.assertEqual(
+            transport.calls[-1][1],
+            API_ROOT + f"/repos/{REPOSITORY}/actions/runs/505/cancel",
+        )
+        self.assertIsNone(transport.calls[-1][3])
+
     def test_authority_rejects_all_repositories_extra_permissions_and_workflow_drift(
         self,
     ) -> None:

@@ -14,6 +14,7 @@ from github_automation.pilot_checks import (
     abandoned_verdicts,
     parse_phase_evidence,
     phase_verdicts,
+    superseded_verdicts,
 )
 from github_automation.worker_authority import HTTPResponse
 
@@ -98,6 +99,13 @@ class PhaseVerdictTests(unittest.TestCase):
             abandoned_verdicts(reason="host lost", details_url=DETAILS).values()
         ):
             self.assertIn(DETAILS, value.summary)
+
+    def test_superseded_work_is_skipped_with_the_reason(self):
+        verdicts = superseded_verdicts(
+            reason="a newer head exists", details_url=DETAILS
+        )
+        self.assertEqual({value.conclusion for value in verdicts.values()}, {"skipped"})
+        self.assertTrue(all("newer head" in value.summary for value in verdicts.values()))
 
 
 class FakeTransport:
@@ -199,6 +207,40 @@ class CheckRunWriteTests(unittest.TestCase):
         self.assertEqual(body["head_sha"], head)
         self.assertEqual(body["status"], "in_progress")
 
+    def test_external_identity_reconciles_only_the_exact_gate_app_check(self):
+        head = "a" * 40
+        external_id = "self-hosted-ci-discard:" + "b" * 64
+        path = (
+            f"/repos/alethia-earth/Overworld/commits/{head}/check-runs?"
+            "check_name=backend%20lint%20%2B%20test&filter=all&per_page=100"
+        )
+        client = self.client({("GET", path): (200, {"check_runs": [
+            {
+                "id": 55,
+                "name": "backend lint + test",
+                "head_sha": head,
+                "external_id": external_id,
+                "app": {"id": AUTHORITY.app_id},
+            },
+            {
+                "id": 56,
+                "name": "backend lint + test",
+                "head_sha": head,
+                "external_id": external_id,
+                "app": {"id": 999},
+            },
+        ]})})
+        token = client.authenticate()
+        self.assertEqual(
+            55,
+            client.find_by_external_id(
+                name="backend lint + test",
+                head_sha=head,
+                external_id=external_id,
+                token=token,
+            ),
+        )
+
     def test_a_receipt_for_another_commit_is_refused(self):
         client = self.client({("POST", "/repos/alethia-earth/Overworld/check-runs"): (
             201, {"id": 55, "head_sha": "b" * 40, "name": "backend lint + test"}
@@ -266,6 +308,7 @@ class CheckRunWriteTests(unittest.TestCase):
 class RecordingClient:
     def __init__(self, log_failure=None):
         self.opened = []
+        self.remote = []
         self.concluded = []
         self.tokens = 0
 
@@ -273,9 +316,22 @@ class RecordingClient:
         self.tokens += 1
         return GateToken("ghs", NOW + timedelta(minutes=30))
 
-    def create_in_progress(self, *, name, head_sha, details_url, summary, token):
+    def create_in_progress(
+        self, *, name, head_sha, details_url, summary, token, external_id=None
+    ):
         self.opened.append((name, head_sha, summary))
-        return 100 + len(self.opened)
+        identifier = 100 + len(self.opened)
+        self.remote.append((name, head_sha, external_id, identifier))
+        return identifier
+
+    def find_by_external_id(self, *, name, head_sha, external_id, token):
+        matches = [
+            identifier
+            for remote_name, remote_head, remote_external, identifier in self.remote
+            if (remote_name, remote_head, remote_external)
+            == (name, head_sha, external_id)
+        ]
+        return matches[0] if matches else None
 
     def conclude(self, *, check_run_id, verdict, details_url, token):
         self.concluded.append((check_run_id, verdict.conclusion))
@@ -324,6 +380,107 @@ class PublisherTests(unittest.TestCase):
         )
         self.assertEqual(set(applied.values()), {"stale"})
         self.assertEqual(len(client.concluded), 2)
+
+    def test_discard_closes_every_open_check_as_skipped(self):
+        client = RecordingClient()
+        publisher = PilotCheckPublisher(client, lambda job_id: [b""])
+        opened = publisher.start(head_sha="a" * 40, details_url=DETAILS)
+        applied = publisher.discard(
+            checks=opened, reason="the base moved", details_url=DETAILS
+        )
+        self.assertEqual(set(applied.values()), {"skipped"})
+
+    def test_discard_publication_reuses_created_check_after_conclusion_retry(self):
+        class FailOnceClient(RecordingClient):
+            failed = False
+
+            def conclude(self, *, check_run_id, verdict, details_url, token):
+                if not self.failed:
+                    self.failed = True
+                    raise GateCheckError("transient conclusion failure")
+                super().conclude(
+                    check_run_id=check_run_id,
+                    verdict=verdict,
+                    details_url=details_url,
+                    token=token,
+                )
+
+        client = FailOnceClient()
+        publisher = PilotCheckPublisher(client, lambda job_id: [b""])
+        progress = {"checks": {}, "completed": []}
+
+        def created(name, identifier):
+            progress["checks"][name] = identifier
+
+        def completed(name):
+            progress["completed"].append(name)
+
+        with self.assertRaises(GateCheckError):
+            publisher.publish_discarded(
+                head_sha="a" * 40,
+                reason="the base moved",
+                scope="request:test",
+                details_url=DETAILS,
+                checks=progress["checks"],
+                completed=progress["completed"],
+                record_created=created,
+                record_completed=completed,
+            )
+        publisher.publish_discarded(
+            head_sha="a" * 40,
+            reason="the base moved",
+            scope="request:test",
+            details_url=DETAILS,
+            checks=progress["checks"],
+            completed=progress["completed"],
+            record_created=created,
+            record_completed=completed,
+        )
+        self.assertEqual(
+            [name for name, _, _ in client.opened],
+            ["backend lint + test", "frontend lint + test"],
+        )
+        self.assertEqual(set(progress["completed"]), set(PHASE_CHECK_NAMES.values()))
+
+    def test_discard_reconciles_external_id_after_crash_before_id_persistence(self):
+        client = RecordingClient()
+        publisher = PilotCheckPublisher(client, lambda job_id: [b""])
+        progress = {"checks": {}, "completed": []}
+        crashed = {"value": False}
+
+        def record_created(name, identifier):
+            if not crashed["value"]:
+                crashed["value"] = True
+                raise OSError("crash before durable id")
+            progress["checks"][name] = identifier
+
+        def record_completed(name):
+            progress["completed"].append(name)
+
+        arguments = {
+            "head_sha": "a" * 40,
+            "reason": "the base moved",
+            "scope": "request:external-id-crash",
+            "details_url": DETAILS,
+            "record_created": record_created,
+            "record_completed": record_completed,
+        }
+        with self.assertRaises(OSError):
+            publisher.publish_discarded(
+                **arguments,
+                checks=progress["checks"],
+                completed=progress["completed"],
+            )
+        publisher.publish_discarded(
+            **arguments,
+            checks=progress["checks"],
+            completed=progress["completed"],
+        )
+        self.assertEqual(
+            ["backend lint + test", "frontend lint + test"],
+            [name for name, _, _ in client.opened],
+        )
+        self.assertEqual(2, len(client.remote))
 
     def test_the_published_names_match_the_hosted_workflow_job_names(self):
         self.assertEqual(

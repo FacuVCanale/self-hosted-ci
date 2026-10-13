@@ -91,6 +91,7 @@ class Broker:
 class GitHub:
     def __init__(self):
         self.dispatches = 0
+        self.cancelled = []
 
     def dispatch_package(self, package):
         self.dispatches += 1
@@ -116,6 +117,9 @@ class GitHub:
             ]
         }
 
+    def cancel_exact_run(self, run_id):
+        self.cancelled.append(run_id)
+
 
 class Signer:
     def sign_allocation(self, payload):
@@ -138,6 +142,7 @@ class RecordingPublisher:
         self.started = []
         self.concluded = []
         self.abandoned = []
+        self.discarded = []
 
     def start(self, *, head_sha, details_url):
         self.started.append((head_sha, "/actions/runs/" in details_url))
@@ -150,6 +155,17 @@ class RecordingPublisher:
     def abandon(self, *, checks, reason, details_url):
         self.abandoned.append(reason)
         return {}
+
+    def discard(self, *, checks, reason, details_url):
+        self.discarded.append((dict(checks), reason))
+        return {name: "skipped" for name in checks}
+
+    def publish_discarded(self, *, head_sha, reason, details_url, **_resume):
+        self.discarded.append(({"head_sha": head_sha}, reason))
+        return {
+            "backend lint + test": "skipped",
+            "frontend lint + test": "skipped",
+        }
 
 
 class OutboundWorkerTests(unittest.TestCase):
@@ -550,6 +566,154 @@ class OutboundWorkerTests(unittest.TestCase):
         self.assertEqual(publisher.started, [("a" * 40, True)])
         self.assertEqual(len(publisher.concluded), 1)
         self.assertEqual(publisher.abandoned, [])
+
+    def test_new_head_cancels_only_the_exact_old_run_and_cleans_its_allocation(self):
+        publisher = RecordingPublisher()
+        with tempfile.TemporaryDirectory() as directory:
+            worker, state, source = self._pilot_fixture(directory, publisher)
+            checks = {"count": 0}
+
+            def supersession(_key, _request):
+                checks["count"] += 1
+                return (
+                    None
+                    if checks["count"] == 1
+                    else "a newer commit superseded this pull request head"
+                )
+
+            source.supersession_reason = supersession
+            result = worker.run_once()
+            request = json.loads(
+                state.db.execute("SELECT request FROM requests").fetchone()[0]
+            )
+
+        allocation_id = request["reservation"]["allocation_id"]
+        self.assertEqual("cancelled", result["status"])
+        self.assertEqual([444], worker.github.cancelled)
+        self.assertEqual(
+            [("recover", allocation_id)],
+            [call for call in worker.broker.calls if call[0] == "recover"],
+        )
+        self.assertEqual(1, len(publisher.discarded))
+        self.assertIn("newer commit", publisher.discarded[0][1])
+
+    def test_base_moved_before_admission_cancels_without_dispatch_or_allocation(self):
+        publisher = RecordingPublisher()
+        with tempfile.TemporaryDirectory() as directory:
+            worker, _state, source = self._pilot_fixture(directory, publisher)
+            source.resolver.resolve = lambda repository, pr: ResolvedApprovalTarget(
+                "123",
+                repository,
+                pr,
+                "a" * 40,
+                "main",
+                f"{repository}/.github/workflows/ci-jit-pilot-child.yml@refs/heads/main",
+                "d" * 40,
+                "e" * 40,
+            )
+            result = worker.run_once()
+
+        self.assertEqual("cancelled", result["status"])
+        self.assertEqual(0, worker.github.dispatches)
+        self.assertEqual([], worker.github.cancelled)
+        self.assertEqual([], worker.broker.calls)
+        self.assertEqual(1, len(publisher.discarded))
+
+    def test_preallocation_discard_retries_the_same_check_run_ids(self):
+        class RetryPublisher(RecordingPublisher):
+            def __init__(self):
+                super().__init__()
+                self.created = []
+                self.fail_once = True
+
+            def publish_discarded(self, **value):
+                for name in ("backend lint + test", "frontend lint + test"):
+                    if name in value["completed"]:
+                        continue
+                    identifier = value["checks"].get(name)
+                    if identifier is None:
+                        identifier = 100 + len(self.created)
+                        self.created.append(name)
+                        value["record_pending"](name)
+                        value["record_created"](name, identifier)
+                    if self.fail_once:
+                        self.fail_once = False
+                        raise GateCheckError("transient Check Run failure")
+                    value["record_completed"](name)
+                return {name: "skipped" for name in value["completed"]}
+
+        publisher = RetryPublisher()
+        with tempfile.TemporaryDirectory() as directory:
+            worker, _state, source = self._pilot_fixture(directory, publisher)
+            source.supersession_reason = lambda _key, _request: "the base moved"
+            first = worker.run_once()
+            second = worker.run_once()
+
+        self.assertEqual("retry", first["status"])
+        self.assertEqual("cancelled", second["status"])
+        self.assertEqual(
+            ["backend lint + test", "frontend lint + test"], publisher.created
+        )
+
+    def test_supersession_after_admission_waits_for_cancelled_then_proves_clean(self):
+        class CancellingGitHub(GitHub):
+            cancelled_state = False
+
+            def cancel_exact_run(self, run_id):
+                super().cancel_exact_run(run_id)
+                self.cancelled_state = True
+
+            def run(self, run_id):
+                return {
+                    "id": run_id,
+                    "status": "completed" if self.cancelled_state else "in_progress",
+                    "conclusion": "cancelled" if self.cancelled_state else None,
+                }
+
+            def jobs(self, run_id):
+                return {
+                    "jobs": [
+                        {
+                            "id": 555,
+                            "run_id": run_id,
+                            "name": "local-quality",
+                            "labels": ["self-hosted", self.label],
+                            "status": (
+                                "completed" if self.cancelled_state else "in_progress"
+                            ),
+                            "conclusion": (
+                                "cancelled" if self.cancelled_state else None
+                            ),
+                        }
+                    ]
+                }
+
+        publisher = RecordingPublisher()
+        with tempfile.TemporaryDirectory() as directory:
+            worker, _state, source = self._pilot_fixture(
+                directory, publisher, github=CancellingGitHub()
+            )
+            checks = {"count": 0}
+
+            def supersession(_key, _request):
+                checks["count"] += 1
+                return (
+                    "a newer commit superseded this pull request head"
+                    if checks["count"] >= 3
+                    else None
+                )
+
+            source.supersession_reason = supersession
+            result = worker.run_once()
+
+        self.assertEqual("cancelled", result["status"])
+        self.assertEqual("cancel", result["outcome"])
+        self.assertEqual([444], worker.github.cancelled)
+        self.assertEqual(
+            ["finish", "prove-clean"],
+            [call[0] for call in worker.broker.calls if call[0] in {"finish", "prove-clean"}],
+        )
+        self.assertEqual(1, len(publisher.discarded))
 
     def test_a_lost_run_closes_its_checks_instead_of_hanging_in_progress(self):
         publisher = RecordingPublisher()

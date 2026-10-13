@@ -17,12 +17,14 @@ if the profile ever changes it.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 
 from .worker_authority import (
     API_ROOT,
@@ -181,6 +183,19 @@ def abandoned_verdicts(*, reason: str, details_url: str) -> dict[str, PhaseVerdi
     }
 
 
+def superseded_verdicts(*, reason: str, details_url: str) -> dict[str, PhaseVerdict]:
+    """Neutral-visible outcomes for work deliberately discarded as obsolete."""
+    return {
+        phase: PhaseVerdict(
+            "skipped",
+            f"{phase} was skipped because this run was superseded",
+            f"This local run was discarded without executing stale code: {reason}. "
+            f"Run details: {details_url}",
+        )
+        for phase in PHASE_CHECK_NAMES
+    }
+
+
 @dataclass(frozen=True)
 class GateAppAuthorityV1:
     """The exact selected-repository identity allowed to write Check Runs."""
@@ -283,7 +298,8 @@ class GateCheckClient:
         return GateToken(value, expires_at)
 
     def create_in_progress(
-        self, *, name: str, head_sha: str, details_url: str, summary: str, token: GateToken
+        self, *, name: str, head_sha: str, details_url: str, summary: str,
+        token: GateToken, external_id: str | None = None,
     ) -> int:
         """Open one Check Run on the exact pull request head being tested."""
         payload = {
@@ -294,6 +310,8 @@ class GateCheckClient:
             "started_at": _stamp(self._clock()),
             "output": {"title": f"{name} is running on the local runner", "summary": summary},
         }
+        if external_id is not None:
+            payload["external_id"] = _exact_external_id(external_id)
         value = self._token_json("POST", "/check-runs", token, 201, payload)
         identifier = value.get("id")
         if (
@@ -305,6 +323,41 @@ class GateCheckClient:
         ):
             raise GateCheckError("Check Run creation receipt is not exact")
         return identifier
+
+    def find_by_external_id(
+        self, *, name: str, head_sha: str, external_id: str, token: GateToken
+    ) -> int | None:
+        """Find the one Check Run previously created for a durable discard phase."""
+        name = _exact_name(name)
+        head_sha = _exact_sha(head_sha)
+        external_id = _exact_external_id(external_id)
+        value = self._token_json(
+            "GET",
+            f"/commits/{head_sha}/check-runs?check_name={quote(name)}&filter=all&per_page=100",
+            token,
+            200,
+        )
+        rows = value.get("check_runs")
+        if not isinstance(rows, list):
+            raise GateCheckError("Check Run reconciliation response is invalid")
+        matches = []
+        for row in rows:
+            app = row.get("app") if isinstance(row, Mapping) else None
+            if (
+                isinstance(row, Mapping)
+                and row.get("name") == name
+                and row.get("head_sha") == head_sha
+                and row.get("external_id") == external_id
+                and isinstance(app, Mapping)
+                and app.get("id") == self.authority.app_id
+            ):
+                identifier = row.get("id")
+                if isinstance(identifier, bool) or not isinstance(identifier, int) or identifier < 1:
+                    raise GateCheckError("reconciled Check Run identity is invalid")
+                matches.append(identifier)
+        if len(matches) > 1:
+            raise GateCheckError("discard Check Run external identity is ambiguous")
+        return matches[0] if matches else None
 
     def conclude(
         self, *, check_run_id: int, verdict: PhaseVerdict, details_url: str, token: GateToken
@@ -463,6 +516,82 @@ class PilotCheckPublisher:
             applied[name] = verdict.conclusion
         return applied
 
+    def discard(
+        self, *, checks: Mapping[str, int], reason: str, details_url: str
+    ) -> Mapping[str, str]:
+        """Close assignment Checks as skipped, preserving the discard reason."""
+        token = self.client.authenticate()
+        verdicts = superseded_verdicts(reason=reason, details_url=details_url)
+        applied: dict[str, str] = {}
+        for phase, name in PHASE_CHECK_NAMES.items():
+            identifier = checks.get(name)
+            if isinstance(identifier, bool) or not isinstance(identifier, int):
+                raise GateCheckError("published Check Run identity is missing")
+            self.client.conclude(
+                check_run_id=identifier,
+                verdict=verdicts[phase],
+                details_url=details_url,
+                token=token,
+            )
+            applied[name] = verdicts[phase].conclusion
+        return applied
+
+    def publish_discarded(
+        self,
+        *,
+        head_sha: str,
+        reason: str,
+        details_url: str,
+        scope: str,
+        checks: Mapping[str, int] | None = None,
+        completed: Iterable[str] = (),
+        record_pending: Callable[[str], None] = lambda _name: None,
+        record_created: Callable[[str, int], None] = lambda _name, _identifier: None,
+        record_completed: Callable[[str], None] = lambda _name: None,
+    ) -> Mapping[str, str]:
+        """Publish an actionable skipped result with resumable per-phase state."""
+        token = self.client.authenticate()
+        verdicts = superseded_verdicts(reason=reason, details_url=details_url)
+        if not isinstance(scope, str) or not scope or len(scope) > 512:
+            raise GateCheckError("discard Check Run scope is invalid")
+        known = dict(checks or {})
+        done = set(completed)
+        applied: dict[str, str] = {}
+        for phase, name in sorted(PHASE_CHECK_NAMES.items()):
+            if name in done:
+                applied[name] = verdicts[phase].conclusion
+                continue
+            check_run_id = known.get(name)
+            if check_run_id is None:
+                record_pending(name)
+                external_id = _discard_external_id(scope, name)
+                check_run_id = self.client.find_by_external_id(
+                    name=name,
+                    head_sha=head_sha,
+                    external_id=external_id,
+                    token=token,
+                )
+                if check_run_id is None:
+                    check_run_id = self.client.create_in_progress(
+                        name=name,
+                        head_sha=head_sha,
+                        details_url=details_url,
+                        summary=f"The `{phase}` phase was discarded before allocation.",
+                        token=token,
+                        external_id=external_id,
+                    )
+                record_created(name, check_run_id)
+                known[name] = check_run_id
+            self.client.conclude(
+                check_run_id=check_run_id,
+                verdict=verdicts[phase],
+                details_url=details_url,
+                token=token,
+            )
+            record_completed(name)
+            applied[name] = verdicts[phase].conclusion
+        return applied
+
 
 def _exact_sha(value: str) -> str:
     if not isinstance(value, str) or not _SHA.fullmatch(value):
@@ -474,6 +603,17 @@ def _exact_name(value: str) -> str:
     if value not in set(PHASE_CHECK_NAMES.values()):
         raise GateCheckError("Check Run name is not one of the published phase names")
     return value
+
+
+def _exact_external_id(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"self-hosted-ci-discard:[0-9a-f]{64}", value):
+        raise GateCheckError("Check Run external identity is invalid")
+    return value
+
+
+def _discard_external_id(scope: str, name: str) -> str:
+    digest = hashlib.sha256(f"{scope}\0{name}".encode("utf-8")).hexdigest()
+    return f"self-hosted-ci-discard:{digest}"
 
 
 def _stamp(now: datetime) -> str:
@@ -513,6 +653,7 @@ __all__ = [
     "GateCheckError",
     "GateToken",
     "PilotCheckPublisher",
+    "superseded_verdicts",
     "PHASE_CHECK_NAMES",
     "PROFILE_PHASES",
     "PhaseVerdict",

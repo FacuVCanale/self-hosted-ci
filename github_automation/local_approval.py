@@ -100,6 +100,36 @@ class WorkerAuthorityResolver:
             merge,
         )
 
+    def supersession_reason(self, request: Mapping[str, Any]) -> str | None:
+        """Classify normal PR/base drift without weakening the strict resolver."""
+        package = request.get("pilot_package") or request.get("protocol_package")
+        if not isinstance(package, Mapping):
+            raise LocalApprovalError("approval package is absent during revalidation")
+        repository = package.get("repository")
+        pr_number = package.get("pr_number")
+        if (
+            repository != self.client.authority.repository
+            or isinstance(pr_number, bool)
+            or not isinstance(pr_number, int)
+        ):
+            raise LocalApprovalError("approval crossed repository identity")
+        token = self.client.authenticate()
+        self.client.repository(token)
+        current_base = self.client.default_branch_head(token)
+        pr = self.client.pull_request_snapshot(pr_number, token)
+        if pr.get("state") != "open":
+            return "the pull request was closed before this run was admitted"
+        if pr["head"]["sha"] != package.get("head_sha"):
+            return "a newer commit superseded this pull request head"
+        if current_base != package.get("base_sha"):
+            return "the default branch moved before this run was admitted"
+        merge = pr.get("merge_commit_sha")
+        if not isinstance(merge, str) or not re.fullmatch(r"[0-9a-f]{40}", merge):
+            merge = self.client.potential_merge_commit(pr_number, token)
+        if merge != package.get("tested_merge_sha"):
+            return "the pull request merge ref changed before this run was admitted"
+        return None
+
 
 def _root_file(
     path: Path, *, executable: bool = False, maximum: int = 1_048_576
@@ -302,6 +332,17 @@ class LocalApprovalStore:
           head_sha TEXT NOT NULL, head_generation INTEGER NOT NULL, state TEXT NOT NULL,
           request_json TEXT NOT NULL, result_json TEXT, reason TEXT, created_at TEXT NOT NULL,
           expires_at TEXT NOT NULL, claim_until TEXT, active_key TEXT UNIQUE
+        );
+        CREATE TABLE IF NOT EXISTS preflight_blocks(
+          repository TEXT NOT NULL, pr_number INTEGER NOT NULL,
+          head_sha TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL,
+          PRIMARY KEY(repository,pr_number,head_sha)
+        );
+        CREATE TABLE IF NOT EXISTS discard_check_publications(
+          scope TEXT NOT NULL, check_name TEXT NOT NULL,
+          check_run_id INTEGER, state TEXT NOT NULL,
+          PRIMARY KEY(scope,check_name),
+          CHECK(state IN ('pending','created','completed'))
         );
         """)
         with self._connect() as db:
@@ -588,6 +629,12 @@ class LocalApprovalStore:
                 )
                 db.execute("COMMIT")
             request = json.loads(row["request_json"])
+            if "pilot_package" in request:
+                # The pilot worker owns live supersession classification and
+                # visible discard reporting. Returning the claimed request is
+                # safe: it revalidates before reserve and again before enable.
+                self.current_request = request
+                return request
             try:
                 current = self.resolver.resolve(row["repository"], row["pr_number"])
             except Exception:
@@ -644,6 +691,26 @@ class LocalApprovalStore:
         self.claim(request_id, request, lease_seconds=lease_seconds)
         return request
 
+    def supersession_reason(self, request_id, request):
+        """Return a user-facing discard reason for live head/base/PR drift."""
+        encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT request_json FROM approvals WHERE request_id=?", (request_id,)
+            ).fetchone()
+        if row is None or row["request_json"] != encoded:
+            raise LocalApprovalError("approval revalidation crossed request identity")
+        classify = getattr(self.resolver, "supersession_reason", None)
+        if classify is not None:
+            return classify(request)
+        package = request.get("pilot_package") or request.get("protocol_package")
+        current = self.resolver.resolve(package["repository"], package["pr_number"])
+        if self._request_matches_target(request, current):
+            return None
+        if current.head_sha != package.get("head_sha"):
+            return "a newer commit superseded this pull request head"
+        return "the default branch moved before this run was admitted"
+
     def retry(self, request_id, reason):
         if not isinstance(reason, str) or not reason:
             raise LocalApprovalError("retry reason is invalid")
@@ -679,6 +746,106 @@ class LocalApprovalStore:
             ).rowcount
         return {"repository": repository, "pr_number": pr_number, "revoked": changed}
 
+    def record_preflight_block(self, repository, pr_number, head_sha, reason):
+        """Remember one visible pre-allocation rejection so polling is idempotent."""
+        if (
+            not isinstance(repository, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+            or isinstance(pr_number, bool)
+            or not isinstance(pr_number, int)
+            or pr_number < 1
+            or not isinstance(head_sha, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", head_sha)
+            or not isinstance(reason, str)
+            or not reason
+        ):
+            raise LocalApprovalError("preflight block identity is invalid")
+        with self._connect() as db:
+            changed = db.execute(
+                "INSERT OR IGNORE INTO preflight_blocks(repository,pr_number,head_sha,reason,created_at) VALUES(?,?,?,?,?)",
+                (repository, pr_number, head_sha, reason, self._stamp(self.clock())),
+            ).rowcount
+        return changed == 1
+
+    def has_preflight_block(self, repository, pr_number, head_sha):
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM preflight_blocks WHERE repository=? AND pr_number=? AND head_sha=?",
+                (repository, pr_number, head_sha),
+            ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def _discard_identity(scope, check_name):
+        if (
+            not isinstance(scope, str)
+            or not scope
+            or len(scope) > 512
+            or check_name not in {"backend lint + test", "frontend lint + test"}
+        ):
+            raise LocalApprovalError("discard Check Run identity is invalid")
+
+    def discard_check_progress(self, scope):
+        if not isinstance(scope, str) or not scope or len(scope) > 512:
+            raise LocalApprovalError("discard Check Run scope is invalid")
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT check_name,check_run_id,state FROM discard_check_publications WHERE scope=?",
+                (scope,),
+            ).fetchall()
+        return {
+            "checks": {
+                row["check_name"]: row["check_run_id"]
+                for row in rows
+                if row["check_run_id"] is not None
+            },
+            "completed": [
+                row["check_name"] for row in rows if row["state"] == "completed"
+            ],
+        }
+
+    def begin_discard_check(self, scope, check_name):
+        self._discard_identity(scope, check_name)
+        with self._connect() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO discard_check_publications(scope,check_name,state) VALUES(?,?,'pending')",
+                (scope, check_name),
+            )
+
+    def record_discard_check(self, scope, check_name, check_run_id):
+        self._discard_identity(scope, check_name)
+        if (
+            isinstance(check_run_id, bool)
+            or not isinstance(check_run_id, int)
+            or check_run_id < 1
+        ):
+            raise LocalApprovalError("discard Check Run id is invalid")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT check_run_id FROM discard_check_publications WHERE scope=? AND check_name=?",
+                (scope, check_name),
+            ).fetchone()
+            if row is None:
+                raise LocalApprovalError("discard Check Run was not begun")
+            if row["check_run_id"] not in {None, check_run_id}:
+                raise LocalApprovalError("discard Check Run id changed")
+            db.execute(
+                "UPDATE discard_check_publications SET check_run_id=?,state='created' WHERE scope=? AND check_name=?",
+                (check_run_id, scope, check_name),
+            )
+            db.execute("COMMIT")
+
+    def complete_discard_check(self, scope, check_name):
+        self._discard_identity(scope, check_name)
+        with self._connect() as db:
+            changed = db.execute(
+                "UPDATE discard_check_publications SET state='completed' WHERE scope=? AND check_name=? AND check_run_id IS NOT NULL AND state IN ('created','completed')",
+                (scope, check_name),
+            ).rowcount
+        if changed != 1:
+            raise LocalApprovalError("discard Check Run completion lost its identity")
+
     def status(self, repository=None, pr_number=None):
         query = "SELECT request_id,repository,pr_number,head_sha,head_generation,state,created_at,expires_at,reason FROM approvals"
         args = []
@@ -689,10 +856,31 @@ class LocalApprovalStore:
             query += (" AND" if args else " WHERE") + " pr_number=?"
             args.append(pr_number)
         with self._connect() as db:
-            return [
+            approvals = [
                 dict(row)
                 for row in db.execute(query + " ORDER BY created_at DESC", args)
             ]
+            block_query = "SELECT repository,pr_number,head_sha,reason,created_at FROM preflight_blocks"
+            block_args = []
+            if repository is not None:
+                block_query += " WHERE repository=?"
+                block_args.append(repository)
+            if pr_number is not None:
+                block_query += (" AND" if block_args else " WHERE") + " pr_number=?"
+                block_args.append(pr_number)
+            blocks = [
+                {
+                    "request_id": f"preflight:{row['repository']}:{row['pr_number']}:{row['head_sha']}",
+                    **dict(row),
+                    "head_generation": 0,
+                    "state": "failed",
+                    "expires_at": row["created_at"],
+                }
+                for row in db.execute(
+                    block_query + " ORDER BY created_at DESC", block_args
+                )
+            ]
+        return approvals + blocks
 
     def recover_claims(self):
         now = self._stamp(self.clock())
