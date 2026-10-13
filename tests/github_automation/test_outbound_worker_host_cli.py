@@ -193,6 +193,24 @@ class HostConfigValidationTests(unittest.TestCase):
         with self.assertRaises(Exception):
             self.config({**base_config(), "surprise": 1})
 
+    def test_cancel_convergence_timing_has_exact_safe_bounds(self):
+        accepted = self.config({
+            **base_config(),
+            "cancel_convergence_timeout_seconds": 180,
+            "cancel_convergence_poll_seconds": 15,
+        })
+        self.assertEqual(180, accepted["cancel_convergence_timeout_seconds"])
+        for timeout, poll in (
+            (True, 15), (29, 15), (901, 15), (180, True),
+            (180, 0), (180, 181),
+        ):
+            with self.subTest(timeout=timeout, poll=poll), self.assertRaises(Exception):
+                self.config({
+                    **base_config(),
+                    "cancel_convergence_timeout_seconds": timeout,
+                    "cancel_convergence_poll_seconds": poll,
+                })
+
     def test_stale_merge_ref_publishes_skipped_checks_without_approval(self):
         class Client:
             def authenticate(self):
@@ -349,6 +367,24 @@ class InstallerOptionalBlockTests(unittest.TestCase):
             with self.subTest(auto=auto), self.assertRaises(self.installer.InstallError):
                 self.load_config({**base_config(), "auto_dispatch": auto})
 
+    def test_installer_enforces_the_same_cancel_timing_bounds(self):
+        accepted = self.load_config({
+            **base_config(),
+            "cancel_convergence_timeout_seconds": 180,
+            "cancel_convergence_poll_seconds": 15,
+        })
+        self.assertEqual(15, accepted["cancel_convergence_poll_seconds"])
+        for timeout, poll in (
+            (True, 15), (29, 15), (901, 15), (180, True),
+            (180, 0), (180, 181),
+        ):
+            with self.subTest(timeout=timeout, poll=poll), self.assertRaises(self.installer.InstallError):
+                self.load_config({
+                    **base_config(),
+                    "cancel_convergence_timeout_seconds": timeout,
+                    "cancel_convergence_poll_seconds": poll,
+                })
+
     def test_the_two_validators_allow_the_same_optional_blocks(self):
         # The regression that broke the host was exactly this drift: the CLI
         # learned a block the installer still rejected.
@@ -357,7 +393,13 @@ class InstallerOptionalBlockTests(unittest.TestCase):
             self.assertIn(f'"{name}"', source)
         self.assertEqual(
             self.installer.OPTIONAL_FIELDS,
-            {"gate", "auto_dispatch", "claim_deadline_seconds"},
+            {
+                "gate",
+                "auto_dispatch",
+                "claim_deadline_seconds",
+                "cancel_convergence_timeout_seconds",
+                "cancel_convergence_poll_seconds",
+            },
         )
 
 

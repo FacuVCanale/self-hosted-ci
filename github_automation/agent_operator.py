@@ -488,6 +488,10 @@ class AgentOperator:
         for event in selected:
             cause = event["cause_code"]
             counts[cause] = counts.get(cause, 0) + 1
+        # `runs_executed` is the code-quality denominator: only outcomes whose
+        # tested code reached a quality-bearing terminal result count.  A run
+        # admitted and later discarded for supersession is explicitly stored
+        # with executed=false, so coordination noise cannot lower green_rate.
         runs = sum(1 for event in selected if event.get("executed") is True)
         successes = sum(1 for event in selected if event.get("success") is True)
         return {"status": "ok", "repository": repository, "since_days": since_days,

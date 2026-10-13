@@ -80,6 +80,9 @@ def outcome_snapshot(now: datetime, retention_days: int) -> dict[str, object]:
     counts: dict[str, int] = {}
     for event in recent:
         counts[event["cause_code"]] = counts.get(event["cause_code"], 0) + 1
+    # This is a code-quality denominator, not a count of runner admissions.
+    # Superseded work is recorded with executed=false even after admission and
+    # therefore does not penalize green_rate.
     runs = sum(1 for event in recent if event["executed"])
     successes = sum(1 for event in recent if event["success"])
     return {"available": True, "retention_days": retention_days, "events": events,

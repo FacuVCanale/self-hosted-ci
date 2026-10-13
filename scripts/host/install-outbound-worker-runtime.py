@@ -59,7 +59,10 @@ REQUIRED_FIELDS = {
 #: The `gate` block is optional: a host without it simply publishes no pull
 #: request Check Runs, which is the fail-closed default. Its private key is a
 #: distinct managed secret, never the dispatcher's.
-OPTIONAL_FIELDS = {"gate", "auto_dispatch", "claim_deadline_seconds"}
+OPTIONAL_FIELDS = {
+    "gate", "auto_dispatch", "claim_deadline_seconds",
+    "cancel_convergence_timeout_seconds", "cancel_convergence_poll_seconds",
+}
 GATE_FIELDS = {"app_id", "app_slug", "installation_id", "private_key_file"}
 GATE_PERMISSIONS = {"checks": "write", "metadata": "read"}
 EXACT_PERMISSIONS = {
@@ -149,6 +152,17 @@ def load_config(path: Path) -> dict[str, Any]:
         raise InstallError(
             "claim_deadline_seconds must be between one and 900 seconds"
         )
+    cancel_timeout = value.get("cancel_convergence_timeout_seconds", 180)
+    cancel_poll = value.get("cancel_convergence_poll_seconds", 15)
+    if (
+        isinstance(cancel_timeout, bool)
+        or not isinstance(cancel_timeout, int)
+        or not 30 <= cancel_timeout <= 900
+        or isinstance(cancel_poll, bool)
+        or not isinstance(cancel_poll, int)
+        or not 1 <= cancel_poll <= cancel_timeout
+    ):
+        raise InstallError("cancel convergence timing is outside bounds")
     if (
         value["repository_selection"] != "selected"
         or value["permissions"] != EXACT_PERMISSIONS

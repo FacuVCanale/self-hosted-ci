@@ -46,6 +46,7 @@ _JOB_NAME = re.compile(r"^[A-Za-z0-9_. -]{1,100}$")
 _TRANSIENT_LABEL = re.compile(r"^wsl-jit-[0-9a-f]{32}$")
 OUTCOME_CAUSES = frozenset({
     "success", "job-failure", "job-cancelled", "job-timeout", "worker-error",
+    "cancel-not-converged",
     "claim-expired", "claim-state-conflict", "claim-not-observed",
     "garm-timeout", "garm-runtime-erofs", "superseded-head",
     "superseded-base", "superseded-merge", "pr-closed", "stale-merge-ref",
