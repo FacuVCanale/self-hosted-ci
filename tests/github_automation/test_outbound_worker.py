@@ -17,7 +17,14 @@ from github_automation.local_approval import (
     PilotWorkRequestBuilder,
     ResolvedApprovalTarget,
 )
-from github_automation.outbound_worker import OutboundWorker, PilotWorker, WorkerState, WorkerError
+from github_automation.outbound_worker import (
+    OutboundWorker,
+    PilotWorker,
+    WorkerAuthorityError,
+    WorkerError,
+    WorkerState,
+)
+from github_automation.worker_authority import WorkerTransportError
 from github_automation.runner_jit import RunnerJitError
 from tests.github_automation.test_outbound_worker_host_cli import load, WORKER_CLI
 from github_automation.pilot_checks import GateCheckError
@@ -96,6 +103,8 @@ class Broker:
         }
 
     def record_outcome(self, value):
+        if any(event["event_key"] == value["event_key"] for event in self.outcomes):
+            return {"recorded": False}
         self.outcomes.append(value)
         self.timeline.append("record-outcome")
         return {"recorded": True}
@@ -1125,6 +1134,77 @@ class OutboundWorkerTests(unittest.TestCase):
         self.assertEqual(len(publisher.started), 1)
         self.assertEqual(len(publisher.abandoned), 1)
         self.assertIn("RuntimeError", publisher.abandoned[0])
+
+    def test_transient_terminal_transport_retries_without_worker_error(self):
+        class TransientTransportGitHub(GitHub):
+            failures = 1
+
+            def run(self, run_id):
+                if self.failures:
+                    self.failures -= 1
+                    raise WorkerTransportError("worker GitHub transport failed")
+                return super().run(run_id)
+
+        publisher = RecordingPublisher()
+        with tempfile.TemporaryDirectory() as directory:
+            worker, _state, _source = self._pilot_fixture(
+                directory, publisher, github=TransientTransportGitHub()
+            )
+            first = worker.run_once()
+            result = worker.run_once()
+
+        self.assertEqual("retry", first["status"])
+        self.assertEqual("completed", result["status"])
+        self.assertEqual(["success"], [event["cause_code"] for event in worker.broker.outcomes])
+        self.assertNotIn("worker-error", [event["cause_code"] for event in worker.broker.outcomes])
+        self.assertEqual(1, len(publisher.concluded))
+
+    def test_permanent_terminal_authority_error_is_not_silently_retried(self):
+        class PermanentAuthorityFailureGitHub(GitHub):
+            def run(self, run_id):
+                raise WorkerAuthorityError("workflow run crossed repository authority")
+
+        publisher = RecordingPublisher()
+        with tempfile.TemporaryDirectory() as directory:
+            worker, _state, _source = self._pilot_fixture(
+                directory, publisher, github=PermanentAuthorityFailureGitHub()
+            )
+            with self.assertRaisesRegex(WorkerAuthorityError, "crossed repository"):
+                worker.run_once()
+
+        self.assertEqual(
+            ["worker-error"],
+            [event["cause_code"] for event in worker.broker.outcomes],
+        )
+        self.assertEqual(1, len(publisher.abandoned))
+
+    def test_terminal_check_close_retries_before_assignment_completion(self):
+        class TransientPublisher(RecordingPublisher):
+            attempts = 0
+
+            def conclude(self, **value):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise GateCheckError("transient Check Run transport")
+                return super().conclude(**value)
+
+        publisher = TransientPublisher()
+        with tempfile.TemporaryDirectory() as directory:
+            worker, state, source = self._pilot_fixture(directory, publisher)
+            first = worker.run_once()
+            request_id = state.db.execute("SELECT id FROM requests").fetchone()[0]
+            self.assertEqual("retry", state.db.execute(
+                "SELECT state FROM requests WHERE id=?", (request_id,)
+            ).fetchone()[0])
+            result = worker.run_once()
+            source_state = source.status()[0]["state"]
+
+        self.assertEqual("retry", first["status"])
+        self.assertEqual("completed", result["status"])
+        self.assertEqual(2, publisher.attempts)
+        self.assertEqual(1, len(publisher.concluded))
+        self.assertEqual(["success"], [event["cause_code"] for event in worker.broker.outcomes])
+        self.assertEqual("completed", source_state)
 
     def test_a_resumed_attempt_never_opens_a_second_pair_of_checks(self):
         publisher = RecordingPublisher()

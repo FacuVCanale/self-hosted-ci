@@ -30,7 +30,7 @@ from .github import ObservedWorkflowJob
 from .jit_pilot import JitPilotError, JitPilotPackageV1, PilotTerminalMonitor
 from .local_approval import LocalApprovalError
 from .pilot_checks import GateCheckError, PilotCheckPublisher
-from .worker_authority import WorkerAuthorityError
+from .worker_authority import WorkerAuthorityError, WorkerTransportError
 from .runner_jit import (
     RunnerJitError,
     RunnerJitTemporalError,
@@ -1443,12 +1443,24 @@ class PilotWorker(_AssignmentWorker):
                     success=conclusion == "success" and monitor.supersession_reason is None,
                 )
             monitor.before_finish = record_terminal
-            outcome = monitor.monitor(
-                allocation_id=package.allocation_id,
-                runner_label=package.runner_label,
-                run_id=run_id,
-                job_id=observed.job_id,
-            )
+            try:
+                outcome = monitor.monitor(
+                    allocation_id=package.allocation_id,
+                    runner_label=package.runner_label,
+                    run_id=run_id,
+                    job_id=observed.job_id,
+                )
+            except WorkerTransportError:
+                # GitHub transport is external and transient.  Preserve the
+                # exact in-flight assignment and let the next service cycle
+                # resume it instead of recording worker-error or exiting.
+                self.state.fail(key)
+                return {
+                    "status": "retry",
+                    "mode": "ci-jit-pilot",
+                    "run_id": run_id,
+                    "reason": "terminal GitHub observation remains pending",
+                }
             if outcome is None:
                 self.state.fail(key)
                 return {
@@ -1470,7 +1482,16 @@ class PilotWorker(_AssignmentWorker):
                         "reason": "supersession Check Run publication remains pending",
                     }
             else:
-                self._close_checks(key, job_id=observed.job_id, conclusion=outcome)
+                if not self._close_checks(
+                    key, job_id=observed.job_id, conclusion=outcome
+                ):
+                    self.state.fail(key)
+                    return {
+                        "status": "retry",
+                        "mode": "ci-jit-pilot",
+                        "run_id": run_id,
+                        "reason": "terminal Check Run publication remains pending",
+                    }
             result = {
                 "status": (
                     "cancelled"
