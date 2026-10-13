@@ -316,7 +316,7 @@ class AllocationBrokerTests(unittest.TestCase):
         class InjectedCrash(BaseException):
             pass
 
-        for cutpoint in ("runner-proof", "job-proof", "claim", "disable", "start"):
+        for cutpoint in ("runner-proof", "job-proof", "disable", "admit-job"):
             with self.subTest(cutpoint=cutpoint), tempfile.TemporaryDirectory() as directory:
                 driver = FakeGarm()
                 live = FakeLiveJobVerifier()
