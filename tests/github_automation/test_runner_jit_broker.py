@@ -310,6 +310,143 @@ class AllocationBrokerTests(unittest.TestCase):
             [(self.payload["job_id"], self.payload["run_id"])], self.live.calls
         )
 
+    def test_phase1_model_recovers_from_every_job_admission_cutpoint(self):
+        """Crash after each external/durable edge converges without a second job."""
+
+        class InjectedCrash(BaseException):
+            pass
+
+        for cutpoint in ("runner-proof", "job-proof", "claim", "disable", "start"):
+            with self.subTest(cutpoint=cutpoint), tempfile.TemporaryDirectory() as directory:
+                driver = FakeGarm()
+                live = FakeLiveJobVerifier()
+                ledger = SqliteAllocationLedger(Path(directory) / "ledger.sqlite3")
+                broker = AllocationBroker(
+                    ledger,
+                    driver,
+                    self.private.public_key(),
+                    spki_fingerprint(self.private.public_key()),
+                    live,
+                )
+                broker.reserve(self.reservation, now=NOW)
+                broker.finalize(self.envelope, now=NOW)
+                context = JobStartedContext.from_mapping(
+                    {
+                        "repository_id": self.payload["repository_id"],
+                        "repository": self.payload["repository"],
+                        "dispatch_sha": self.payload["dispatch_sha"],
+                        "tested_sha": self.payload["tested_sha"],
+                        "workflow_ref": self.payload["workflow_ref"],
+                        "run_id": self.payload["run_id"],
+                        "run_attempt": self.payload["run_attempt"],
+                        "job_name": self.payload["job_name"],
+                        "runner_name": driver.runner_name,
+                        "scale_set_name": self.payload["scale_set_name"],
+                    }
+                )
+
+                if cutpoint == "runner-proof":
+                    original = driver.assert_runner_claim
+
+                    def crash(*args, **kwargs):
+                        original(*args, **kwargs)
+                        raise InjectedCrash
+
+                    patcher = mock.patch.object(driver, "assert_runner_claim", side_effect=crash)
+                elif cutpoint == "job-proof":
+                    original = live.verify
+
+                    def crash(*args, **kwargs):
+                        original(*args, **kwargs)
+                        raise InjectedCrash
+
+                    patcher = mock.patch.object(live, "verify", side_effect=crash)
+                elif cutpoint == "disable":
+                    original = driver.disable_scale_set
+
+                    def crash(*args, **kwargs):
+                        original(*args, **kwargs)
+                        raise InjectedCrash
+
+                    patcher = mock.patch.object(driver, "disable_scale_set", side_effect=crash)
+                else:
+                    original = ledger.transition
+
+                    def crash(allocation_id, action, **kwargs):
+                        result = original(allocation_id, action, **kwargs)
+                        if action == cutpoint:
+                            raise InjectedCrash
+                        return result
+
+                    patcher = mock.patch.object(ledger, "transition", side_effect=crash)
+
+                with patcher, self.assertRaises(InjectedCrash):
+                    broker.job_started(self.payload["allocation_id"], context, now=NOW)
+
+                reopened = SqliteAllocationLedger(ledger.path)
+                before_recovery = reopened.get(self.payload["allocation_id"])
+                self.assertLessEqual(before_recovery.jobs_started, 1)
+                recovered = AllocationBroker(
+                    reopened,
+                    driver,
+                    self.private.public_key(),
+                    spki_fingerprint(self.private.public_key()),
+                    live,
+                ).recover_all()
+                self.assertEqual([self.payload["allocation_id"]], recovered)
+                cleaned = SqliteAllocationLedger(ledger.path).get(
+                    self.payload["allocation_id"]
+                )
+                self.assertEqual("cleaned", cleaned.state)
+                self.assertLessEqual(cleaned.jobs_started, 1)
+
+    def test_phase1_model_requires_both_live_proofs_before_any_job_starts(self):
+        for missing_proof in ("runner", "job"):
+            with self.subTest(missing_proof=missing_proof), tempfile.TemporaryDirectory() as directory:
+                driver = FakeGarm()
+                live = FakeLiveJobVerifier()
+                ledger = SqliteAllocationLedger(Path(directory) / "ledger.sqlite3")
+                broker = AllocationBroker(
+                    ledger,
+                    driver,
+                    self.private.public_key(),
+                    spki_fingerprint(self.private.public_key()),
+                    live,
+                )
+                broker.reserve(self.reservation, now=NOW)
+                broker.finalize(self.envelope, now=NOW)
+                context = JobStartedContext.from_mapping(
+                    {
+                        "repository_id": self.payload["repository_id"],
+                        "repository": self.payload["repository"],
+                        "dispatch_sha": self.payload["dispatch_sha"],
+                        "tested_sha": self.payload["tested_sha"],
+                        "workflow_ref": self.payload["workflow_ref"],
+                        "run_id": self.payload["run_id"],
+                        "run_attempt": self.payload["run_attempt"],
+                        "job_name": self.payload["job_name"],
+                        "runner_name": driver.runner_name,
+                        "scale_set_name": self.payload["scale_set_name"],
+                    }
+                )
+                target = driver if missing_proof == "runner" else live
+                method = "assert_runner_claim" if missing_proof == "runner" else "verify"
+                with (
+                    mock.patch.object(
+                        target,
+                        method,
+                        side_effect=RunnerJitError(f"missing {missing_proof} proof"),
+                    ),
+                    self.assertRaises(JobStartedDenial),
+                ):
+                    broker.job_started(self.payload["allocation_id"], context, now=NOW)
+                record = SqliteAllocationLedger(ledger.path).get(
+                    self.payload["allocation_id"]
+                )
+                self.assertEqual("issued", record.state)
+                self.assertEqual(0, record.jobs_started)
+                self.assertNotIn("disable", driver.events)
+
     def test_provider_bootstrap_installs_signed_binding_and_fail_closed_hook(self):
         hook = Path(self.tempdir.name) / "hook.py"
         hook.write_text("#!/usr/bin/env python3\nprint('hook')\n", encoding="utf-8")
