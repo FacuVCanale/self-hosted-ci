@@ -49,6 +49,7 @@ from github_automation.worker_authority import (
     RootPrivateKeySigner,
     WorkerAppAuthorityV1,
     WorkerAuthorityError,
+    WorkerTransportError,
     WorkerGitHubClient,
 )
 
@@ -80,7 +81,7 @@ class HTTPS:
         except HTTPError as exc:
             return HTTPResponse(exc.code, exc.read(1_048_577))
         except (URLError, TimeoutError, OSError) as exc:
-            raise WorkerAuthorityError("worker GitHub transport failed") from exc
+            raise WorkerTransportError("worker GitHub transport failed") from exc
 
     def stream(self, url, *, headers, chunk_size=1 << 20):
         """Yield a large response body in bounded chunks.

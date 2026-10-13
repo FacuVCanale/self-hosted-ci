@@ -37,6 +37,10 @@ class WorkerAuthorityError(RuntimeError):
     """A local or remote worker authority boundary could not be proven."""
 
 
+class WorkerTransportError(WorkerAuthorityError):
+    """A transient GitHub transport failure interrupted an otherwise exact call."""
+
+
 @dataclass(frozen=True)
 class WorkerAppAuthorityV1:
     app_id: int
@@ -618,6 +622,8 @@ class WorkerGitHubClient:
 
     @staticmethod
     def _json(response: HTTPResponse, expected_status: int) -> Mapping[str, Any]:
+        if response.status == 429 or response.status >= 500:
+            raise WorkerTransportError("GitHub worker transport is temporarily unavailable")
         if (
             response.status != expected_status
             or not response.body
