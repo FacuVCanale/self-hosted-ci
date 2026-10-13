@@ -544,6 +544,8 @@ der=key.public_bytes(serialization.Encoding.DER,serialization.PublicFormat.Subje
 broker={"allocation_signer_fingerprint":hashlib.sha256(der).hexdigest(),"garm_cli_home":cli_home,"provider_name":"incus_ci_jit","image_alias":image,"image_fingerprint":fingerprint,"live_job_verifier":verifier,"outcome_retention_days":int(outcome_retention_days),"targets":{repository_id:target}}
 state={"schema_version":3,"garm_cli_home":cli_home,"manager_configured":True,"provider_configured":True,"image_configured":True,"broker_configured":True,"zero_scale_sets":True,"image":{"alias":image,"fingerprint":fingerprint},"targets":{repository_id:target}}
 outbound=json.loads(outbound_path.read_text(encoding="utf-8"))
+outbound.setdefault("cancel_convergence_timeout_seconds",180)
+outbound.setdefault("cancel_convergence_poll_seconds",15)
 if outbound.get("repository")!=repository or str(outbound.get("repository_id"))!=repository_id or outbound.get("default_branch")!=default_branch: raise SystemExit("outbound repository binding changed during configuration")
 if outbound.get("authority_kind")!=authority or outbound.get("runner_group")!=(runner_group or None): raise SystemExit("outbound authority binding changed during configuration")
 if outbound.get("image_fingerprint") not in {previous_fingerprint,fingerprint}: raise SystemExit("outbound image fingerprint compare-and-swap changed before commit")

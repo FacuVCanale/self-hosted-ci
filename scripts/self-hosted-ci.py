@@ -47,7 +47,14 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--apply", action="store_true")
     doctor = commands.add_parser("doctor")
     doctor.add_argument("repository", nargs="?")
-    outcomes = commands.add_parser("outcomes")
+    outcomes = commands.add_parser(
+        "outcomes",
+        description=(
+            "Show durable CI outcomes. runs_executed counts only quality-bearing "
+            "terminal code results; admitted runs discarded by supersession are "
+            "excluded. green_rate is successes / runs_executed."
+        ),
+    )
     outcomes.add_argument("repository", nargs="?")
     outcomes.add_argument("--since", default="7d")
     outcomes.add_argument("--json", action="store_true")

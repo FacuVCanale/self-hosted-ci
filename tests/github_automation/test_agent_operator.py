@@ -665,6 +665,16 @@ class HealthSnapshotOperatorTests(unittest.TestCase):
         self.assertEqual((1, 1, 1.0), (result["runs_executed"], result["successes"], result["green_rate"]))
         self.assertEqual(["10", "11"], [item["run_id"] for item in result["events"]])
 
+    def test_outcomes_help_defines_quality_denominator_and_supersession(self):
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as stopped, mock.patch("sys.stdout", stdout):
+            self.cli.parser().parse_args(["outcomes", "--help"])
+        self.assertEqual(0, stopped.exception.code)
+        help_text = " ".join(stdout.getvalue().split())
+        self.assertIn("runs_executed counts only quality-bearing", help_text)
+        self.assertIn("discarded by supersession are excluded", help_text)
+        self.assertIn("green_rate is successes / runs_executed", help_text)
+
     def test_outcomes_fail_closed_for_expired_unavailable_or_partial_window(self):
         cases = []
         expired = self.snapshot(age=3 * 86400)

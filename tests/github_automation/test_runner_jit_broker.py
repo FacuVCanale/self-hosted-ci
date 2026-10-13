@@ -1630,6 +1630,7 @@ class AllocationBrokerTests(unittest.TestCase):
         )
         self.broker.reserve(first, now=NOW)
         self.broker.reserve(second, now=NOW)
+        self.driver.events.clear()
         receipt = self.broker.recover(first["allocation_id"])
         self.assertEqual(
             {"allocation_id": first["allocation_id"], "state": "absent"}, receipt
@@ -1637,6 +1638,12 @@ class AllocationBrokerTests(unittest.TestCase):
         self.assertNotIn(first["scale_set_name"], self.driver.scales)
         self.assertIn(second["scale_set_name"], self.driver.scales)
         self.assertEqual("reserved", self.ledger.get(second["allocation_id"]).state)
+        lifecycle = [
+            event
+            for event in self.driver.events
+            if event in {"disable", "drain", "delete"}
+        ]
+        self.assertEqual(["disable", "drain", "delete"], lifecycle)
 
     def test_terminal_workflow_before_job_started_recovers_exact_allocation(self):
         self.broker.reserve(self.reservation, now=NOW)

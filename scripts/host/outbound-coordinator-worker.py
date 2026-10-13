@@ -174,7 +174,11 @@ def root_config(path: Path):
     }
     if (
         not isinstance(value, dict)
-        or set(value) - {"gate", "auto_dispatch", "claim_deadline_seconds"} != required
+        or set(value) - {
+            "gate", "auto_dispatch", "claim_deadline_seconds",
+            "cancel_convergence_timeout_seconds",
+            "cancel_convergence_poll_seconds",
+        } != required
         or value["schema_version"] != 1
         or value["mode"] not in {"ci-jit-pilot", "ci-gate-full"}
     ):
@@ -208,6 +212,17 @@ def root_config(path: Path):
         raise LocalApprovalError(
             "claim_deadline_seconds must be between one and 900 seconds"
         )
+    cancel_timeout = value.get("cancel_convergence_timeout_seconds", 180)
+    cancel_poll = value.get("cancel_convergence_poll_seconds", 15)
+    if (
+        isinstance(cancel_timeout, bool)
+        or not isinstance(cancel_timeout, int)
+        or not 30 <= cancel_timeout <= 900
+        or isinstance(cancel_poll, bool)
+        or not isinstance(cancel_poll, int)
+        or not 1 <= cancel_poll <= cancel_timeout
+    ):
+        raise LocalApprovalError("outbound worker cancel convergence timing is invalid")
     gate = value.get("gate")
     if gate is not None and (
         not isinstance(gate, dict)
@@ -359,21 +374,9 @@ def runtime(config_path):
             return client.jobs(run_id, client.authenticate())
 
         def cancel_exact_run(self, run_id):
-            accepted = client.cancel_run(run_id, client.authenticate())
-            if not accepted:
-                return False
-            deadline = time.monotonic() + max(30, c["request_timeout_seconds"])
-            while True:
-                run = client.run(run_id, client.authenticate())
-                if run.get("status") == "completed":
-                    if run.get("conclusion") != "cancelled":
-                        return False
-                    return True
-                if time.monotonic() >= deadline:
-                    raise LocalApprovalError(
-                        "exact workflow run cancellation did not converge"
-                    )
-                time.sleep(1)
+            # Request only.  Durable worker progress owns convergence across
+            # later service cycles, so GitHub latency cannot block this loop.
+            return client.cancel_run(run_id, client.authenticate())
 
     # GARM may need several minutes to drain an ephemeral GitHub runner after
     # its job reaches terminal. HTTP request timeouts are intentionally short,
@@ -397,6 +400,12 @@ def runtime(config_path):
             state, source, broker, github, signer,
             checks=checks, repository=c["repository"],
             claim_ttl=timedelta(seconds=c.get("claim_deadline_seconds", 720)),
+            cancel_convergence_timeout=timedelta(
+                seconds=c.get("cancel_convergence_timeout_seconds", 180)
+            ),
+            cancel_convergence_poll=timedelta(
+                seconds=c.get("cancel_convergence_poll_seconds", 15)
+            ),
         )
         if c["mode"] == "ci-jit-pilot"
         else OutboundWorker(state, source, broker, github, signer)
@@ -665,7 +674,12 @@ def main(argv=None):
                     worker.run_once()
                 except (WorkerError, RunnerJitError, GateCheckError, OSError) as exc:
                     print(f"assignment failed: {type(exc).__name__}", file=sys.stderr)
-                time.sleep(c["poll_seconds"])
+                time.sleep(
+                    min(
+                        c["poll_seconds"],
+                        c.get("cancel_convergence_poll_seconds", 15),
+                    )
+                )
         print(json.dumps(value, sort_keys=True, separators=(",", ":")))
         return 0
     except (

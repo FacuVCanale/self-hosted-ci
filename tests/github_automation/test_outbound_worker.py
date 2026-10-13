@@ -55,9 +55,11 @@ class Broker:
         self.calls = []
         self.outcomes = []
         self.timeline = []
+        self.active_allocations = set()
 
     def reserve(self, value):
         self.calls.append(("reserve", value["allocation_id"]))
+        self.active_allocations.add(value["allocation_id"])
         return {
             "allocation_id": value["allocation_id"],
             "scale_set_id": "9",
@@ -75,11 +77,13 @@ class Broker:
     def recover(self, allocation_id):
         self.calls.append(("recover", allocation_id))
         self.timeline.append("recover")
+        self.active_allocations.discard(allocation_id)
         return {"allocation_id": allocation_id, "state": "absent"}
 
     def finish(self, allocation_id, outcome):
         self.calls.append(("finish", allocation_id, outcome))
         self.timeline.append("finish")
+        self.active_allocations.discard(allocation_id)
 
     def prove_clean(self, allocation_id, runner_label):
         self.calls.append(("prove-clean", allocation_id))
@@ -591,23 +595,31 @@ class OutboundWorkerTests(unittest.TestCase):
                 )
 
             source.supersession_reason = supersession
+            first = worker.run_once()
+            current = source.clock()
+            source.clock = lambda: current + timedelta(seconds=15)
             result = worker.run_once()
             request = json.loads(
                 state.db.execute("SELECT request FROM requests").fetchone()[0]
             )
 
         allocation_id = request["reservation"]["allocation_id"]
+        self.assertEqual("pending", first["status"])
         self.assertEqual("cancelled", result["status"])
         self.assertEqual([444], worker.github.cancelled)
         self.assertEqual(
-            [("recover", allocation_id)],
-            [call for call in worker.broker.calls if call[0] == "recover"],
+            [("finish", allocation_id, "success"), ("prove-clean", allocation_id)],
+            [
+                call
+                for call in worker.broker.calls
+                if call[0] in {"finish", "prove-clean"}
+            ],
         )
         self.assertEqual(1, len(publisher.discarded))
         self.assertEqual("superseded-head", worker.broker.outcomes[-1]["cause_code"])
         self.assertLess(
             worker.broker.timeline.index("record-outcome"),
-            worker.broker.timeline.index("recover"),
+            worker.broker.timeline.index("finish"),
         )
         self.assertIn("newer commit", publisher.discarded[0][1])
 
@@ -718,8 +730,12 @@ class OutboundWorkerTests(unittest.TestCase):
                 )
 
             source.supersession_reason = supersession
+            first = worker.run_once()
+            now = source.clock()
+            source.clock = lambda: now + timedelta(seconds=15)
             result = worker.run_once()
 
+        self.assertEqual("pending", first["status"])
         self.assertEqual("cancelled", result["status"])
         self.assertEqual("cancel", result["outcome"])
         self.assertEqual([444], worker.github.cancelled)
@@ -730,11 +746,368 @@ class OutboundWorkerTests(unittest.TestCase):
         self.assertEqual(1, len(publisher.discarded))
         self.assertEqual("superseded-head", worker.broker.outcomes[-1]["cause_code"])
         self.assertIsNone(worker.broker.outcomes[-1]["prior_ledger_state"])
-        self.assertIsNone(worker.broker.outcomes[-1]["executed"])
+        self.assertFalse(worker.broker.outcomes[-1]["executed"])
         self.assertLess(
             worker.broker.timeline.index("record-outcome"),
             worker.broker.timeline.index("finish"),
         )
+
+    def test_slow_supersession_is_durable_and_records_one_nonexecuted_outcome(self):
+        class SlowCancellationGitHub(GitHub):
+            polls = 0
+
+            def run(self, run_id):
+                self.polls += 1
+                terminal = self.polls > 6
+                return {
+                    "id": run_id,
+                    "status": "completed" if terminal else "in_progress",
+                    "conclusion": "cancelled" if terminal else None,
+                }
+
+            def jobs(self, run_id):
+                terminal = self.polls > 6
+                return {
+                    "jobs": [{
+                        "id": 555, "run_id": run_id, "name": "local-quality",
+                        "labels": ["self-hosted", self.label],
+                        "status": "completed" if terminal else "in_progress",
+                        "conclusion": "cancelled" if terminal else None,
+                    }]
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            worker, state, source = self._pilot_fixture(
+                directory, RecordingPublisher(), github=SlowCancellationGitHub()
+            )
+            checks = {"count": 0}
+
+            def supersession(_key, _request):
+                checks["count"] += 1
+                return (
+                    "a newer commit superseded this pull request head"
+                    if checks["count"] >= 3
+                    else None
+                )
+
+            source.supersession_reason = supersession
+            other_allocation = "87654321-4321-4123-8123-cba987654321"
+            worker.broker.active_allocations.add(other_allocation)
+            current = source.clock()
+            results = [worker.run_once()]
+            request_id = state.db.execute("SELECT id FROM requests").fetchone()[0]
+            first_progress = state.progress(request_id)
+            state.close()
+            reopened = WorkerState(Path(directory) / "worker.sqlite3")
+            worker.state = reopened
+            # Six read cycles at 15 seconds exceed the old 30-second timeout,
+            # but stay within the new 180-second durable convergence window.
+            for step in range(1, 7):
+                source.clock = lambda step=step: current + timedelta(seconds=15 * step)
+                results.append(worker.run_once())
+                self.assertIn(other_allocation, worker.broker.active_allocations)
+
+            progress = reopened.progress(request_id)
+
+        self.assertTrue(all(item["status"] == "pending" for item in results[:-1]))
+        self.assertEqual("cancelled", results[-1]["status"])
+        self.assertEqual(1, len(worker.github.cancelled))
+        self.assertEqual(
+            ["superseded-head"],
+            [event["cause_code"] for event in worker.broker.outcomes],
+        )
+        self.assertFalse(worker.broker.outcomes[0]["executed"])
+        self.assertNotIn("worker-error", [event["cause_code"] for event in worker.broker.outcomes])
+        self.assertEqual("cancel-requested", first_progress["phase"])
+        self.assertEqual(first_progress["cancel_deadline"], progress["cancel_deadline"])
+        allocation = worker.broker.outcomes[0]["allocation_id"]
+        self.assertFalse(any(call[1] != allocation for call in worker.broker.calls if call[0] == "recover"))
+
+    def test_cancel_timeout_recovers_exact_allocation_without_raising(self):
+        class NeverConvergesGitHub(GitHub):
+            def run(self, run_id):
+                return {"id": run_id, "status": "in_progress", "conclusion": None}
+
+            def jobs(self, run_id):
+                return {"jobs": [{
+                    "id": 555, "run_id": run_id, "name": "local-quality",
+                    "labels": ["self-hosted", self.label],
+                    "status": "in_progress", "conclusion": None,
+                }]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            worker, _state, source = self._pilot_fixture(
+                directory, RecordingPublisher(), github=NeverConvergesGitHub()
+            )
+            worker.cancel_convergence_timeout = timedelta(seconds=30)
+            worker.cancel_convergence_poll = timedelta(seconds=10)
+            checks = {"count": 0}
+
+            def supersession(_key, _request):
+                checks["count"] += 1
+                return (
+                    "a newer commit superseded this pull request head"
+                    if checks["count"] >= 3
+                    else None
+                )
+
+            source.supersession_reason = supersession
+            current = source.clock()
+            first = worker.run_once()
+            source.clock = lambda: current + timedelta(seconds=10)
+            second = worker.run_once()
+            source.clock = lambda: current + timedelta(seconds=31)
+            result = worker.run_once()
+
+        self.assertEqual(("pending", "pending", "failed"), (
+            first["status"], second["status"], result["status"]
+        ))
+        self.assertEqual(
+            ["cancel-not-converged"],
+            [event["cause_code"] for event in worker.broker.outcomes],
+        )
+        allocation = worker.broker.outcomes[0]["allocation_id"]
+        self.assertIn(("recover", allocation), worker.broker.calls)
+        self.assertNotIn("worker-error", [event["cause_code"] for event in worker.broker.outcomes])
+
+    def test_cancel_timeout_recovery_is_absorbing_and_never_reclassified(self):
+        class LaterConvergesGitHub(GitHub):
+            polls = 0
+
+            def run(self, run_id):
+                self.polls += 1
+                terminal = self.polls > 2
+                return {
+                    "id": run_id,
+                    "status": "completed" if terminal else "in_progress",
+                    "conclusion": "cancelled" if terminal else None,
+                }
+
+            def jobs(self, run_id):
+                terminal = self.polls > 2
+                return {"jobs": [{
+                    "id": 555, "run_id": run_id, "name": "local-quality",
+                    "labels": ["self-hosted", self.label],
+                    "status": "completed" if terminal else "in_progress",
+                    "conclusion": "cancelled" if terminal else None,
+                }]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            worker, state, source = self._pilot_fixture(
+                directory, RecordingPublisher(), github=LaterConvergesGitHub()
+            )
+            worker.cancel_convergence_timeout = timedelta(seconds=30)
+            worker.cancel_convergence_poll = timedelta(seconds=10)
+            checks = {"count": 0}
+
+            def supersession(_key, _request):
+                checks["count"] += 1
+                return (
+                    "a newer commit superseded this pull request head"
+                    if checks["count"] >= 3
+                    else None
+                )
+
+            source.supersession_reason = supersession
+            current = source.clock()
+            self.assertEqual("pending", worker.run_once()["status"])
+            request_id = state.db.execute("SELECT id FROM requests").fetchone()[0]
+            source.clock = lambda: current + timedelta(seconds=31)
+            original_recover = worker.broker.recover
+            recover_attempts = {"count": 0}
+
+            def fail_once(allocation_id):
+                recover_attempts["count"] += 1
+                if recover_attempts["count"] == 1:
+                    raise RunnerJitError("transient recovery failure")
+                return original_recover(allocation_id)
+
+            worker.broker.recover = fail_once
+            self.assertEqual("retry", worker.run_once()["status"])
+            polls_at_timeout = worker.github.polls
+            self.assertEqual(
+                "cancel-recovery-pending",
+                state.progress(request_id)["phase"],
+            )
+            result = worker.run_once()
+
+        self.assertEqual("failed", result["status"])
+        self.assertEqual(polls_at_timeout, worker.github.polls)
+        self.assertEqual(2, recover_attempts["count"])
+        self.assertEqual(
+            ["cancel-not-converged"],
+            [event["cause_code"] for event in worker.broker.outcomes],
+        )
+
+    def test_cancel_timeout_recovers_before_retrying_transient_check_closure(self):
+        class NeverConvergesGitHub(GitHub):
+            def run(self, run_id):
+                return {"id": run_id, "status": "in_progress", "conclusion": None}
+
+            def jobs(self, run_id):
+                return {"jobs": [{
+                    "id": 555, "run_id": run_id, "name": "local-quality",
+                    "labels": ["self-hosted", self.label],
+                    "status": "in_progress", "conclusion": None,
+                }]}
+
+        class FailsOncePublisher(RecordingPublisher):
+            def __init__(self):
+                super().__init__()
+                self.close_attempts = 0
+
+            def abandon(self, **value):
+                self.close_attempts += 1
+                if self.close_attempts == 1:
+                    raise GateCheckError("transient close failure")
+                return super().abandon(**value)
+
+        publisher = FailsOncePublisher()
+        with tempfile.TemporaryDirectory() as directory:
+            worker, state, source = self._pilot_fixture(
+                directory, publisher, github=NeverConvergesGitHub()
+            )
+            worker.cancel_convergence_timeout = timedelta(seconds=30)
+            worker.cancel_convergence_poll = timedelta(seconds=10)
+            checks = {"count": 0}
+
+            def supersession(_key, _request):
+                checks["count"] += 1
+                return (
+                    "a newer commit superseded this pull request head"
+                    if checks["count"] >= 3
+                    else None
+                )
+
+            source.supersession_reason = supersession
+            current = source.clock()
+            self.assertEqual("pending", worker.run_once()["status"])
+            source.clock = lambda: current + timedelta(seconds=31)
+            first_timeout = worker.run_once()
+            request_id = state.db.execute("SELECT id FROM requests").fetchone()[0]
+            progress = state.progress(request_id)
+            recovery_calls = [call for call in worker.broker.calls if call[0] == "recover"]
+            result = worker.run_once()
+
+        self.assertEqual("retry", first_timeout["status"])
+        self.assertTrue(progress["cancel_recovery_complete"])
+        self.assertEqual(1, len(recovery_calls))
+        self.assertEqual("failed", result["status"])
+        self.assertEqual(2, publisher.close_attempts)
+        self.assertEqual(
+            ["cancel-not-converged"],
+            [event["cause_code"] for event in worker.broker.outcomes],
+        )
+        self.assertEqual(
+            1,
+            len([call for call in worker.broker.calls if call[0] == "recover"]),
+        )
+
+    def test_cancel_timeout_retries_outcome_before_recovery(self):
+        class NeverConvergesGitHub(GitHub):
+            def run(self, run_id):
+                return {"id": run_id, "status": "in_progress", "conclusion": None}
+
+            def jobs(self, run_id):
+                return {"jobs": [{
+                    "id": 555, "run_id": run_id, "name": "local-quality",
+                    "labels": ["self-hosted", self.label],
+                    "status": "in_progress", "conclusion": None,
+                }]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            worker, state, source = self._pilot_fixture(
+                directory, RecordingPublisher(), github=NeverConvergesGitHub()
+            )
+            worker.cancel_convergence_timeout = timedelta(seconds=30)
+            worker.cancel_convergence_poll = timedelta(seconds=10)
+            checks = {"count": 0}
+
+            def supersession(_key, _request):
+                checks["count"] += 1
+                return (
+                    "a newer commit superseded this pull request head"
+                    if checks["count"] >= 3
+                    else None
+                )
+
+            source.supersession_reason = supersession
+            current = source.clock()
+            self.assertEqual("pending", worker.run_once()["status"])
+            original_record = worker.broker.record_outcome
+            attempts = {"count": 0}
+
+            def fail_once(event):
+                attempts["count"] += 1
+                if attempts["count"] == 1:
+                    raise RunnerJitError("transient outcome failure")
+                return original_record(event)
+
+            worker.broker.record_outcome = fail_once
+            source.clock = lambda: current + timedelta(seconds=31)
+            first_timeout = worker.run_once()
+            request_id = state.db.execute("SELECT id FROM requests").fetchone()[0]
+            progress = state.progress(request_id)
+            self.assertEqual([], [call for call in worker.broker.calls if call[0] == "recover"])
+            result = worker.run_once()
+
+        self.assertEqual("retry", first_timeout["status"])
+        self.assertEqual("cancel-timeout-recording", progress["phase"])
+        self.assertEqual("failed", result["status"])
+        self.assertEqual(2, attempts["count"])
+        self.assertEqual(
+            ["cancel-not-converged"],
+            [event["cause_code"] for event in worker.broker.outcomes],
+        )
+        self.assertEqual(
+            1,
+            len([call for call in worker.broker.calls if call[0] == "recover"]),
+        )
+
+    def test_supersession_resumes_after_crash_between_dispatch_and_observation(self):
+        class CrashAfterDispatchGitHub(GitHub):
+            def observe_exact_job(self, run_id, label):
+                self.label = label
+                raise SystemExit("simulated process death after dispatch receipt")
+
+            def run(self, run_id):
+                return {"id": run_id, "status": "completed", "conclusion": "cancelled"}
+
+            def jobs(self, run_id):
+                return {"jobs": []}
+
+        with tempfile.TemporaryDirectory() as directory:
+            worker, state, source = self._pilot_fixture(
+                directory, RecordingPublisher(), github=CrashAfterDispatchGitHub()
+            )
+            with self.assertRaisesRegex(SystemExit, "simulated process death"):
+                worker.run_once()
+            request_id = state.db.execute("SELECT id FROM requests").fetchone()[0]
+            self.assertEqual("dispatched", state.progress(request_id)["phase"])
+            self.assertIsNone(state.progress(request_id).get("job_id"))
+            state.close()
+
+            reopened = WorkerState(Path(directory) / "worker.sqlite3")
+            self.assertEqual(1, reopened.recover_running())
+            worker.state = reopened
+            source.supersession_reason = lambda _key, _request: (
+                "a newer commit superseded this pull request head"
+            )
+            current = source.clock()
+            first = worker.run_once()
+            source.clock = lambda: current + timedelta(seconds=15)
+            result = worker.run_once()
+
+        self.assertEqual("pending", first["status"])
+        self.assertEqual("cancelled", result["status"])
+        self.assertIsNone(result["job_id"])
+        self.assertEqual([444], worker.github.cancelled)
+        self.assertEqual(
+            ["superseded-head"],
+            [event["cause_code"] for event in worker.broker.outcomes],
+        )
+        allocation = worker.broker.outcomes[0]["allocation_id"]
+        self.assertIn(("recover", allocation), worker.broker.calls)
 
     def test_a_lost_run_closes_its_checks_instead_of_hanging_in_progress(self):
         publisher = RecordingPublisher()

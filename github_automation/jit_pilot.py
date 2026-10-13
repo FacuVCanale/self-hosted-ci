@@ -295,7 +295,7 @@ class PilotTerminalMonitor:
 
     def monitor(
         self, *, allocation_id: str, runner_label: str, run_id: int, job_id: int
-    ) -> str:
+    ) -> str | None:
         try:
             parsed_allocation = UUID(allocation_id)
         except ValueError as exc:
@@ -370,13 +370,14 @@ class PilotTerminalMonitor:
                 if reason is not None:
                     if self.cancel_run is None:
                         raise JitPilotError("superseded run cancellation is unavailable")
-                    # The callback returns only after the exact GitHub run has
-                    # converged to completed/cancelled.
+                    # Cancellation is only requested here.  Convergence is a
+                    # durable worker phase so a slow GitHub cancellation never
+                    # blocks this monitor or kills the worker process.
                     cancelled = self.cancel_run(run_id)
                     if cancelled is False:
                         continue
                     self.supersession_reason = reason
-                    continue
+                    return None
             if self.monotonic() >= deadline:
                 conclusion = "timeout"
                 break
