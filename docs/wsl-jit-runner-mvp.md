@@ -279,6 +279,9 @@ repository is activated merely by cloning this repository.
   records `cleaned` after the external cleanup effect returns complete
   evidence. An identical post-crash acknowledgement converges; different or
   incomplete evidence is rejected.
+- schema-v3 migration fences any legacy v2 `claimed` allocation into
+  `recovery_required` with `jobs_started=0`, cleanup pending, and the same
+  deterministic cleanup-key contract; it is never promoted to execution.
 
 Broker and runner credentials never belong in the allocation or repository.
 
