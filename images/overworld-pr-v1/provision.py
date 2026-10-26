@@ -246,7 +246,7 @@ def require_profile(value: object, waterfall_commit: str) -> dict[str, object]:
     expected_toolchain = {
         "bun": "1.4.0", "garm": "0.2.1", "minio": "RELEASE.2025-09-07T16-13-09Z",
         "node": "22.23.2",
-        "playwright": "1.59.1", "postgresql_backend": "16", "postgis_backend": "3.4",
+        "playwright": "1.64.1", "postgresql_backend": "16", "postgis_backend": "3.4",
         "postgresql_e2e": "17", "postgis_e2e": "3.5", "python": "3.12", "uv": "0.8.22",
         "waterfall_revision": waterfall_commit,
     }
@@ -573,12 +573,12 @@ committed=true
             os.chmod(f"/usr/local/bin/{name}", 0o755)
         Path("/opt/ms-playwright").mkdir(mode=0o755)
         chromium = extract_chromium(
-            downloaded["chromium"], Path("/opt/ms-playwright/chromium-1217"),
+            downloaded["chromium"], Path("/opt/ms-playwright/chromium-1248"),
             "chrome-linux64", "chrome",
         )
         extract_chromium(
             downloaded["chromium_headless_shell"],
-            Path("/opt/ms-playwright/chromium_headless_shell-1217"),
+            Path("/opt/ms-playwright/chromium_headless_shell-1248"),
             "chrome-headless-shell-linux64", "chrome-headless-shell",
         )
         browser_contract = Path("/opt/self-hosted-ci/browsers")
@@ -743,7 +743,7 @@ committed=true
                 "NO_PROXY=", "no_proxy=", "bun", "--smol",
                 str(modules / ".bin/playwright"), "--version",
                 cwd=component_root,
-            ) != "Version 1.59.1":
+            ) != "Version 1.64.1":
                 raise SystemExit("pinned Playwright Bun --smol entrypoint smoke drifted")
         if tree_digest(modules) != before:
             raise SystemExit(f"{component} validation mutated its dependency snapshot")

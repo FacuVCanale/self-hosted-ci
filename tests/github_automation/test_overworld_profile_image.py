@@ -844,7 +844,7 @@ class OverworldProfileImageTests(unittest.TestCase):
                 module.require_manifest(changed)
         self.assertEqual("1.4.0", manifest["artifacts"]["bun"]["version"])
         self.assertEqual("1.1.408", manifest["artifacts"]["pyright"]["version"])
-        self.assertEqual("1.59.1", manifest["artifacts"]["playwright"]["version"])
+        self.assertEqual("1.64.1", manifest["artifacts"]["playwright"]["version"])
         self.assertEqual(
             {
                 "version": "16.4.1",
@@ -853,8 +853,8 @@ class OverworldProfileImageTests(unittest.TestCase):
             },
             manifest["artifacts"]["next"],
         )
-        self.assertEqual("1217", manifest["artifacts"]["chromium"]["revision"])
-        self.assertEqual("1217", manifest["artifacts"]["chromium_headless_shell"]["revision"])
+        self.assertEqual("1248", manifest["artifacts"]["chromium"]["revision"])
+        self.assertEqual("1248", manifest["artifacts"]["chromium_headless_shell"]["revision"])
         self.assertEqual(
             {
                 "version": "RELEASE.2025-09-07T16-13-09Z",
@@ -1351,7 +1351,7 @@ cleanup
             'Node runtime executable digest drifted',
             'os.chown(node_path, int(node_contract["uid"]), int(node_contract["gid"]))',
             '"uv", "sync", "--frozen"',
-            'downloaded["chromium"], Path("/opt/ms-playwright/chromium-1217")',
+            'downloaded["chromium"], Path("/opt/ms-playwright/chromium-1248")',
             'str(pyright_wrapper), str(pyright_target)',
             'sha256_file(lockfile)',
             'run("pg_dropcluster", "--stop", major, "main")',
@@ -1748,7 +1748,7 @@ printf normalized > "$MOCK_CHMOD_MARKER"
             "backend-node_modules",
             "frontend-node_modules",
             "waterfall/.self-hosted-ci-commit",
-            "chromium_headless_shell-1217",
+            "chromium_headless_shell-1248",
             "source-control metadata persisted",
             '("16", "3.4")',
             '("17", "3.5")',

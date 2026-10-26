@@ -124,7 +124,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual(["backend", "frontend", "e2e"], profile["phases"])
         self.assertEqual(".github/workflows/ci.yml", profile["source_workflow_path"])
         self.assertEqual(
-            "c91ef6e3c42f884c72ae9f6c982e575af0ce84b8a1dd9c17898d5b6859873d60",
+            "2f81a1aa0fd266050b07253d43103f5c9718d55b88d8c48064d26b266eeb763c",
             profile["source_workflow_sha256"],
         )
         self.assertEqual(
@@ -136,7 +136,7 @@ class RepositoryProfileTests(unittest.TestCase):
                 },
                 "frontend": {
                     "lock_path": "frontend/bun.lock",
-                    "lock_sha256": "2d7a3760004adf177c07963bfcef3ea21a6336d3cb25ab0caccec05fc87d4049",
+                    "lock_sha256": "8941c2bb73910448c2c835526ea26a3a52d37a010f496cd28c8ef5fec196e351",
                     "node_modules_path": "/opt/self-hosted-ci/overworld-deps/frontend-node_modules",
                 },
             },
@@ -149,7 +149,7 @@ class RepositoryProfileTests(unittest.TestCase):
             profile["toolchain"]["waterfall_revision"],
         )
         self.assertEqual(
-            "f85991235a71b5e06f63812ef54d3cfaa9902328c0e660416be33e8f8209c906",
+            "1da0337690b344c35755d7c3a9f9b44c93fc97826e2a04e099abdef84dac4596",
             profile["runner_script_sha256"],
         )
         runner = SCRIPT.read_text(encoding="utf-8")
@@ -162,7 +162,7 @@ class RepositoryProfileTests(unittest.TestCase):
             runner,
         )
         self.assertIn(
-            "readonly FRONTEND_LOCK_SHA256=2d7a3760004adf177c07963bfcef3ea21a6336d3cb25ab0caccec05fc87d4049",
+            "readonly FRONTEND_LOCK_SHA256=8941c2bb73910448c2c835526ea26a3a52d37a010f496cd28c8ef5fec196e351",
             runner,
         )
         self.assertEqual(SCRIPT, script)
@@ -500,7 +500,7 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertNotIn("bun run dev", frontend_and_e2e)
         self.assertNotIn("bun run --cwd frontend playwright", frontend_and_e2e)
         self.assertIn("sha256sum \"$component/bun.lock\"", text)
-        self.assertIn("/opt/ms-playwright/chromium-1217*", text)
+        self.assertIn("/opt/ms-playwright/chromium-1248*", text)
         self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright", text)
         self.assertIn('[[ $(uv --version) == "uv 0.8.22" ]]', text)
         self.assertIn('[[ $(node --version) == v22.23.2 ]]', text)

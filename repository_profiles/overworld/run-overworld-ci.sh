@@ -17,7 +17,7 @@ readonly MEMORY_PRESSURE_FULL_LIMIT_PERCENT=5
 readonly WATERFALL_REVISION=a5834a2f7665f956297c03cc32e5601b097bffbe
 readonly WATERFALL_ROOT=/opt/self-hosted-ci/overworld-deps/waterfall
 readonly BACKEND_LOCK_SHA256=5e99b30664687cf49dc142e65739c49f31213d9faa5477aeff37d4ab9bf795a8
-readonly FRONTEND_LOCK_SHA256=2d7a3760004adf177c07963bfcef3ea21a6336d3cb25ab0caccec05fc87d4049
+readonly FRONTEND_LOCK_SHA256=8941c2bb73910448c2c835526ea26a3a52d37a010f496cd28c8ef5fec196e351
 readonly BACKEND_MODULES=/opt/self-hosted-ci/overworld-deps/backend-node_modules
 readonly FRONTEND_MODULES=/opt/self-hosted-ci/overworld-deps/frontend-node_modules
 readonly NEXT_NODE=/usr/local/bin/node
@@ -236,9 +236,9 @@ require_image_contract() {
   [[ $($PG17_BIN/psql --version) == "psql (PostgreSQL) 17."* ]]
   [[ -x "$WATERFALL_ROOT/.venv/bin/python" ]]
   [[ $(<"$WATERFALL_ROOT/.self-hosted-ci-commit") == "$WATERFALL_REVISION" ]]
-  chromium_candidates=(/opt/ms-playwright/chromium-1217*/chrome-linux*/chrome)
+  chromium_candidates=(/opt/ms-playwright/chromium-1248*/chrome-linux*/chrome)
   [[ ${#chromium_candidates[@]} == 1 && -x ${chromium_candidates[0]} ]]
-  headless_candidates=(/opt/ms-playwright/chromium_headless_shell-1217*/chrome-headless-shell-linux*/chrome-headless-shell)
+  headless_candidates=(/opt/ms-playwright/chromium_headless_shell-1248*/chrome-headless-shell-linux*/chrome-headless-shell)
   [[ ${#headless_candidates[@]} == 1 && -x ${headless_candidates[0]} ]]
   command -v minio mc node bun uv curl unlink cp sha256sum stat /usr/bin/find >/dev/null
   [[ -x $PG16_BIN/initdb && -x $PG16_BIN/pg_ctl && -x $PG16_BIN/createdb ]]
