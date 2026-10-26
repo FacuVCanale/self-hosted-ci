@@ -90,6 +90,22 @@ review_sources(){
     --image-observation "$IMAGE_OBSERVATION" \
     --live-previous-fingerprint "$LIVE_PREVIOUS_IMAGE_FINGERPRINT"
 }
+review_then_sign(){
+  local directory=$1 sha=$2 signer_callback=$3
+  review_sources "$directory" "$sha"
+  "$signer_callback"
+}
+test_signer(){
+  if [ -n "${ROTATION_TEST_SIGNER_COMMAND:-}" ]; then bash -c "$ROTATION_TEST_SIGNER_COMMAND"; fi
+}
+real_signer(){
+  cd "$REPO"
+  log "6 sign+bundle"
+  "$PY" "$SIGNER" --input "$C/measured/contract/runner-boundary-measured-v2.json" --output "$C/runner-boundary-v2.json" --reviewer-private-key ~/.local/share/self-hosted-ci/reviewer/reviewer-private-key.pem >/dev/null
+  "$PY" "$PACKAGER" signed --unsigned-tar "$C/unsigned-$U.tar" --signed-boundary "$C/runner-boundary-v2.json" --reviewer-public-key ~/.local/share/self-hosted-ci/reviewer/reviewer-public-key.pem --reviewer-key-fingerprint "$FP" --output "$C/bundle.tar" >/dev/null
+  BSHA=$(shasum -a 256 "$C/bundle.tar" | awk '{print $1}')
+  BBYTES=$(stat -f %z "$C/bundle.tar")
+}
 derive_candidate(){ python3 - "$RECEIPT" "$PROFILE" "$MANIFEST" <<'PY'
 import hashlib,json,pathlib,re,sys
 receipt_path,profile_path,manifest_path=map(pathlib.Path,sys.argv[1:])
@@ -131,61 +147,61 @@ PY"
 }
 if [ "$REVIEW_MODE" = true ]; then
   LIVE_PREVIOUS_IMAGE_FINGERPRINT=${ROTATION_LIVE_PREVIOUS_IMAGE_FINGERPRINT:?required for isolated review}
-  review_sources "$C" "$SHA"
-  if [ -n "${ROTATION_TEST_SIGNER_COMMAND:-}" ]; then bash -c "$ROTATION_TEST_SIGNER_COMMAND"; fi
-  exit
-fi
-FP=$(openssl pkey -pubin -in ~/.local/share/self-hosted-ci/reviewer/reviewer-public-key.pem -outform DER | shasum -a 256 | awk '{print $1}')
-SUPERVISOR_SHA=$(git -C "$REPO" show "${SHA}:scripts/host/run-health-supervisor.ps1" | shasum -a 256 | awk '{print $1}')
-[[ "$SUPERVISOR_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "invalid supervisor SHA-256" >&2; exit 1; }
-mkdir -p $C/measured
-START=${START:-1}
-BACKUP_DIR=$C/backup; BACKUP_FILE=$BACKUP_DIR/run-health-supervisor.before-$SHA.ps1; BACKUP_HASH=$BACKUP_FILE.sha256
-if [ "$START" -le 1 ]; then
+  SIGNER_CALLBACK=test_signer
+else
+  FP=$(openssl pkey -pubin -in ~/.local/share/self-hosted-ci/reviewer/reviewer-public-key.pem -outform DER | shasum -a 256 | awk '{print $1}')
+  SUPERVISOR_SHA=$(git -C "$REPO" show "${SHA}:scripts/host/run-health-supervisor.ps1" | shasum -a 256 | awk '{print $1}')
+  [[ "$SUPERVISOR_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "invalid supervisor SHA-256" >&2; exit 1; }
+  mkdir -p $C/measured
+  START=${START:-1}
+  BACKUP_DIR=$C/backup; BACKUP_FILE=$BACKUP_DIR/run-health-supervisor.before-$SHA.ps1; BACKUP_HASH=$BACKUP_FILE.sha256
+  if [ "$START" -le 1 ]; then
   mkdir -p "$BACKUP_DIR"
   REMOTE_SUPERVISOR_SHA=$(ssh -o BatchMode=yes desktop 'powershell -NoProfile -NonInteractive -Command "(Get-FileHash -LiteralPath '\''C:\ProgramData\self-hosted-ci\control\run-health-supervisor.ps1'\'' -Algorithm SHA256).Hash.ToLowerInvariant()"' 2>&1 | LC_ALL=C tr -d '\0\r' | tail -n 1)
   [[ "$REMOTE_SUPERVISOR_SHA" =~ ^[0-9a-f]{64}$ ]] || { log "active supervisor backup hash unavailable"; exit 1; }
   scp -q 'desktop:C:/ProgramData/self-hosted-ci/control/run-health-supervisor.ps1' "$BACKUP_FILE"
   [ "$(shasum -a 256 "$BACKUP_FILE" | awk '{print $1}')" = "$REMOTE_SUPERVISOR_SHA" ] || { log "active supervisor backup hash mismatch"; exit 1; }
   printf '%s  %s\n' "$REMOTE_SUPERVISOR_SHA" "$(basename "$BACKUP_FILE")" > "$BACKUP_HASH"
-else
+  else
   [ -f "$BACKUP_FILE" ] && [ -f "$BACKUP_HASH" ] || { log "verified supervisor backup is missing on resume"; exit 1; }
   (cd "$BACKUP_DIR" && shasum -a 256 -c "$(basename "$BACKUP_HASH")") >/dev/null || { log "supervisor backup verification failed on resume"; exit 1; }
-fi
-[ "$START" -le 5 ] || U=$(ls $C/unsigned-*.tar | head -1 | sed -E "s/.*unsigned-([0-9a-f]+)\.tar/\1/")
-if [ "$START" -le 5 ]; then
+  fi
+  [ "$START" -le 5 ] || U=$(ls $C/unsigned-*.tar | head -1 | sed -E "s/.*unsigned-([0-9a-f]+)\.tar/\1/")
+  if [ "$START" -le 5 ]; then
 log "1 deploy package $SHA"; cd $REPO && git rev-parse --verify -q "$SHA" >/dev/null && $PY scripts/host/deploy-host-package.py --ssh-target desktop --ref $SHA --apply | tail -c 200; echo
 ssh -o BatchMode=yes desktop 'powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path C:\ProgramData\self-hosted-ci\package\artifacts\live-contract | Out-Null"' >/dev/null 2>&1
 log "2 source tar"; $PY scripts/host/build-wsl-jit-live-contract-tar.py source --contract-dir $BASE --output $C/source.tar >/dev/null; SSHA=$(shasum -a 256 $C/source.tar | awk '{print $1}'); SBYTES=$(stat -f %z $C/source.tar); scp -q $C/source.tar 'desktop:C:/ProgramData/self-hosted-ci/package/artifacts/live-contract/unsigned-live-contract-source.tar'
 log "3 uninstall supervisor"; mkop uninstall '& .\uninstall-health-supervisor.ps1 -ExpectedServiceAccountSid '"'"'$sid'"'"' -Apply -AcknowledgeTaskRemoval -AcknowledgeFinalPasswordRotation -AcknowledgeHealthArtifactRemoval'; runop uninstall 20 | grep -q '"status":"uninstalled"' || { log "uninstall failed"; exit 1; }
 log "4 collect unsigned"; mkop collect '& .\install-wsl-jit-live-contract.ps1 -ExpectedServiceAccountSid '"'"'$sid'"'"' -UnsignedSourceRelativePath '"'"'artifacts/live-contract/unsigned-live-contract-source.tar'"'"' -CollectUnsigned -Apply -ExpectedInputSha256 '"'"''"$SSHA"''"'"' -ExpectedInputBytes '"$SBYTES"' -AcknowledgeUnsignedCollection -AcknowledgeOneTimePasswordRotation'; OUT=$(runop collect 80); U=$(echo "$OUT" | grep -o '"unsigned_bundle_sha256":"[0-9a-f]*"' | cut -d'"' -f4); [ -n "$U" ] || { log "collect failed: $OUT"; exit 1; }
 log "5 fetch+review $U"; scp -q "desktop:C:/ProgramData/self-hosted-ci/unsigned-live-contract/unsigned-live-contract-$U.tar" $C/unsigned-$U.tar; [ "$(shasum -a 256 $C/unsigned-$U.tar | cut -c1-64)" = "$U" ] || { log "hash mismatch"; exit 1; }; rm -rf $C/measured && mkdir -p $C/measured && tar -xf $C/unsigned-$U.tar -C $C/measured
-fi
-if [ "$START" -gt 5 ]; then
+  fi
+  if [ "$START" -gt 5 ]; then
   [ "$(shasum -a 256 "$C/unsigned-$U.tar" | cut -c1-64)" = "$U" ] || { log "resume hash mismatch"; exit 1; }
   rm -rf "$C/measured" && mkdir -p "$C/measured" && tar -xf "$C/unsigned-$U.tar" -C "$C/measured"
-fi
-LIVE_PREVIOUS_IMAGE_FINGERPRINT=$(distro "set -euo pipefail; /usr/local/lib/self-hosted-ci/install-outbound-worker-runtime.py --verify >/dev/null; python3 - <<'PY'
+  fi
+  LIVE_PREVIOUS_IMAGE_FINGERPRINT=$(distro "set -euo pipefail; /usr/local/lib/self-hosted-ci/install-outbound-worker-runtime.py --verify >/dev/null; python3 - <<'PY'
 import json,re
 v=json.load(open('/etc/self-hosted-ci/outbound-worker.json',encoding='utf-8'))
 f=v.get('image_fingerprint')
 if not isinstance(f,str) or not re.fullmatch(r'[0-9a-f]{64}',f): raise SystemExit(1)
 print(f)
 PY")
-[[ "$LIVE_PREVIOUS_IMAGE_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] || { log "verified live previous fingerprint is invalid"; exit 1; }
-CANDIDATE=$(derive_candidate) || { echo "REVIEW_FAIL build receipt does not match versioned profile"; exit 1; }
-IFS=$'\t' read -r CANDIDATE_ALIAS CANDIDATE_FINGERPRINT <<<"$CANDIDATE"
-IMAGE_OBSERVATION_TMP=$(mktemp "$C/.image-observation.XXXXXX")
-collect_image_observation "$CANDIDATE_ALIAS" "$CANDIDATE_FINGERPRINT" >"$IMAGE_OBSERVATION_TMP" \
-  || { echo "REVIEW_FAIL published image observation failed"; exit 1; }
-chmod 600 "$IMAGE_OBSERVATION_TMP"
-mv -f "$IMAGE_OBSERVATION_TMP" "$IMAGE_OBSERVATION"
-review_sources "$C" "$SHA"
-IMAGE_ALIAS=$CANDIDATE_ALIAS
-IMAGE_FINGERPRINT=$CANDIDATE_FINGERPRINT
-PREVIOUS_IMAGE_FINGERPRINT=$LIVE_PREVIOUS_IMAGE_FINGERPRINT
-cd $REPO
-log "6 sign+bundle"; $PY scripts/host/sign-wsl-jit-boundary.py --input $C/measured/contract/runner-boundary-measured-v2.json --output $C/runner-boundary-v2.json --reviewer-private-key ~/.local/share/self-hosted-ci/reviewer/reviewer-private-key.pem >/dev/null; $PY scripts/host/build-wsl-jit-live-contract-tar.py signed --unsigned-tar $C/unsigned-$U.tar --signed-boundary $C/runner-boundary-v2.json --reviewer-public-key ~/.local/share/self-hosted-ci/reviewer/reviewer-public-key.pem --reviewer-key-fingerprint $FP --output $C/bundle.tar >/dev/null; BSHA=$(shasum -a 256 $C/bundle.tar | awk '{print $1}'); BBYTES=$(stat -f %z $C/bundle.tar); scp -q $C/bundle.tar 'desktop:C:/ProgramData/self-hosted-ci/package/artifacts/live-contract/live-contract-bundle.tar'
+  [[ "$LIVE_PREVIOUS_IMAGE_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] || { log "verified live previous fingerprint is invalid"; exit 1; }
+  CANDIDATE=$(derive_candidate) || { echo "REVIEW_FAIL build receipt does not match versioned profile"; exit 1; }
+  IFS=$'\t' read -r CANDIDATE_ALIAS CANDIDATE_FINGERPRINT <<<"$CANDIDATE"
+  IMAGE_OBSERVATION_TMP=$(mktemp "$C/.image-observation.XXXXXX")
+  collect_image_observation "$CANDIDATE_ALIAS" "$CANDIDATE_FINGERPRINT" >"$IMAGE_OBSERVATION_TMP" \
+    || { echo "REVIEW_FAIL published image observation failed"; exit 1; }
+  chmod 600 "$IMAGE_OBSERVATION_TMP"
+  mv -f "$IMAGE_OBSERVATION_TMP" "$IMAGE_OBSERVATION"
+  IMAGE_ALIAS=$CANDIDATE_ALIAS
+  IMAGE_FINGERPRINT=$CANDIDATE_FINGERPRINT
+  PREVIOUS_IMAGE_FINGERPRINT=$LIVE_PREVIOUS_IMAGE_FINGERPRINT
+  SIGNER_CALLBACK=real_signer
+fi
+review_then_sign "$C" "$SHA" "$SIGNER_CALLBACK"
+if [ "$REVIEW_MODE" = true ]; then exit; fi
+scp -q "$C/bundle.tar" 'desktop:C:/ProgramData/self-hosted-ci/package/artifacts/live-contract/live-contract-bundle.tar'
 log "7 signed apply $BSHA"; mkop apply '& .\install-wsl-jit-live-contract.ps1 -ExpectedServiceAccountSid '"'"'$sid'"'"' -BundleRelativePath '"'"'artifacts/live-contract/live-contract-bundle.tar'"'"' -ExpectedInputSha256 '"'"''"$BSHA"''"'"' -ExpectedInputBytes '"$BBYTES"' -ExpectedReviewerFingerprint '"'"''"$FP"''"'"' -Apply -AcknowledgeLiveContractMutation -AcknowledgeExternalGitHubMutation -AcknowledgeLocalCiDeactivation -AcknowledgeOneTimePasswordRotation'; runop apply 90 | grep -q '"status":"installed"' || { log "apply failed"; exit 1; }
 log "8 verify + configure + activate"; distro "set -euo pipefail; /usr/local/lib/self-hosted-ci/verify-wsl-jit-readiness.py --evidence /etc/self-hosted-ci/runner-boundary-v2.json --measurement-root /etc/self-hosted-ci/host-evidence --reviewer-public-key /etc/self-hosted-ci/boundary-reviewer-public-key.pem --pinned-fingerprint '$FP'; python3 -c 'import json; v=json.load(open(\"/etc/self-hosted-ci/outbound-worker.json\")); claim=v.get(\"claim_deadline_seconds\",720); approval=v[\"approval_ttl_seconds\"]; assert claim==720 and approval==240 and claim>approval; print(json.dumps({\"approval_ttl_seconds\":approval,\"claim_deadline_seconds_effective\":claim},sort_keys=True,separators=(\",\",\":\")))'; bash /usr/local/lib/self-hosted-ci/configure-garm-jit.sh --apply --config-template /etc/self-hosted-ci/garm/config.toml.example --jwt-secret-file /root/self-hosted-ci-secrets/jwt --database-passphrase-file /root/self-hosted-ci-secrets/db-passphrase --garm-admin-username-file /root/self-hosted-ci-secrets/admin-username --garm-admin-password-file /root/self-hosted-ci-secrets/admin-password --runner-manager-app-config-file /etc/self-hosted-ci/overworld-runner-manager-app.json --dispatcher-app-config-file /etc/self-hosted-ci/overworld-dispatcher-app.json --live-job-verifier-app-config-file /etc/self-hosted-ci/overworld-live-job-verifier-app.json --garm-cli-home /run/self-hosted-ci-broker/garm-cli --authority-kind organization-runner-group --repository alethia-earth/Overworld --repository-id 1172953958 --default-branch master --entity-name alethia-earth --runner-group overworld-ci-jit --image-alias '$IMAGE_ALIAS' --image-fingerprint '$IMAGE_FINGERPRINT' --expected-previous-image-fingerprint '$PREVIOUS_IMAGE_FINGERPRINT' --allocation-authority-public-key /root/self-hosted-ci-secrets/allocation-public-key.pem --live-job-verifier /usr/local/libexec/self-hosted-ci/github-live-job-verifier.py --acknowledge-root-secret-installation --acknowledge-garm-database-mutation --acknowledge-external-github-configuration; python3 /usr/local/lib/self-hosted-ci/install-outbound-worker-runtime.py --verify; bash /usr/local/lib/self-hosted-ci/activate-garm-jit.sh --apply --incus-project ci-jit --garm-cli-home /run/self-hosted-ci-broker/garm-cli --acknowledge-external-github-mutation --acknowledge-local-ci-activation; sleep 5; systemctl is-active self-hosted-ci-garm.service self-hosted-ci-allocation-broker.service self-hosted-ci-outbound-worker.service self-hosted-ci-egress-proxy.service self-hosted-ci-network-policy.service self-hosted-ci-boundary-verify.service self-hosted-ci-health-heartbeat.timer | tr '\n' ' '; echo"
 log "9 reinstall supervisor"; mkop install "& .\install-health-supervisor.ps1 -ExpectedServiceAccountSid '\$sid' -ReaderAccount '\$reader' -ExpectedSupervisorSha256 '$SUPERVISOR_SHA' -Apply -AcknowledgePersistentPasswordTask -AcknowledgeServiceAccountPasswordRotation -AcknowledgeProtectedHealthAcls"; OUT=$(runop install 40); printf '%s\n' "$OUT" | python3 -c 'import json,sys; expected=sys.argv[1]; values=[]
