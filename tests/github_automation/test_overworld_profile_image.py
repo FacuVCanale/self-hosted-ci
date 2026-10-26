@@ -735,6 +735,39 @@ class OverworldProfileImageTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "broken"):
                 module.verify_frontend_eslint_link(root)
 
+    def test_image_verifier_requires_exact_confined_next_package_identity(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "overworld_image_verify_next", PROFILE / "verify.py"
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "frontend-node-modules"
+            package_root = root / "next"
+            package_root.mkdir(parents=True)
+            package = package_root / "package.json"
+            package.write_text(
+                '{"name":"next","version":"16.4.1"}\n', encoding="utf-8"
+            )
+            module.verify_frontend_next_package(root)
+
+            package.write_text(
+                '{"name":"next","version":"16.2.3"}\n', encoding="utf-8"
+            )
+            with self.assertRaisesRegex(SystemExit, "identity drifted"):
+                module.verify_frontend_next_package(root)
+
+            package.unlink()
+            outside = Path(directory) / "outside-package.json"
+            outside.write_text(
+                '{"name":"next","version":"16.4.1"}\n', encoding="utf-8"
+            )
+            package.symlink_to(outside)
+            with self.assertRaisesRegex(SystemExit, "absent or unsafe"):
+                module.verify_frontend_next_package(root)
+
     def verify_expected_toolchain(self) -> dict[str, str]:
         tree = ast.parse((PROFILE / "verify.py").read_text(encoding="utf-8"))
         literals = [
@@ -812,7 +845,14 @@ class OverworldProfileImageTests(unittest.TestCase):
         self.assertEqual("1.4.0", manifest["artifacts"]["bun"]["version"])
         self.assertEqual("1.1.408", manifest["artifacts"]["pyright"]["version"])
         self.assertEqual("1.59.1", manifest["artifacts"]["playwright"]["version"])
-        self.assertEqual("16.2.3", manifest["artifacts"]["next"]["version"])
+        self.assertEqual(
+            {
+                "version": "16.4.1",
+                "url": "https://registry.npmjs.org/next/-/next-16.4.1.tgz",
+                "sha256": "2e5dc3186f842e4871b99aa2b8dedb80677a823f8628b37b46de024f38cf8906",
+            },
+            manifest["artifacts"]["next"],
+        )
         self.assertEqual("1217", manifest["artifacts"]["chromium"]["revision"])
         self.assertEqual("1217", manifest["artifacts"]["chromium_headless_shell"]["revision"])
         self.assertEqual(
@@ -1351,7 +1391,7 @@ cleanup
         self.assertIn('"UV_OFFLINE=1", "UV_NO_SYNC=1"', source)
         self.assertIn('"python", "-c", "import waterfall"', source)
         self.assertIn('downloaded["next"], next_package', source)
-        self.assertIn('next_metadata.get("version") != "16.2.3"', source)
+        self.assertIn('next_metadata.get("version") != "16.4.1"', source)
         self.assertIn('shutil.copytree(next_package, installed_next, symlinks=False)', source)
         self.assertIn('detach_regular_files(installed_next)', source)
         self.assertEqual(3, source.count('copy_dependency_tree(') - 1)
@@ -1383,6 +1423,7 @@ cleanup
         self.assertNotIn('dependencies / "uv-cache"', verifier_source)
         self.assertIn('if any(dependencies.rglob(".git")):', verifier_source)
         self.assertIn('frontend-node_modules/next/dist/server/dev/browser-logs/file-logger.js', verifier_source)
+        self.assertIn('package_metadata.get("version") != "16.4.1"', verifier_source)
         profile_value = json.loads(
             (ROOT / "repository_profiles/overworld/profile.json").read_text(
                 encoding="utf-8"

@@ -102,7 +102,7 @@ def _exact_toolchain(value: object) -> Mapping[str, str]:
         "postgis_e2e": "3.5",
         "python": "3.12",
         "uv": "0.8.22",
-        "waterfall_revision": "6df90210830b2ebe36eda6b96d91237914d000e4",
+        "waterfall_revision": "a5834a2f7665f956297c03cc32e5601b097bffbe",
     }
     if value != expected:
         raise RepositoryProfileError("toolchain values are not the pinned Overworld contract")
@@ -145,12 +145,12 @@ def load_profile(
     expected_snapshots = {
         "backend": {
             "lock_path": "backend/bun.lock",
-            "lock_sha256": "b235110fe83b4b3a4eafb337efc0bb8d7424aea33a72f0338b2192892ce79fdb",
+            "lock_sha256": "5e99b30664687cf49dc142e65739c49f31213d9faa5477aeff37d4ab9bf795a8",
             "node_modules_path": "/opt/self-hosted-ci/overworld-deps/backend-node_modules",
         },
         "frontend": {
             "lock_path": "frontend/bun.lock",
-            "lock_sha256": "6004b42bc89358fc0d83f81f8015658246139ce830e1e569279700850e5d63b3",
+            "lock_sha256": "2d7a3760004adf177c07963bfcef3ea21a6336d3cb25ab0caccec05fc87d4049",
             "node_modules_path": "/opt/self-hosted-ci/overworld-deps/frontend-node_modules",
         },
     }

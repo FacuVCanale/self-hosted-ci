@@ -86,6 +86,29 @@ def verify_frontend_eslint_link(frontend_modules: Path) -> None:
         raise SystemExit("frontend eslint package identity drifted")
 
 
+def verify_frontend_next_package(frontend_modules: Path) -> None:
+    if frontend_modules.is_symlink() or not frontend_modules.is_dir():
+        raise SystemExit("frontend dependency root is unsafe")
+    canonical_root = frontend_modules.resolve(strict=True)
+    package_root = canonical_root / "next"
+    package = package_root / "package.json"
+    if (
+        package_root.is_symlink()
+        or not package_root.is_dir()
+        or package_root.resolve(strict=True) != package_root
+        or package.is_symlink()
+        or not package.is_file()
+        or package.resolve(strict=True).parent != package_root
+    ):
+        raise SystemExit("frontend Next.js package metadata is absent or unsafe")
+    try:
+        package_metadata = json.loads(package.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit("frontend Next.js package metadata is invalid") from exc
+    if package_metadata.get("name") != "next" or package_metadata.get("version") != "16.4.1":
+        raise SystemExit("frontend Next.js package identity drifted")
+
+
 def verify_profile_assets(inventory: object) -> None:
     if inventory != EXPECTED_PROFILE_ASSETS:
         raise SystemExit("image inventory profile assets drifted")
@@ -162,17 +185,17 @@ def main() -> int:
         "node": "22.23.2",
         "playwright": "1.59.1", "postgresql_backend": "16", "postgis_backend": "3.4",
         "postgresql_e2e": "17", "postgis_e2e": "3.5", "python": "3.12", "uv": "0.8.22",
-        "waterfall_revision": "6df90210830b2ebe36eda6b96d91237914d000e4",
+        "waterfall_revision": "a5834a2f7665f956297c03cc32e5601b097bffbe",
     }
     expected_snapshots = {
         "backend": {
             "lock_path": "backend/bun.lock",
-            "lock_sha256": "b235110fe83b4b3a4eafb337efc0bb8d7424aea33a72f0338b2192892ce79fdb",
+            "lock_sha256": "5e99b30664687cf49dc142e65739c49f31213d9faa5477aeff37d4ab9bf795a8",
             "node_modules_path": "/opt/self-hosted-ci/overworld-deps/backend-node_modules",
         },
         "frontend": {
             "lock_path": "frontend/bun.lock",
-            "lock_sha256": "6004b42bc89358fc0d83f81f8015658246139ce830e1e569279700850e5d63b3",
+            "lock_sha256": "2d7a3760004adf177c07963bfcef3ea21a6336d3cb25ab0caccec05fc87d4049",
             "node_modules_path": "/opt/self-hosted-ci/overworld-deps/frontend-node_modules",
         },
     }
@@ -221,6 +244,9 @@ def main() -> int:
     waterfall_python = dependencies / "waterfall/.venv/bin/python"
     verify_runner_executable(waterfall_python)
     verify_frontend_eslint_link(
+        Path(expected_snapshots["frontend"]["node_modules_path"])
+    )
+    verify_frontend_next_package(
         Path(expected_snapshots["frontend"]["node_modules_path"])
     )
     if (dependencies / "waterfall/.self-hosted-ci-commit").read_text(encoding="ascii").strip() != expected_toolchain["waterfall_revision"]:
