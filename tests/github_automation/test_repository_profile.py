@@ -131,12 +131,12 @@ class RepositoryProfileTests(unittest.TestCase):
             {
                 "backend": {
                     "lock_path": "backend/bun.lock",
-                    "lock_sha256": "b235110fe83b4b3a4eafb337efc0bb8d7424aea33a72f0338b2192892ce79fdb",
+                    "lock_sha256": "5e99b30664687cf49dc142e65739c49f31213d9faa5477aeff37d4ab9bf795a8",
                     "node_modules_path": "/opt/self-hosted-ci/overworld-deps/backend-node_modules",
                 },
                 "frontend": {
                     "lock_path": "frontend/bun.lock",
-                    "lock_sha256": "6004b42bc89358fc0d83f81f8015658246139ce830e1e569279700850e5d63b3",
+                    "lock_sha256": "2d7a3760004adf177c07963bfcef3ea21a6336d3cb25ab0caccec05fc87d4049",
                     "node_modules_path": "/opt/self-hosted-ci/overworld-deps/frontend-node_modules",
                 },
             },
@@ -145,8 +145,25 @@ class RepositoryProfileTests(unittest.TestCase):
         self.assertEqual("0.8.22", profile["toolchain"]["uv"])
         self.assertEqual("22.23.2", profile["toolchain"]["node"])
         self.assertEqual(
-            "ef71e617f0066f4e058272e54f3465634ea2decb4a5be4ab8ce66b81b8be8573",
+            "a5834a2f7665f956297c03cc32e5601b097bffbe",
+            profile["toolchain"]["waterfall_revision"],
+        )
+        self.assertEqual(
+            "f85991235a71b5e06f63812ef54d3cfaa9902328c0e660416be33e8f8209c906",
             profile["runner_script_sha256"],
+        )
+        runner = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn(
+            "readonly WATERFALL_REVISION=a5834a2f7665f956297c03cc32e5601b097bffbe",
+            runner,
+        )
+        self.assertIn(
+            "readonly BACKEND_LOCK_SHA256=5e99b30664687cf49dc142e65739c49f31213d9faa5477aeff37d4ab9bf795a8",
+            runner,
+        )
+        self.assertIn(
+            "readonly FRONTEND_LOCK_SHA256=2d7a3760004adf177c07963bfcef3ea21a6336d3cb25ab0caccec05fc87d4049",
+            runner,
         )
         self.assertEqual(SCRIPT, script)
 
