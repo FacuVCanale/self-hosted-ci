@@ -86,6 +86,29 @@ def verify_frontend_eslint_link(frontend_modules: Path) -> None:
         raise SystemExit("frontend eslint package identity drifted")
 
 
+def verify_frontend_next_package(frontend_modules: Path) -> None:
+    if frontend_modules.is_symlink() or not frontend_modules.is_dir():
+        raise SystemExit("frontend dependency root is unsafe")
+    canonical_root = frontend_modules.resolve(strict=True)
+    package_root = canonical_root / "next"
+    package = package_root / "package.json"
+    if (
+        package_root.is_symlink()
+        or not package_root.is_dir()
+        or package_root.resolve(strict=True) != package_root
+        or package.is_symlink()
+        or not package.is_file()
+        or package.resolve(strict=True).parent != package_root
+    ):
+        raise SystemExit("frontend Next.js package metadata is absent or unsafe")
+    try:
+        package_metadata = json.loads(package.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit("frontend Next.js package metadata is invalid") from exc
+    if package_metadata.get("name") != "next" or package_metadata.get("version") != "16.4.1":
+        raise SystemExit("frontend Next.js package identity drifted")
+
+
 def verify_profile_assets(inventory: object) -> None:
     if inventory != EXPECTED_PROFILE_ASSETS:
         raise SystemExit("image inventory profile assets drifted")
@@ -221,6 +244,9 @@ def main() -> int:
     waterfall_python = dependencies / "waterfall/.venv/bin/python"
     verify_runner_executable(waterfall_python)
     verify_frontend_eslint_link(
+        Path(expected_snapshots["frontend"]["node_modules_path"])
+    )
+    verify_frontend_next_package(
         Path(expected_snapshots["frontend"]["node_modules_path"])
     )
     if (dependencies / "waterfall/.self-hosted-ci-commit").read_text(encoding="ascii").strip() != expected_toolchain["waterfall_revision"]:

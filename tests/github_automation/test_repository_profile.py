@@ -1799,12 +1799,12 @@ printf 'MINIO_ROOT_PASSWORD_AFTER=%s\n' "${{MINIO_ROOT_PASSWORD-unset}}"
                 for candidate in candidates
                 if (candidate / "next/package.json").is_file()
                 and json.loads((candidate / "next/package.json").read_text()).get("version")
-                == "16.2.3"
+                == "16.4.1"
             ),
             None,
         )
         if node_modules is None:
-            self.skipTest("Next 16.2.3 node_modules is not available")
+            self.skipTest("Next 16.4.1 node_modules is not available")
         script = r"""
 const crypto = require('node:crypto');
 const path = require('node:path');

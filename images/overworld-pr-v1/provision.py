@@ -554,7 +554,7 @@ committed=true
         next_package = Path("/var/tmp/self-hosted-ci-next-package")
         extract_npm(downloaded["next"], next_package)
         next_metadata = json.loads((next_package / "package.json").read_text(encoding="utf-8"))
-        if next_metadata.get("name") != "next" or next_metadata.get("version") != "16.2.3":
+        if next_metadata.get("name") != "next" or next_metadata.get("version") != "16.4.1":
             raise SystemExit("pinned Next.js package identity drifted")
         if not (next_package / "dist/server/dev/browser-logs/file-logger.js").is_file():
             raise SystemExit("pinned Next.js package is incomplete")
@@ -723,7 +723,7 @@ committed=true
                 "NO_PROXY=", "no_proxy=", str(node_path),
                 str(modules / "next/dist/bin/next"), "--version",
                 cwd=component_root,
-            ) != "Next.js v16.2.3":
+            ) != "Next.js v16.4.1":
                 raise SystemExit("pinned Next.js Node entrypoint smoke drifted")
             if run(
                 "runuser", "-u", "runner", "--", "env",
