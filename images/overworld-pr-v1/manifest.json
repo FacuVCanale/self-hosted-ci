@@ -32,15 +32,15 @@
       "sha256": "16f73d4281d00ddbd549d5dbe574d0f2cf0aec34f276f91bd6ae63fe1001473e"
     },
     "playwright": {
-      "version": "1.59.1",
-      "chromium_revision": "1217",
-      "url": "https://registry.npmjs.org/playwright/-/playwright-1.59.1.tgz",
-      "sha256": "7a688a725929f2325b345997845b1ca50ace7798e76ae49b61516f83e08388ef"
+      "version": "1.64.1",
+      "chromium_revision": "1248",
+      "url": "https://registry.npmjs.org/playwright/-/playwright-1.64.1.tgz",
+      "sha256": "36ba838d2d55c44fafcff89f919b5d7bc829209318076578ee2bc7cb5687fd57"
     },
     "playwright_core": {
-      "version": "1.59.1",
-      "url": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.59.1.tgz",
-      "sha256": "22304c3d9106ed8372ff58656f645a93bc3a2b17df8567f1413079a730d8d6fa"
+      "version": "1.64.1",
+      "url": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.64.1.tgz",
+      "sha256": "3af03703c967c95037454f2283f709d53ce804a4776d4219d319f5bbcc2a0185"
     },
     "next": {
       "version": "16.4.1",
@@ -48,16 +48,16 @@
       "sha256": "2e5dc3186f842e4871b99aa2b8dedb80677a823f8628b37b46de024f38cf8906"
     },
     "chromium": {
-      "version": "147.0.7727.15",
-      "revision": "1217",
-      "url": "https://storage.googleapis.com/chrome-for-testing-public/147.0.7727.15/linux64/chrome-linux64.zip",
-      "sha256": "04883e331b31448d6255fa058f0e1c7e8657c004da1f8a1c04eb28855a37ec6c"
+      "version": "156.0.8078.4",
+      "revision": "1248",
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.4/linux64/chrome-linux64.zip",
+      "sha256": "43fd31766c7533a02dda2ded5ad50c2f861cd5400be7509c0abad71129f79d79"
     },
     "chromium_headless_shell": {
-      "version": "147.0.7727.15",
-      "revision": "1217",
-      "url": "https://storage.googleapis.com/chrome-for-testing-public/147.0.7727.15/linux64/chrome-headless-shell-linux64.zip",
-      "sha256": "cf779cd5486f3fc5a18bea4ac606026a1667ae16efaee15af51bd3ad3ae01092"
+      "version": "156.0.8078.4",
+      "revision": "1248",
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.4/linux64/chrome-headless-shell-linux64.zip",
+      "sha256": "c3e50596aef52c58f8fda3c6b3411c33d34c88b177b3ed1c2243359fd3b8ba20"
     },
     "minio": {
       "version": "RELEASE.2025-09-07T16-13-09Z",

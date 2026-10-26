@@ -95,7 +95,7 @@ def _exact_toolchain(value: object) -> Mapping[str, str]:
         "garm": "0.2.1",
         "minio": "RELEASE.2025-09-07T16-13-09Z",
         "node": "22.23.2",
-        "playwright": "1.59.1",
+        "playwright": "1.64.1",
         "postgresql_backend": "16",
         "postgis_backend": "3.4",
         "postgresql_e2e": "17",
@@ -150,7 +150,7 @@ def load_profile(
         },
         "frontend": {
             "lock_path": "frontend/bun.lock",
-            "lock_sha256": "2d7a3760004adf177c07963bfcef3ea21a6336d3cb25ab0caccec05fc87d4049",
+            "lock_sha256": "8941c2bb73910448c2c835526ea26a3a52d37a010f496cd28c8ef5fec196e351",
             "node_modules_path": "/opt/self-hosted-ci/overworld-deps/frontend-node_modules",
         },
     }

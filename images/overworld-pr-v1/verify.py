@@ -183,7 +183,7 @@ def main() -> int:
     expected_toolchain = {
         "bun": "1.4.0", "garm": "0.2.1", "minio": "RELEASE.2025-09-07T16-13-09Z",
         "node": "22.23.2",
-        "playwright": "1.59.1", "postgresql_backend": "16", "postgis_backend": "3.4",
+        "playwright": "1.64.1", "postgresql_backend": "16", "postgis_backend": "3.4",
         "postgresql_e2e": "17", "postgis_e2e": "3.5", "python": "3.12", "uv": "0.8.22",
         "waterfall_revision": "a5834a2f7665f956297c03cc32e5601b097bffbe",
     }
@@ -195,7 +195,7 @@ def main() -> int:
         },
         "frontend": {
             "lock_path": "frontend/bun.lock",
-            "lock_sha256": "2d7a3760004adf177c07963bfcef3ea21a6336d3cb25ab0caccec05fc87d4049",
+            "lock_sha256": "8941c2bb73910448c2c835526ea26a3a52d37a010f496cd28c8ef5fec196e351",
             "node_modules_path": "/opt/self-hosted-ci/overworld-deps/frontend-node_modules",
         },
     }
@@ -221,12 +221,12 @@ def main() -> int:
         "bun": ("bun", "--version", "1.4.0"),
         "uv": ("uv", "--version", "0.8.22"),
         "pyright": ("pyright", "--version", "1.1.408"),
-        "playwright": ("playwright", "--version", "1.59.1"),
+        "playwright": ("playwright", "--version", "1.64.1"),
     }
     for name, (*command, version) in checks.items():
         if version not in output(*command):
             raise SystemExit(f"{name} version drifted")
-    if not list(Path("/opt/ms-playwright").glob("chromium-1217*")):
+    if not list(Path("/opt/ms-playwright").glob("chromium-1248*")):
         raise SystemExit("pinned Playwright Chromium is absent")
     dependencies = Path("/opt/self-hosted-ci/overworld-deps")
     for required in (
@@ -237,7 +237,7 @@ def main() -> int:
         dependencies / "waterfall/.venv/bin/pyright",
         dependencies / "frontend-node_modules/next/dist/server/dev/browser-logs/file-logger.js",
         Path("/opt/self-hosted-ci/browsers/chromium/chrome"),
-        Path("/opt/ms-playwright/chromium_headless_shell-1217/chrome-headless-shell-linux64/chrome-headless-shell"),
+        Path("/opt/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-linux64/chrome-headless-shell"),
     ):
         if not required.exists():
             raise SystemExit(f"offline dependency is absent: {required}")
