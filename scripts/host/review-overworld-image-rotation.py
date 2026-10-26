@@ -94,6 +94,8 @@ def review_rotation(
         raise ReviewError("versioned profile or manifest is not an object")
     profile_digest, manifest_digest = sha256(profile_path), sha256(manifest_path)
     image_profile = manifest.get("profile")
+    if image_profile != "overworld-pr-v1":
+        raise ReviewError("versioned manifest profile is invalid")
     expected_alias = f"{image_profile}-{profile_digest[:12]}"
     digests = (receipt.get("base_fingerprint"), receipt.get("fingerprint"), live_previous_fingerprint)
     if any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in digests):

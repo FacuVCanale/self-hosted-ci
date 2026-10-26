@@ -1,14 +1,21 @@
 import json
 import hashlib
+import importlib.util
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "scripts/install-agent-interfaces.py"
+SPEC = importlib.util.spec_from_file_location("install_agent_interfaces", INSTALLER)
+assert SPEC and SPEC.loader
+INSTALLER_MODULE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(INSTALLER_MODULE)
 
 
 class InstallAgentInterfacesTests(unittest.TestCase):
@@ -107,6 +114,54 @@ class InstallAgentInterfacesTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(committed).hexdigest(), value["installed_ceremony_sha256"])
         self.assertEqual(0o700, target.stat().st_mode & 0o777)
         self.assertEqual(0o600, receipt.stat().st_mode & 0o777)
+
+    def test_rotation_install_rolls_back_exact_bytes_and_modes_after_receipt_write(self):
+        sha = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+        for preexisting in (True, False):
+            with self.subTest(preexisting=preexisting), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                key = home / "id_ed25519"
+                key.write_text("test", encoding="utf-8")
+                config = home / ".config/self-hosted-ci/config.json"
+                target = home / ".local/share/self-hosted-ci/ceremony.sh"
+                receipt = home / ".config/self-hosted-ci/rotation-ceremony-install.json"
+                old_target = b"old ceremony exact\n"
+                old_receipt = b'{"old":"receipt"}\n'
+                if preexisting:
+                    target.parent.mkdir(parents=True)
+                    receipt.parent.mkdir(parents=True)
+                    target.write_bytes(old_target)
+                    receipt.write_bytes(old_receipt)
+                    target.chmod(0o711)
+                    receipt.chmod(0o640)
+                arguments = [
+                    str(INSTALLER), "--ssh-target", "selfhosted-ci-svc@example",
+                    "--ssh-key", str(key), "--public-sha", sha,
+                    "--config", str(config), "--bin-dir", str(home / ".local/bin"),
+                    "--install-rotation-ceremony", "--acknowledge-rotation-ceremony-replacement",
+                    "--rotation-ceremony-target", str(target),
+                    "--rotation-ceremony-receipt", str(receipt),
+                ]
+                real_write = INSTALLER_MODULE.atomic_private_json
+
+                def fail_config(path: Path, value: dict[str, object]) -> None:
+                    if path == config:
+                        raise OSError("induced config commit failure")
+                    real_write(path, value)
+
+                with mock.patch.object(sys, "argv", arguments), mock.patch.object(
+                    INSTALLER_MODULE, "atomic_private_json", side_effect=fail_config
+                ), mock.patch.dict(os.environ, {"HOME": str(home)}):
+                    with self.assertRaisesRegex(OSError, "induced config commit failure"):
+                        INSTALLER_MODULE.main()
+                if preexisting:
+                    self.assertEqual(old_target, target.read_bytes())
+                    self.assertEqual(old_receipt, receipt.read_bytes())
+                    self.assertEqual(0o711, target.stat().st_mode & 0o777)
+                    self.assertEqual(0o640, receipt.stat().st_mode & 0o777)
+                else:
+                    self.assertFalse(target.exists())
+                    self.assertFalse(receipt.exists())
 
 
 if __name__ == "__main__":

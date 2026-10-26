@@ -1,27 +1,55 @@
 #!/bin/bash
 # Versioned live-contract and image-rotation ceremony. Usage: ceremony.sh <full-sha>
 set -euo pipefail
+umask 077
 [[ $# -eq 1 && "$1" =~ ^[0-9a-f]{40,64}$ ]] || { echo "usage: $0 <full-sha>" >&2; exit 2; }
-SHA=$1; C=~/.local/share/self-hosted-ci/live-contract-ceremony-$SHA; PY=~/code/self-hosted-ci/.venv/bin/python; REPO=~/code/self-hosted-ci; SCR=$(cd "$(dirname "$0")" && pwd)
+SHA=$1; REVIEW_MODE=${REVIEW_ONLY:-false}; C=~/.local/share/self-hosted-ci/live-contract-ceremony-$SHA; PY=~/code/self-hosted-ci/.venv/bin/python; REPO=~/code/self-hosted-ci; SCR=$(cd "$(dirname "$0")" && pwd)
+if [ "$REVIEW_MODE" = true ]; then
+  REPO=${CEREMONY_TEST_REPOSITORY:-$REPO}
+  PY=${CEREMONY_TEST_PYTHON:-python3}
+fi
 CONFIG=~/.config/self-hosted-ci/config.json
-CONNECTION=$(python3 - "$CONFIG" <<'PY'
+INSTALL_RECEIPT=~/.config/self-hosted-ci/rotation-ceremony-install.json
+CONNECTION=$(python3 - "$CONFIG" "$INSTALL_RECEIPT" "$SHA" "$0" "$REPO" <<'PY'
+import hashlib
 import json,pathlib,re,sys
-p=pathlib.Path(sys.argv[1]); v=json.loads(p.read_text(encoding="utf-8"))
+p,receipt_path,sha,ceremony,repo=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2]),sys.argv[3],pathlib.Path(sys.argv[4]),pathlib.Path(sys.argv[5])
+v=json.loads(p.read_text(encoding="utf-8")); receipt=json.loads(receipt_path.read_text(encoding="utf-8"))
 if set(v)!={"distro","public_repository","public_sha","ssh_key","ssh_target"}: raise SystemExit("canonical config fields are not exact")
+if v["public_sha"]!=sha or v["public_repository"]!="FacuVCanale/self-hosted-ci": raise SystemExit("canonical config source identity drifted")
+if set(receipt)!={"install_receipt_version","installed_ceremony_sha256","previous_ceremony_sha256","public_sha"} or receipt["install_receipt_version"]!=1 or receipt["public_sha"]!=sha: raise SystemExit("ceremony install receipt identity drifted")
+ceremony_bytes=ceremony.read_bytes()
+if hashlib.sha256(ceremony_bytes).hexdigest()!=receipt["installed_ceremony_sha256"]: raise SystemExit("installed ceremony hash drifted")
+head=__import__('subprocess').check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+if head!=sha: raise SystemExit("repository HEAD differs from requested SHA")
+if __import__('subprocess').check_output(['git','-C',str(repo),'status','--porcelain']): raise SystemExit("repository checkout is dirty")
 if not re.fullmatch(r"[A-Za-z0-9_.@-]+",v["ssh_target"]): raise SystemExit("service SSH target is invalid")
 if not re.fullmatch(r"[A-Za-z0-9_.-]+",v["distro"]): raise SystemExit("distro is invalid")
 print("\t".join((v["ssh_key"],v["ssh_target"],v["distro"])))
 PY
 )
 IFS=$'\t' read -r KEY SVC DISTRO <<<"$CONNECTION"
-FP=$(openssl pkey -pubin -in ~/.local/share/self-hosted-ci/reviewer/reviewer-public-key.pem -outform DER | shasum -a 256 | awk '{print $1}')
-RECEIPT=${ROTATION_RECEIPT:-$C/build-receipt.json}
+RECEIPT=$C/build-receipt.json
 PROFILE=$REPO/repository_profiles/overworld/profile.json
 MANIFEST=$REPO/images/overworld-pr-v1/manifest.json
-IMAGE_OBSERVATION=${ROTATION_IMAGE_OBSERVATION:-$C/image-observation.json}
+REVIEWER=$REPO/scripts/host/review-overworld-image-rotation.py
+SIGNER=$REPO/scripts/host/sign-wsl-jit-boundary.py
+PACKAGER=$REPO/scripts/host/build-wsl-jit-live-contract-tar.py
+IMAGE_OBSERVATION=$C/image-observation.json
+if [ "$REVIEW_MODE" = true ]; then
+  C=${REVIEW_C:-$C}; RECEIPT=${ROTATION_RECEIPT:-$C/build-receipt.json}
+  PROFILE=${ROTATION_PROFILE:-$PROFILE}; MANIFEST=${ROTATION_MANIFEST:-$MANIFEST}
+  REVIEWER=${ROTATION_REVIEWER:-$REVIEWER}; IMAGE_OBSERVATION=${ROTATION_IMAGE_OBSERVATION:-$C/image-observation.json}
+fi
+python3 - "$REPO" "$SHA" "$0" "$PROFILE" "$MANIFEST" "$REVIEWER" "$SIGNER" "$PACKAGER" <<'PY' || { echo "REVIEW_FAIL source identity mismatch"; exit 1; }
+import pathlib,subprocess,sys
+repo,sha=pathlib.Path(sys.argv[1]),sys.argv[2]
+paths=[pathlib.Path(value) for value in sys.argv[3:]]
+names=["scripts/host/run-overworld-rotation-ceremony.sh","repository_profiles/overworld/profile.json","images/overworld-pr-v1/manifest.json","scripts/host/review-overworld-image-rotation.py","scripts/host/sign-wsl-jit-boundary.py","scripts/host/build-wsl-jit-live-contract-tar.py"]
+for path,name in zip(paths,names,strict=True):
+ if not path.is_file() or path.is_symlink() or path.read_bytes()!=subprocess.check_output(["git","-C",str(repo),"show",f"{sha}:{name}"]): raise SystemExit(f"source identity mismatch: {name}")
+PY
 BASE=~/.local/share/self-hosted-ci/live-contract-ceremony-7c0e603/base/b6c9ff10/contract
-SUPERVISOR_SHA=$(git -C "$REPO" show "${SHA}:scripts/host/run-health-supervisor.ps1" | shasum -a 256 | awk '{print $1}')
-[[ "$SUPERVISOR_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "invalid supervisor SHA-256" >&2; exit 1; }
 log(){ echo "$(date -u +%H:%M:%SZ) [ceremony] $*"; }
 mkop() { STEP=$1; INNER=$2; cat > $SCR/op-$STEP.ps1 <<PS
 \$ProgressPreference='SilentlyContinue'
@@ -56,7 +84,7 @@ runop() { STEP=$1; MAXI=${2:-30}; ENC=$(iconv -f UTF-8 -t UTF-16LE $SCR/op-$STEP
 DISTRO_SAFE=$(printf '%q' "$DISTRO")
 distro(){ local B; B=$(printf '%s' "$1" | base64 | tr -d '\n'); ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15 "$SVC" "wsl -d $DISTRO_SAFE -u root --exec bash -c \"echo $B | base64 -d | bash\"" 2>&1 | LC_ALL=C tr -d '\0'; }
 review_sources(){
-  "$PY" "$REPO/scripts/host/review-overworld-image-rotation.py" \
+  "$PY" "$REVIEWER" \
     --ceremony-directory "$1" --repository "$REPO" --sha "$2" \
     --receipt "$RECEIPT" --profile "$PROFILE" --manifest "$MANIFEST" \
     --image-observation "$IMAGE_OBSERVATION" \
@@ -101,11 +129,15 @@ if marker is None: raise SystemExit(1)
 print(json.dumps({'alias':alias,'fingerprint':fingerprint,'marker':marker},sort_keys=True,separators=(',',':')))
 PY"
 }
-if [ "${REVIEW_ONLY:-false}" = true ]; then
+if [ "$REVIEW_MODE" = true ]; then
   LIVE_PREVIOUS_IMAGE_FINGERPRINT=${ROTATION_LIVE_PREVIOUS_IMAGE_FINGERPRINT:?required for isolated review}
-  review_sources "${REVIEW_C:-$C}" "${REVIEW_SHA:-$SHA}"
+  review_sources "$C" "$SHA"
+  if [ -n "${ROTATION_TEST_SIGNER_COMMAND:-}" ]; then bash -c "$ROTATION_TEST_SIGNER_COMMAND"; fi
   exit
 fi
+FP=$(openssl pkey -pubin -in ~/.local/share/self-hosted-ci/reviewer/reviewer-public-key.pem -outform DER | shasum -a 256 | awk '{print $1}')
+SUPERVISOR_SHA=$(git -C "$REPO" show "${SHA}:scripts/host/run-health-supervisor.ps1" | shasum -a 256 | awk '{print $1}')
+[[ "$SUPERVISOR_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "invalid supervisor SHA-256" >&2; exit 1; }
 mkdir -p $C/measured
 START=${START:-1}
 BACKUP_DIR=$C/backup; BACKUP_FILE=$BACKUP_DIR/run-health-supervisor.before-$SHA.ps1; BACKUP_HASH=$BACKUP_FILE.sha256
@@ -143,16 +175,14 @@ PY")
 [[ "$LIVE_PREVIOUS_IMAGE_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]] || { log "verified live previous fingerprint is invalid"; exit 1; }
 CANDIDATE=$(derive_candidate) || { echo "REVIEW_FAIL build receipt does not match versioned profile"; exit 1; }
 IFS=$'\t' read -r CANDIDATE_ALIAS CANDIDATE_FINGERPRINT <<<"$CANDIDATE"
-collect_image_observation "$CANDIDATE_ALIAS" "$CANDIDATE_FINGERPRINT" >"$IMAGE_OBSERVATION" \
+IMAGE_OBSERVATION_TMP=$(mktemp "$C/.image-observation.XXXXXX")
+collect_image_observation "$CANDIDATE_ALIAS" "$CANDIDATE_FINGERPRINT" >"$IMAGE_OBSERVATION_TMP" \
   || { echo "REVIEW_FAIL published image observation failed"; exit 1; }
+chmod 600 "$IMAGE_OBSERVATION_TMP"
+mv -f "$IMAGE_OBSERVATION_TMP" "$IMAGE_OBSERVATION"
 review_sources "$C" "$SHA"
-ROTATION=$(python3 - "$RECEIPT" <<'PY'
-import json,sys
-v=json.load(open(sys.argv[1],encoding="utf-8"))
-print("\t".join((v["candidate_alias"],v["fingerprint"])))
-PY
-)
-IFS=$'\t' read -r IMAGE_ALIAS IMAGE_FINGERPRINT <<<"$ROTATION"
+IMAGE_ALIAS=$CANDIDATE_ALIAS
+IMAGE_FINGERPRINT=$CANDIDATE_FINGERPRINT
 PREVIOUS_IMAGE_FINGERPRINT=$LIVE_PREVIOUS_IMAGE_FINGERPRINT
 cd $REPO
 log "6 sign+bundle"; $PY scripts/host/sign-wsl-jit-boundary.py --input $C/measured/contract/runner-boundary-measured-v2.json --output $C/runner-boundary-v2.json --reviewer-private-key ~/.local/share/self-hosted-ci/reviewer/reviewer-private-key.pem >/dev/null; $PY scripts/host/build-wsl-jit-live-contract-tar.py signed --unsigned-tar $C/unsigned-$U.tar --signed-boundary $C/runner-boundary-v2.json --reviewer-public-key ~/.local/share/self-hosted-ci/reviewer/reviewer-public-key.pem --reviewer-key-fingerprint $FP --output $C/bundle.tar >/dev/null; BSHA=$(shasum -a 256 $C/bundle.tar | awk '{print $1}'); BBYTES=$(stat -f %z $C/bundle.tar); scp -q $C/bundle.tar 'desktop:C:/ProgramData/self-hosted-ci/package/artifacts/live-contract/live-contract-bundle.tar'
