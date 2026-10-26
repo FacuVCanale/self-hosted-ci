@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -80,6 +81,32 @@ class InstallAgentInterfacesTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, skill)
+
+    def test_canonical_installer_replaces_ceremony_and_receipts_previous_digest(self):
+        target = self.home / ".local/share/self-hosted-ci/ceremony.sh"
+        receipt = self.home / ".config/self-hosted-ci/rotation-ceremony-install.json"
+        target.parent.mkdir(parents=True)
+        previous = b"#!/bin/bash\nold ceremony\n"
+        target.write_bytes(previous)
+        sha = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+        result = self.run_installer(
+            "--public-sha", sha,
+            "--install-rotation-ceremony",
+            "--acknowledge-rotation-ceremony-replacement",
+            "--rotation-ceremony-target", str(target),
+            "--rotation-ceremony-receipt", str(receipt),
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        committed = subprocess.check_output([
+            "git", "-C", str(ROOT), "show",
+            f"{sha}:scripts/host/run-overworld-rotation-ceremony.sh",
+        ])
+        self.assertEqual(committed, target.read_bytes())
+        value = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertEqual(hashlib.sha256(previous).hexdigest(), value["previous_ceremony_sha256"])
+        self.assertEqual(hashlib.sha256(committed).hexdigest(), value["installed_ceremony_sha256"])
+        self.assertEqual(0o700, target.stat().st_mode & 0o777)
+        self.assertEqual(0o600, receipt.stat().st_mode & 0o777)
 
 
 if __name__ == "__main__":
